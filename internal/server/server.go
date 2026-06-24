@@ -1,0 +1,81 @@
+// Package server exposes the Roku Direct Publisher feed and a health endpoint.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/dwellingtw/backend/internal/feed"
+	"github.com/dwellingtw/backend/internal/property"
+)
+
+// feedSource provides the listings whose videos are ready.
+type feedSource interface {
+	ListReadyForFeed(ctx context.Context) ([]property.Property, error)
+}
+
+// Server serves the Roku feed.
+type Server struct {
+	repo         feedSource
+	providerName string
+	log          *slog.Logger
+	now          func() time.Time
+	srv          *http.Server
+}
+
+// New creates a Server bound to addr (e.g. ":8080").
+func New(addr, providerName string, repo feedSource, log *slog.Logger) *Server {
+	s := &Server{
+		repo:         repo,
+		providerName: providerName,
+		log:          log,
+		now:          time.Now,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /roku/feed.json", s.handleFeed)
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.srv = &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return s
+}
+
+// Start runs the HTTP server until it errors or is shut down.
+func (s *Server) Start() error {
+	if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// Shutdown gracefully stops the server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.srv.Shutdown(ctx)
+}
+
+func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
+	props, err := s.repo.ListReadyForFeed(r.Context())
+	if err != nil {
+		s.log.Error("feed query failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	doc := feed.Build(s.providerName, props, s.now())
+
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(doc); err != nil {
+		s.log.Error("feed encode failed", "error", err)
+	}
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
