@@ -5,3 +5,6 @@
 *.out
 .idea/
 .DS_Store
+
+# Subagent-driven-development scratch (progress ledger)
+.superpowers/
