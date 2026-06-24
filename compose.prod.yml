@@ -1,0 +1,16 @@
+# Production compose — app only. Postgres runs on the separate db box
+# (10.0.0.3) reached over the private network. Used on the web box at
+# /opt/dwellings/compose.prod.yml.
+services:
+  app:
+    image: ghcr.io/OWNER_PLACEHOLDER/dwellings:latest
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8080:8080"   # localhost only; nginx proxies public :80
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
