@@ -3,7 +3,7 @@
 # /opt/dwellings/compose.prod.yml.
 services:
   app:
-    image: ghcr.io/OWNER_PLACEHOLDER/dwellings:latest
+    image: ghcr.io/dwellings-mmikulic/dwellings:latest
     env_file:
       - .env
     ports:
