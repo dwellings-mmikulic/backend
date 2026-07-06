@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -23,9 +24,22 @@ func testLogger() *slog.Logger {
 
 // --- fakes ---
 
-type fakeSearch struct{ props []property.Property }
+type fakeSearch struct {
+	props []property.Property
+	// byLocation, when set, returns per-location props and records each queried
+	// location in order. Takes precedence over props.
+	byLocation map[string][]property.Property
+	queried    []string
+	mu         sync.Mutex
+}
 
-func (f fakeSearch) Search(context.Context, config.SearchCriteria) ([]property.Property, error) {
+func (f *fakeSearch) Search(_ context.Context, c config.SearchCriteria) ([]property.Property, error) {
+	if f.byLocation != nil {
+		f.mu.Lock()
+		f.queried = append(f.queried, c.Location)
+		f.mu.Unlock()
+		return f.byLocation[c.Location], nil
+	}
 	return f.props, nil
 }
 
@@ -90,9 +104,10 @@ func (r *fakeRenderer) Render(_ context.Context, _ *property.Property, imgs []st
 
 func baseConfig() *config.Config {
 	return &config.Config{
-		ImagesEnabled: true,
-		Video:         config.VideoConfig{Enabled: true, SecondsPerPhoto: 2},
-		Concurrency:   config.ConcurrencyConfig{Listings: 4, Images: 4},
+		ImagesEnabled:   true,
+		Video:           config.VideoConfig{Enabled: true, SecondsPerPhoto: 2},
+		Concurrency:     config.ConcurrencyConfig{Listings: 4, Images: 4},
+		SearchLocations: []string{"33950"},
 	}
 }
 
@@ -106,7 +121,7 @@ func TestUploadPhotos_PreservesOrder(t *testing.T) {
 		}
 		local = append(local, p)
 	}
-	s := New(baseConfig(), fakeSearch{}, &fakeUploader{}, &fakeStore{}, &fakeRenderer{}, testLogger())
+	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, &fakeRenderer{}, testLogger())
 
 	urls := s.uploadPhotos(context.Background(), "ZP1", local)
 	if len(urls) != 12 {
@@ -140,7 +155,7 @@ func TestRunCycle_AllListingsRenderedConcurrently(t *testing.T) {
 
 	store := &fakeStore{}
 	render := &fakeRenderer{}
-	s := New(baseConfig(), fakeSearch{props: props}, &fakeUploader{}, store, render, testLogger())
+	s := New(baseConfig(), &fakeSearch{props: props}, &fakeUploader{}, store, render, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -182,7 +197,7 @@ func TestRunCycle_SkipsExisting(t *testing.T) {
 	cfg.SkipExisting = true
 	// ZP0, ZP1, ZP2 already exist → should be skipped.
 	store := &fakeStore{existing: map[string]bool{"ZP0": true, "ZP1": true, "ZP2": true}}
-	s := New(cfg, fakeSearch{props: props}, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+	s := New(cfg, &fakeSearch{props: props}, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -193,5 +208,59 @@ func TestRunCycle_SkipsExisting(t *testing.T) {
 	}
 	if got := store.ready.Load(); got != 2 {
 		t.Errorf("video ready = %d, want 2", got)
+	}
+}
+
+func TestRunCycle_SearchesEachLocation(t *testing.T) {
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("\xff\xd8\xff\xd9"))
+	}))
+	defer imgSrv.Close()
+
+	// prop builds n listings for a location, with zpids prefixed by the location.
+	prop := func(loc string, n int) []property.Property {
+		var out []property.Property
+		for i := 0; i < n; i++ {
+			out = append(out, property.Property{
+				ZPID:      fmt.Sprintf("%s-ZP%d", loc, i),
+				ImageURLs: []string{imgSrv.URL + "/a.jpg"},
+			})
+		}
+		return out
+	}
+
+	search := &fakeSearch{byLocation: map[string][]property.Property{
+		"33950": prop("33950", 3),
+		"33948": prop("33948", 2),
+		"33983": prop("33983", 4),
+	}}
+
+	cfg := baseConfig()
+	cfg.SearchLocations = []string{"33950", "33948", "33983"}
+	store := &fakeStore{}
+	s := New(cfg, search, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every configured location must be searched, in order.
+	want := []string{"33950", "33948", "33983"}
+	if len(search.queried) != len(want) {
+		t.Fatalf("queried %v, want %v", search.queried, want)
+	}
+	for i, loc := range want {
+		if search.queried[i] != loc {
+			t.Errorf("queried[%d] = %q, want %q", i, search.queried[i], loc)
+		}
+	}
+
+	// All 3+2+4 = 9 listings across the three ZIPs must be processed.
+	if got := store.upserts.Load(); got != 9 {
+		t.Errorf("upserts = %d, want 9 (across all locations)", got)
+	}
+	if got := store.ready.Load(); got != 9 {
+		t.Errorf("video ready = %d, want 9", got)
 	}
 }

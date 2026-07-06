@@ -96,23 +96,46 @@ func (s *Scheduler) Stop() {
 	<-ctx.Done()
 }
 
-// RunCycle performs one full discover → process-each-listing cycle.
+// RunCycle performs one full cycle: for each configured location, discover
+// listings and process each. Locations run sequentially; a single location's
+// search failure is logged and skipped so the others still run. Tallies
+// aggregate across all locations.
 func (s *Scheduler) RunCycle(ctx context.Context) error {
 	start := time.Now()
-	s.log.Info("collection cycle started", "location", s.cfg.Search.Location)
+	s.log.Info("collection cycle started", "locations", s.cfg.SearchLocations)
 
-	props, err := s.zillow.Search(ctx, s.cfg.Search)
-	if err != nil {
-		return fmt.Errorf("search: %w", err)
+	var saved, skipped, failed atomic.Int64
+	for _, loc := range s.cfg.SearchLocations {
+		if ctx.Err() != nil {
+			break // shutting down — stop searching new locations
+		}
+		criteria := s.cfg.Search
+		criteria.Location = loc
+		s.runLocation(ctx, criteria, &saved, &skipped, &failed)
 	}
-	s.log.Info("properties discovered", "count", len(props),
-		"listing_concurrency", s.cfg.Concurrency.Listings)
+
+	s.log.Info("collection cycle finished",
+		"saved", saved.Load(), "skipped", skipped.Load(), "failed", failed.Load(),
+		"duration", time.Since(start).String())
+	return nil
+}
+
+// runLocation discovers and processes all listings for a single location,
+// adding to the shared tallies. A search failure is logged and returns without
+// affecting other locations.
+func (s *Scheduler) runLocation(ctx context.Context, criteria config.SearchCriteria, saved, skipped, failed *atomic.Int64) {
+	props, err := s.zillow.Search(ctx, criteria)
+	if err != nil {
+		s.log.Error("search failed", "location", criteria.Location, "error", err)
+		return
+	}
+	s.log.Info("properties discovered", "location", criteria.Location,
+		"count", len(props), "listing_concurrency", s.cfg.Concurrency.Listings)
 
 	// Process listings concurrently (each does a CPU-heavy render), bounded by
 	// LISTING_CONCURRENCY. No errgroup context: one listing's failure must not
 	// cancel its siblings, so each task handles its own error and we tally with
 	// atomics.
-	var saved, skipped, failed atomic.Int64
 	var g errgroup.Group
 	g.SetLimit(s.cfg.Concurrency.Listings)
 	for i := range props {
@@ -135,11 +158,6 @@ func (s *Scheduler) RunCycle(ctx context.Context) error {
 		})
 	}
 	_ = g.Wait()
-
-	s.log.Info("collection cycle finished",
-		"saved", saved.Load(), "skipped", skipped.Load(), "failed", failed.Load(),
-		"duration", time.Since(start).String())
-	return nil
 }
 
 // processListing handles a single property: download photos, upload images,

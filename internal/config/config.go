@@ -37,8 +37,14 @@ type Config struct {
 	BunnyStorageHost string // e.g. storage.bunnycdn.com or la.storage.bunnycdn.com
 	BunnyCDNBaseURL  string // public pull-zone base, e.g. https://dwellings.b-cdn.net
 
-	// Search criteria for property discovery
+	// Search criteria shared across all searched locations (home status, price,
+	// bedrooms, max results). The per-search Location is filled in from
+	// SearchLocations by the scheduler.
 	Search SearchCriteria
+
+	// SearchLocations is the set of locations (ZIP codes) searched each cycle,
+	// parsed from the comma-separated SEARCH_LOCATION env var.
+	SearchLocations []string
 
 	// Video rendering
 	Video VideoConfig
@@ -90,7 +96,7 @@ type SearchCriteria struct {
 func Load() (*Config, error) {
 	c := &Config{
 		DatabaseURL:      getenv("DATABASE_URL", ""),
-		CronSchedule:     getenv("CRON_SCHEDULE", "0 * * * *"), // hourly
+		CronSchedule:     getenv("CRON_SCHEDULE", "0 */12 * * *"), // every 12 hours
 		ZillowBaseURL:    getenv("ZILLOW_BASE_URL", "https://api.openwebninja.com/realtime-zillow-data"),
 		ZillowAPIKey:     getenv("ZILLOW_API_KEY", ""),
 		ImagesEnabled:    getenvBool("IMAGES_ENABLED", true),
@@ -100,13 +106,13 @@ func Load() (*Config, error) {
 		BunnyStorageHost: getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),
 		BunnyCDNBaseURL:  strings.TrimRight(getenv("BUNNY_CDN_BASE_URL", ""), "/"),
 		Search: SearchCriteria{
-			Location:    getenv("SEARCH_LOCATION", ""),
 			HomeStatus:  getenv("SEARCH_HOME_STATUS", "FOR_SALE"),
 			MinPrice:    getenvInt("SEARCH_MIN_PRICE", 0),
 			MaxPrice:    getenvInt("SEARCH_MAX_PRICE", 0),
 			MinBedrooms: getenvInt("SEARCH_MIN_BEDROOMS", 0),
 			MaxResults:  getenvInt("SEARCH_MAX_RESULTS", 50),
 		},
+		SearchLocations: parseLocations(getenv("SEARCH_LOCATION", "")),
 		Video: VideoConfig{
 			Enabled:         getenvBool("VIDEO_ENABLED", true),
 			SecondsPerPhoto: getenvInt("VIDEO_SECONDS_PER_PHOTO", 4),
@@ -146,7 +152,7 @@ func Load() (*Config, error) {
 			missing = append(missing, "BUNNY_CDN_BASE_URL")
 		}
 	}
-	if c.Search.Location == "" {
+	if len(c.SearchLocations) == 0 {
 		missing = append(missing, "SEARCH_LOCATION")
 	}
 	if len(missing) > 0 {
@@ -154,6 +160,18 @@ func Load() (*Config, error) {
 	}
 
 	return c, nil
+}
+
+// parseLocations splits a comma-separated location list (e.g. "33950,33948")
+// into trimmed, non-empty entries, preserving order.
+func parseLocations(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if loc := strings.TrimSpace(part); loc != "" {
+			out = append(out, loc)
+		}
+	}
+	return out
 }
 
 func getenv(key, def string) string {
