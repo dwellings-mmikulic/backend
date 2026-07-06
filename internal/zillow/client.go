@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -129,7 +130,14 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, dst any) error {
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("zillow API returned status %d", res.StatusCode)
+		// Include the API's error body (e.g. "Too Many Requests") so quota vs.
+		// rate-limit vs. auth failures are distinguishable from the logs alone.
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			return fmt.Errorf("zillow API returned status %d", res.StatusCode)
+		}
+		return fmt.Errorf("zillow API returned status %d: %s", res.StatusCode, msg)
 	}
 	if err := json.NewDecoder(res.Body).Decode(dst); err != nil {
 		return fmt.Errorf("decode zillow response: %w", err)
