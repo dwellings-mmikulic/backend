@@ -1,13 +1,17 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +24,28 @@ import (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// jpegBytes returns a real, decodable JPEG image.
+func jpegBytes(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 4, 4)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// jpegServer serves a real JPEG for any path.
+func jpegServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	data := jpegBytes(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(data)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // --- fakes ---
@@ -136,12 +162,7 @@ func TestUploadPhotos_PreservesOrder(t *testing.T) {
 }
 
 func TestRunCycle_AllListingsRenderedConcurrently(t *testing.T) {
-	// Image server returns a JPEG for any path.
-	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		_, _ = w.Write([]byte("\xff\xd8\xff\xd9")) // minimal JPEG marker bytes
-	}))
-	defer imgSrv.Close()
+	imgSrv := jpegServer(t)
 
 	var props []property.Property
 	for i := 0; i < 8; i++ {
@@ -179,11 +200,7 @@ func TestRunCycle_AllListingsRenderedConcurrently(t *testing.T) {
 }
 
 func TestRunCycle_SkipsExisting(t *testing.T) {
-	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		_, _ = w.Write([]byte("\xff\xd8\xff\xd9"))
-	}))
-	defer imgSrv.Close()
+	imgSrv := jpegServer(t)
 
 	var props []property.Property
 	for i := 0; i < 5; i++ {
@@ -212,11 +229,7 @@ func TestRunCycle_SkipsExisting(t *testing.T) {
 }
 
 func TestRunCycle_SearchesEachLocation(t *testing.T) {
-	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		_, _ = w.Write([]byte("\xff\xd8\xff\xd9"))
-	}))
-	defer imgSrv.Close()
+	imgSrv := jpegServer(t)
 
 	// prop builds n listings for a location, with zpids prefixed by the location.
 	prop := func(loc string, n int) []property.Property {
@@ -262,5 +275,50 @@ func TestRunCycle_SearchesEachLocation(t *testing.T) {
 	}
 	if got := store.ready.Load(); got != 9 {
 		t.Errorf("video ready = %d, want 9", got)
+	}
+}
+
+func TestDownloadPhotos_NormalizesWebPToJPEG(t *testing.T) {
+	webp, err := os.ReadFile("../imaging/testdata/opaque.webp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/webp")
+		_, _ = w.Write(webp)
+	}))
+	defer srv.Close()
+
+	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, &fakeRenderer{}, testLogger())
+	dir := t.TempDir()
+
+	local := s.downloadPhotos(context.Background(), []string{srv.URL + "/photo.webp"}, dir)
+	if len(local) != 1 {
+		t.Fatalf("got %d local photos, want 1", len(local))
+	}
+	if ext := filepath.Ext(local[0]); ext != ".jpg" {
+		t.Errorf("local file ext = %q, want .jpg (webp must be transcoded)", ext)
+	}
+	data, err := os.ReadFile(local[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(data)); err != nil {
+		t.Errorf("local file is not valid JPEG: %v", err)
+	}
+}
+
+func TestDownloadPhotos_SkipsUndecodableData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("<html>error page pretending to be an image</html>"))
+	}))
+	defer srv.Close()
+
+	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, &fakeRenderer{}, testLogger())
+
+	local := s.downloadPhotos(context.Background(), []string{srv.URL + "/broken.jpg"}, t.TempDir())
+	if len(local) != 0 {
+		t.Errorf("got %d local photos, want 0 (undecodable data must be skipped)", len(local))
 	}
 }

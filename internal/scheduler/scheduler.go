@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dwellingtw/backend/internal/config"
+	"github.com/dwellingtw/backend/internal/imaging"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/video"
 	"github.com/robfig/cron/v3"
@@ -263,12 +264,19 @@ func (s *Scheduler) downloadPhotos(ctx context.Context, srcURLs []string, workDi
 	g.SetLimit(s.cfg.Concurrency.Images)
 	for idx, src := range srcURLs {
 		g.Go(func() error {
-			data, contentType, err := s.download(ctx, src)
+			data, err := s.download(ctx, src)
 			if err != nil {
 				s.log.Warn("image download failed", "src", src, "error", err)
 				return nil
 			}
-			dest := filepath.Join(workDir, strconv.Itoa(idx)+imageExt(src, contentType))
+			// Guarantee JPEG/PNG: pass through compliant images untouched,
+			// transcode anything else, drop undecodable responses.
+			data, ext, _, err := imaging.Normalize(data)
+			if err != nil {
+				s.log.Warn("image normalize failed", "src", src, "error", err)
+				return nil
+			}
+			dest := filepath.Join(workDir, strconv.Itoa(idx)+ext)
 			if err := os.WriteFile(dest, data, 0o644); err != nil {
 				s.log.Warn("image write failed", "dest", dest, "error", err)
 				return nil
@@ -320,47 +328,27 @@ func compact(in []string) []string {
 	return out
 }
 
-func (s *Scheduler) download(ctx context.Context, src string) ([]byte, string, error) {
+func (s *Scheduler) download(ctx context.Context, src string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	res, err := s.http.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("status %d", res.StatusCode)
+		return nil, fmt.Errorf("status %d", res.StatusCode)
 	}
-	data, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, "", err
-	}
-	return data, res.Header.Get("Content-Type"), nil
+	return io.ReadAll(res.Body)
 }
 
-func imageExt(src, contentType string) string {
-	if ext := path.Ext(strings.SplitN(path.Base(src), "?", 2)[0]); ext != "" {
-		return ext
-	}
-	switch {
-	case strings.Contains(contentType, "png"):
-		return ".png"
-	case strings.Contains(contentType, "webp"):
-		return ".webp"
-	default:
-		return ".jpg"
-	}
-}
-
+// contentTypeForExt maps a local photo extension to its upload content type.
+// downloadPhotos normalizes every photo to .jpg or .png before this runs.
 func contentTypeForExt(ext string) string {
-	switch strings.ToLower(ext) {
-	case ".png":
+	if strings.ToLower(ext) == ".png" {
 		return "image/png"
-	case ".webp":
-		return "image/webp"
-	default:
-		return "image/jpeg"
 	}
+	return "image/jpeg"
 }
