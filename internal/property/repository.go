@@ -2,9 +2,11 @@ package property
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -121,4 +123,133 @@ func (r *Repository) Exists(ctx context.Context, zpid string) (bool, error) {
 		return false, fmt.Errorf("check property exists zpid=%s: %w", zpid, err)
 	}
 	return exists, nil
+}
+
+// ErrNotFound is returned when a requested property does not exist.
+var ErrNotFound = errors.New("property not found")
+
+// List returns one page of properties matching f, the total number of rows
+// matching the filter (ignoring pagination), and whether another page exists.
+func (r *Repository) List(ctx context.Context, f Filter) ([]Property, int, bool, error) {
+	countQ, countArgs := buildCountQuery(f)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQ, countArgs...).Scan(&total); err != nil {
+		return nil, 0, false, fmt.Errorf("count properties: %w", err)
+	}
+
+	q, args := buildListQuery(f)
+	rows, err := r.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("list properties: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Property
+	for rows.Next() {
+		var p Property
+		if err := rows.Scan(
+			&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
+			&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft, &p.PropertyType,
+			&p.ImageURLs, &p.CreatedAt,
+		); err != nil {
+			return nil, 0, false, fmt.Errorf("scan property row: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, false, fmt.Errorf("iterate property rows: %w", err)
+	}
+
+	hasMore := false
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
+		hasMore = true
+	}
+	return out, total, hasMore, nil
+}
+
+// GetByZPID returns the full property record, or ErrNotFound.
+func (r *Repository) GetByZPID(ctx context.Context, zpid string) (*Property, error) {
+	const q = `
+SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
+       COALESCE(state,''), COALESCE(zip,''), COALESCE(bedrooms,0),
+       COALESCE(bathrooms,0), COALESCE(home_size_sqft,0),
+       COALESCE(lot_size_sqft,0), COALESCE(detail_url,''), image_urls,
+       COALESCE(video_url,''),
+       property_type, description, year_built, heating, cooling, garage,
+       hoa_fee_monthly, mls_number, listing_status,
+       agent_name, agent_phone, agent_brokerage, latitude, longitude,
+       details_fetched_at, created_at, updated_at
+  FROM properties WHERE zpid = $1`
+
+	var p Property
+	err := r.pool.QueryRow(ctx, q, zpid).Scan(
+		&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
+		&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft,
+		&p.LotSizeSqft, &p.DetailURL, &p.ImageURLs,
+		&p.VideoURL,
+		&p.PropertyType, &p.Description, &p.YearBuilt, &p.Heating, &p.Cooling, &p.Garage,
+		&p.HOAFeeMonthly, &p.MLSNumber, &p.ListingStatus,
+		&p.AgentName, &p.AgentPhone, &p.AgentBrokerage, &p.Latitude, &p.Longitude,
+		&p.DetailsFetchedAt, &p.CreatedAt, &p.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get property zpid=%s: %w", zpid, err)
+	}
+	return &p, nil
+}
+
+// ListZPIDsMissingDetails returns up to limit zpids that have never been
+// enriched, oldest first (so backfill drains deterministically).
+func (r *Repository) ListZPIDsMissingDetails(ctx context.Context, limit int) ([]string, error) {
+	const q = `
+SELECT zpid FROM properties
+ WHERE details_fetched_at IS NULL
+ ORDER BY created_at ASC
+ LIMIT $1`
+	rows, err := r.pool.Query(ctx, q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list zpids missing details: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var zpid string
+		if err := rows.Scan(&zpid); err != nil {
+			return nil, fmt.Errorf("scan zpid: %w", err)
+		}
+		out = append(out, zpid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate zpid rows: %w", err)
+	}
+	return out, nil
+}
+
+// SetDetails stores the enrichment fields and raw API response, and stamps
+// details_fetched_at so the row is never enriched again. raw may be nil
+// (e.g. a definitive not-found still marks the row as fetched).
+func (r *Repository) SetDetails(ctx context.Context, zpid string, d *Details, raw []byte) error {
+	const q = `
+UPDATE properties SET
+    property_type = $2, description = $3, year_built = $4, heating = $5,
+    cooling = $6, garage = $7, hoa_fee_monthly = $8, mls_number = $9,
+    listing_status = $10, agent_name = $11, agent_phone = $12,
+    agent_brokerage = $13, latitude = $14, longitude = $15,
+    details_raw = $16, details_fetched_at = now(), updated_at = now()
+ WHERE zpid = $1`
+	_, err := r.pool.Exec(ctx, q, zpid,
+		d.PropertyType, d.Description, d.YearBuilt, d.Heating,
+		d.Cooling, d.Garage, d.HOAFeeMonthly, d.MLSNumber,
+		d.ListingStatus, d.AgentName, d.AgentPhone,
+		d.AgentBrokerage, d.Latitude, d.Longitude, raw,
+	)
+	if err != nil {
+		return fmt.Errorf("set details zpid=%s: %w", zpid, err)
+	}
+	return nil
 }
