@@ -31,6 +31,10 @@ type Config struct {
 	// are updated each cycle (refreshing price, photos, etc.).
 	SkipExisting bool
 
+	// DetailsPerCycle caps how many properties get a one-time details-API
+	// enrichment call per cycle (protects API quota). <= 0 disables enrichment.
+	DetailsPerCycle int
+
 	// Bunny CDN storage
 	BunnyStorageZone string
 	BunnyAPIKey      string
@@ -101,6 +105,7 @@ func Load() (*Config, error) {
 		ZillowAPIKey:     getenv("ZILLOW_API_KEY", ""),
 		ImagesEnabled:    getenvBool("IMAGES_ENABLED", true),
 		SkipExisting:     getenvBool("SKIP_EXISTING", true),
+		DetailsPerCycle:  getenvInt("DETAILS_PER_CYCLE", 50),
 		BunnyStorageZone: getenv("BUNNY_STORAGE_ZONE", ""),
 		BunnyAPIKey:      getenv("BUNNY_API_KEY", ""),
 		BunnyStorageHost: getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),

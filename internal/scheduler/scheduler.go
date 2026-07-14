@@ -3,6 +3,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,13 +19,15 @@ import (
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/video"
+	"github.com/dwellingtw/backend/internal/zillow"
 	"github.com/robfig/cron/v3"
 	"golang.org/x/sync/errgroup"
 )
 
-// zillowSearcher discovers properties matching criteria.
-type zillowSearcher interface {
+// zillowAPI discovers properties and fetches their one-time details record.
+type zillowAPI interface {
 	Search(ctx context.Context, s config.SearchCriteria) ([]property.Property, error)
+	PropertyDetails(ctx context.Context, zpid string) (*property.Details, []byte, error)
 }
 
 // uploader stores content and returns its public CDN URL.
@@ -38,6 +41,8 @@ type store interface {
 	Upsert(ctx context.Context, p *property.Property) error
 	SetVideoReady(ctx context.Context, zpid, videoURL, contentHash string, durationSecs int) error
 	SetVideoFailed(ctx context.Context, zpid string) error
+	ListZPIDsMissingDetails(ctx context.Context, limit int) ([]string, error)
+	SetDetails(ctx context.Context, zpid string, d *property.Details, raw []byte) error
 }
 
 // Renderer turns a property + local photos into an MP4, returning its duration.
@@ -48,7 +53,7 @@ type Renderer interface {
 // Scheduler wires the collection cycle together and runs it on a cron schedule.
 type Scheduler struct {
 	cfg    *config.Config
-	zillow zillowSearcher
+	zillow zillowAPI
 	bunny  uploader
 	repo   store
 	render Renderer
@@ -58,7 +63,7 @@ type Scheduler struct {
 }
 
 // New creates a Scheduler. render may be nil when video rendering is disabled.
-func New(cfg *config.Config, z zillowSearcher, b uploader, repo store, render Renderer, log *slog.Logger) *Scheduler {
+func New(cfg *config.Config, z zillowAPI, b uploader, repo store, render Renderer, log *slog.Logger) *Scheduler {
 	return &Scheduler{
 		cfg:    cfg,
 		zillow: z,
@@ -113,6 +118,8 @@ func (s *Scheduler) RunCycle(ctx context.Context) error {
 		criteria.Location = loc
 		s.runLocation(ctx, criteria, &saved, &skipped, &failed)
 	}
+
+	s.enrichDetails(ctx)
 
 	s.log.Info("collection cycle finished",
 		"saved", saved.Load(), "skipped", skipped.Load(), "failed", failed.Load(),
@@ -363,4 +370,52 @@ func contentTypeForExt(ext string) string {
 	default:
 		return "image/jpeg"
 	}
+}
+
+// enrichDetails fetches the one-time details record for rows that have never
+// been enriched, capped per cycle to protect API quota. A transient failure
+// is logged and left NULL so the row retries next cycle; a definitive
+// not-found is recorded with empty details so dead zpids don't retry forever.
+func (s *Scheduler) enrichDetails(ctx context.Context) {
+	if s.cfg.DetailsPerCycle <= 0 {
+		return
+	}
+	zpids, err := s.repo.ListZPIDsMissingDetails(ctx, s.cfg.DetailsPerCycle)
+	if err != nil {
+		s.log.Error("list zpids missing details failed", "error", err)
+		return
+	}
+	if len(zpids) == 0 {
+		return
+	}
+
+	var fetched, failed int
+	for _, zpid := range zpids {
+		if ctx.Err() != nil {
+			break // shutting down
+		}
+		d, raw, err := s.zillow.PropertyDetails(ctx, zpid)
+		switch {
+		case errors.Is(err, zillow.ErrDetailsNotFound):
+			if err := s.repo.SetDetails(ctx, zpid, &property.Details{}, nil); err != nil {
+				s.log.Error("record empty details failed", "zpid", zpid, "error", err)
+				failed++
+				continue
+			}
+			s.log.Warn("details not found, marked fetched", "zpid", zpid)
+			fetched++
+		case err != nil:
+			s.log.Warn("details fetch failed, will retry next cycle", "zpid", zpid, "error", err)
+			failed++
+		default:
+			if err := s.repo.SetDetails(ctx, zpid, d, raw); err != nil {
+				s.log.Error("store details failed", "zpid", zpid, "error", err)
+				failed++
+				continue
+			}
+			fetched++
+		}
+	}
+	s.log.Info("details enrichment finished",
+		"fetched", fetched, "failed", failed, "cap", s.cfg.DetailsPerCycle)
 }
