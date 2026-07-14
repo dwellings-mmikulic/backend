@@ -1,0 +1,26 @@
+{
+  "status": "OK",
+  "request_id": "test-fixture",
+  "parameters": { "zpid": "43590635" },
+  "data": {
+    "zpid": "43590635",
+    "homeType": "SINGLE_FAMILY",
+    "homeStatus": "FOR_SALE",
+    "description": "Stunning modern home with breathtaking Hill Country views.",
+    "yearBuilt": 2021,
+    "monthlyHoaFee": 125,
+    "latitude": 30.2672,
+    "longitude": -97.7431,
+    "resoFacts": {
+      "heating": ["Central"],
+      "cooling": ["Central Air", "Ceiling Fan(s)"],
+      "garageParkingCapacity": 2
+    },
+    "attributionInfo": {
+      "agentName": "Hill Country Dream Realty",
+      "agentPhoneNumber": "512-555-0123",
+      "brokerName": "Dream Brokerage LLC",
+      "mlsId": "1234567"
+    }
+  }
+}
