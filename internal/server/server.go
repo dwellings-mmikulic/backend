@@ -1,4 +1,5 @@
-// Package server exposes the Roku Direct Publisher feed and a health endpoint.
+// Package server exposes the Roku Direct Publisher feed, the public listings
+// API, and a health endpoint.
 package server
 
 import (
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dwellingtw/backend/internal/api"
 	"github.com/dwellingtw/backend/internal/feed"
 	"github.com/dwellingtw/backend/internal/property"
 )
@@ -26,8 +28,9 @@ type Server struct {
 	srv          *http.Server
 }
 
-// New creates a Server bound to addr (e.g. ":8080").
-func New(addr, providerName string, repo feedSource, log *slog.Logger) *Server {
+// New creates a Server bound to addr (e.g. ":8080"). publicAPI may be nil
+// (e.g. in tests that only exercise the feed).
+func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *slog.Logger) *Server {
 	s := &Server{
 		repo:         repo,
 		providerName: providerName,
@@ -37,6 +40,9 @@ func New(addr, providerName string, repo feedSource, log *slog.Logger) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /roku/feed.json", s.handleFeed)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	if publicAPI != nil {
+		publicAPI.Register(mux)
+	}
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
