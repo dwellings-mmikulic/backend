@@ -11,6 +11,26 @@ const (
 	VideoFailed  VideoStatus = "failed"
 )
 
+// Details holds the enrichment fields fetched once per property from the
+// Zillow property-details API. All fields are pointers: nil means unknown
+// (not yet enriched, or absent from the API response).
+type Details struct {
+	PropertyType   *string
+	Description    *string
+	YearBuilt      *int
+	Heating        *string
+	Cooling        *string
+	Garage         *string
+	HOAFeeMonthly  *int
+	MLSNumber      *string
+	ListingStatus  *string
+	AgentName      *string
+	AgentPhone     *string
+	AgentBrokerage *string
+	Latitude       *float64
+	Longitude      *float64
+}
+
 // Property is the domain model for a collected Zillow listing.
 type Property struct {
 	ID           int64
@@ -26,6 +46,9 @@ type Property struct {
 	Bathrooms    float64
 	DetailURL    string   // Zillow listing URL (for QR code + Roku feed)
 	ImageURLs    []string // Bunny CDN URLs
+
+	Details
+	DetailsFetchedAt *time.Time // nil = enrichment not yet attempted/succeeded
 
 	// Video / Roku feed state.
 	VideoURL          string
