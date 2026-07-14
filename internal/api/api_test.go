@@ -263,3 +263,27 @@ func TestPublicHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicHeaders_ErrorsNotCached(t *testing.T) {
+	cases := []struct {
+		name   string
+		repo   Repo
+		target string
+	}{
+		{"404", &fakeRepo{detailErr: property.ErrNotFound}, "/api/v1/properties/NOPE"},
+		{"400", &fakeRepo{}, "/api/v1/properties?sort=bogus"},
+	}
+	for _, c := range cases {
+		rec := serve(t, c.repo, c.target)
+		h := rec.Header()
+		if h.Get("Access-Control-Allow-Origin") != "*" {
+			t.Errorf("%s: missing CORS header", c.name)
+		}
+		if h.Get("Content-Type") != "application/json" {
+			t.Errorf("%s: Content-Type = %q", c.name, h.Get("Content-Type"))
+		}
+		if h.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: Cache-Control = %q, want %q", c.name, h.Get("Cache-Control"), "no-store")
+		}
+	}
+}

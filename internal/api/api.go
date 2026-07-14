@@ -37,7 +37,6 @@ func (a *API) Register(mux *http.ServeMux) {
 func (a *API) public(h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Cache-Control", "public, max-age=300")
 		w.Header().Set("Content-Type", "application/json")
 		h(w, r)
 	})
@@ -96,6 +95,11 @@ func cursorForLast(sort property.Sort, last *property.Property) cursor {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	if status < 400 {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	} else {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

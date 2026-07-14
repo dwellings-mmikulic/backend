@@ -59,8 +59,8 @@ Bunny → store video_url + status.
 Public, read-only listings API. No auth required.
 
 - `GET /api/v1/properties` — paginated browse list. Query params (all optional):
-  - `zip`, `city`, `state`, `property_type` — exact-match filters.
-  - `min_price`, `max_price` — price range (cents-free integer, e.g. `500000`).
+  - `zip`, `property_type` — exact-match filters. `city`, `state` — case-insensitive match.
+  - `min_price`, `max_price` — price range (whole dollars, e.g. `500000`).
   - `min_beds`, `min_baths` — minimum bedrooms/bathrooms.
   - `min_sqft`, `max_sqft` — home size range (sq ft).
   - `sort` — `newest` (default), `price_asc`, or `price_desc`.
