@@ -99,6 +99,48 @@ func (c *Client) Search(ctx context.Context, s config.SearchCriteria) ([]propert
 	return out, nil
 }
 
+// Usage reports the account's current quota for this API, queried from the
+// provider's /usage endpoint (which lives at the API host root, not under the
+// per-API base path). The api_id is derived from the base URL's last path
+// segment, e.g. ".../realtime-zillow-data" → "realtime_zillow_data".
+type Usage struct {
+	Plan struct {
+		Nickname string `json:"nickname"`
+		IsFree   bool   `json:"is_free"`
+	} `json:"plan"`
+	Status string        `json:"status"` // "ok" | "exceeded" | ...
+	Quotas []QuotaMetric `json:"quotas"`
+}
+
+// QuotaMetric is one named quota (e.g. "Requests") within a Usage report.
+type QuotaMetric struct {
+	Name      string `json:"name"`
+	Limit     int    `json:"limit"`
+	Used      int    `json:"used"`
+	Remaining int    `json:"remaining"`
+	ResetAt   string `json:"reset_at"`
+}
+
+func (c *Client) Usage(ctx context.Context) (*Usage, error) {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse base URL: %w", err)
+	}
+	apiID := strings.ReplaceAll(strings.Trim(base.Path, "/"), "-", "_")
+	if apiID == "" {
+		return nil, fmt.Errorf("cannot derive api_id from base URL %q", c.baseURL)
+	}
+	endpoint := fmt.Sprintf("%s://%s/usage?api_id=%s", base.Scheme, base.Host, url.QueryEscape(apiID))
+
+	var env struct {
+		Data Usage `json:"data"`
+	}
+	if err := c.getJSON(ctx, endpoint, &env); err != nil {
+		return nil, err
+	}
+	return &env.Data, nil
+}
+
 func (c *Client) searchPage(ctx context.Context, s config.SearchCriteria, page int) ([]listing, error) {
 	q := url.Values{}
 	q.Set("location", s.Location)

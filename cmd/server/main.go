@@ -49,6 +49,7 @@ func run(log *slog.Logger) error {
 	log.Info("database ready")
 
 	zillowClient := zillow.New(cfg.ZillowBaseURL, cfg.ZillowAPIKey, cfg.HTTPTimeout)
+	logZillowQuota(ctx, zillowClient, log)
 	bunnyClient := bunny.New(cfg.BunnyStorageZone, cfg.BunnyAPIKey, cfg.BunnyStorageHost, cfg.BunnyCDNBaseURL, cfg.BunnyTimeout)
 	repo := property.NewRepository(pool)
 
@@ -83,6 +84,34 @@ func run(log *slog.Logger) error {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
 	return nil
+}
+
+// logZillowQuota queries the provider's usage endpoint and logs the remaining
+// request quota at startup so quota exhaustion is visible without SSH. Failures
+// are logged as a warning and never block startup.
+func logZillowQuota(ctx context.Context, z *zillow.Client, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	usage, err := z.Usage(ctx)
+	if err != nil {
+		log.Warn("zillow quota check failed", "error", err)
+		return
+	}
+	attrs := []any{"plan", usage.Plan.Nickname, "status", usage.Status}
+	for _, q := range usage.Quotas {
+		attrs = append(attrs,
+			q.Name+"_limit", q.Limit,
+			q.Name+"_used", q.Used,
+			q.Name+"_remaining", q.Remaining,
+			q.Name+"_reset_at", q.ResetAt,
+		)
+	}
+	if usage.Status == "exceeded" {
+		log.Warn("zillow quota exceeded", attrs...)
+	} else {
+		log.Info("zillow quota", attrs...)
+	}
 }
 
 // rendererOrNil returns an interface-nil when the concrete renderer is nil, so
