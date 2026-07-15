@@ -20,6 +20,11 @@ import (
 	"github.com/dwellingtw/backend/internal/zillow"
 )
 
+// @title        Dwellings API
+// @version      1.0
+// @description  Public read-only API for browsing Dwellings property listings.
+// @host         api.dwellings.tv
+// @BasePath     /
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 

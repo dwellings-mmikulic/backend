@@ -42,6 +42,29 @@ func (a *API) public(h http.HandlerFunc) http.Handler {
 	})
 }
 
+// handleList serves the browse endpoint.
+//
+//	@Summary		List properties
+//	@Description	Browse active listings with filters, sorting, and cursor pagination. Pass the returned next_cursor to fetch the following page.
+//	@Tags			properties
+//	@Produce		json
+//	@Param			zip				query		string	false	"Filter by ZIP code"
+//	@Param			city			query		string	false	"Filter by city"
+//	@Param			state			query		string	false	"Filter by state code (e.g. FL)"
+//	@Param			property_type	query		string	false	"Filter by property type"
+//	@Param			min_price		query		integer	false	"Minimum price in USD"
+//	@Param			max_price		query		integer	false	"Maximum price in USD"
+//	@Param			min_beds		query		integer	false	"Minimum bedrooms"
+//	@Param			min_baths		query		number	false	"Minimum bathrooms"
+//	@Param			min_sqft		query		integer	false	"Minimum home size in sqft"
+//	@Param			max_sqft		query		integer	false	"Maximum home size in sqft"
+//	@Param			sort			query		string	false	"Sort order"	Enums(newest, price_asc, price_desc)	default(newest)
+//	@Param			limit			query		integer	false	"Page size (1-100)"	default(24)
+//	@Param			cursor			query		string	false	"Opaque pagination cursor from a previous response's next_cursor"
+//	@Success		200				{object}	listResponse
+//	@Failure		400				{object}	errorResponse
+//	@Failure		500				{object}	errorResponse
+//	@Router			/api/v1/properties [get]
 func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 	f, err := parseListParams(r.URL.Query())
 	if err != nil {
@@ -67,6 +90,17 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleDetail serves the detail endpoint.
+//
+//	@Summary		Get property detail
+//	@Description	Full detail-screen payload for one listing, addressed by its Zillow property ID.
+//	@Tags			properties
+//	@Produce		json
+//	@Param			zpid	path		string	true	"Zillow property ID"
+//	@Success		200		{object}	detailResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Router			/api/v1/properties/{zpid} [get]
 func (a *API) handleDetail(w http.ResponseWriter, r *http.Request) {
 	p, err := a.repo.GetByZPID(r.Context(), r.PathValue("zpid"))
 	if errors.Is(err, property.ErrNotFound) {
@@ -104,6 +138,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// errorResponse is the body of every non-2xx response.
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	writeJSON(w, status, errorResponse{Error: msg})
 }

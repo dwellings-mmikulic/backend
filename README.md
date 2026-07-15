@@ -52,11 +52,14 @@ Bunny → store video_url + status.
 
 - `GET /roku/feed.json` — Roku Direct Publisher feed of all `ready` videos.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
+- `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
 - `GET /healthz` — liveness.
 
 ## API
 
 Public, read-only listings API. No auth required.
+
+Interactive docs: [https://api.dwellings.tv/swagger/index.html](https://api.dwellings.tv/swagger/index.html). The spec is generated from handler annotations with [swaggo/swag](https://github.com/swaggo/swag) — run `make swagger` after changing the API surface and commit the regenerated `docs/`.
 
 - `GET /api/v1/properties` — paginated browse list. Query params (all optional):
   - `zip`, `property_type` — exact-match filters. `city`, `state` — case-insensitive match.
