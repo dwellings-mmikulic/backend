@@ -1,0 +1,230 @@
+basePath: /
+definitions:
+  api.agentDTO:
+    properties:
+      brokerage:
+        type: string
+      name:
+        type: string
+      phone:
+        type: string
+    type: object
+  api.detailResponse:
+    properties:
+      address:
+        type: string
+      agent:
+        $ref: '#/definitions/api.agentDTO'
+      bathrooms:
+        type: number
+      bedrooms:
+        type: integer
+      city:
+        type: string
+      cooling:
+        type: string
+      created_at:
+        type: string
+      description:
+        type: string
+      detail_url:
+        type: string
+      garage:
+        type: string
+      heating:
+        type: string
+      hoa_fee_monthly:
+        type: integer
+      home_size_sqft:
+        type: integer
+      image_urls:
+        items:
+          type: string
+        type: array
+      latitude:
+        type: number
+      listing_status:
+        type: string
+      longitude:
+        type: number
+      lot_size_acres:
+        type: number
+      lot_size_sqft:
+        type: integer
+      mls_number:
+        type: string
+      price:
+        type: integer
+      property_type:
+        type: string
+      state:
+        type: string
+      updated_at:
+        type: string
+      video_url:
+        type: string
+      year_built:
+        type: integer
+      zip:
+        type: string
+      zpid:
+        type: string
+    type: object
+  api.errorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+  api.listItem:
+    properties:
+      address:
+        type: string
+      bathrooms:
+        type: number
+      bedrooms:
+        type: integer
+      city:
+        type: string
+      home_size_sqft:
+        type: integer
+      image_url:
+        type: string
+      price:
+        type: integer
+      property_type:
+        type: string
+      state:
+        type: string
+      zip:
+        type: string
+      zpid:
+        type: string
+    type: object
+  api.listResponse:
+    properties:
+      next_cursor:
+        type: string
+      results:
+        items:
+          $ref: '#/definitions/api.listItem'
+        type: array
+      total:
+        type: integer
+    type: object
+host: api.dwellings.tv
+info:
+  contact: {}
+  description: Public read-only API for browsing Dwellings property listings.
+  title: Dwellings API
+  version: "1.0"
+paths:
+  /api/v1/properties:
+    get:
+      description: Browse active listings with filters, sorting, and cursor pagination.
+        Pass the returned next_cursor to fetch the following page.
+      parameters:
+      - description: Filter by ZIP code
+        in: query
+        name: zip
+        type: string
+      - description: Filter by city
+        in: query
+        name: city
+        type: string
+      - description: Filter by state code (e.g. FL)
+        in: query
+        name: state
+        type: string
+      - description: Filter by property type
+        in: query
+        name: property_type
+        type: string
+      - description: Minimum price in USD
+        in: query
+        name: min_price
+        type: integer
+      - description: Maximum price in USD
+        in: query
+        name: max_price
+        type: integer
+      - description: Minimum bedrooms
+        in: query
+        name: min_beds
+        type: integer
+      - description: Minimum bathrooms
+        in: query
+        name: min_baths
+        type: number
+      - description: Minimum home size in sqft
+        in: query
+        name: min_sqft
+        type: integer
+      - description: Maximum home size in sqft
+        in: query
+        name: max_sqft
+        type: integer
+      - default: newest
+        description: Sort order
+        enum:
+        - newest
+        - price_asc
+        - price_desc
+        in: query
+        name: sort
+        type: string
+      - default: 24
+        description: Page size (1-100)
+        in: query
+        name: limit
+        type: integer
+      - description: Opaque pagination cursor from a previous response's next_cursor
+        in: query
+        name: cursor
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.listResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResponse'
+      summary: List properties
+      tags:
+      - properties
+  /api/v1/properties/{zpid}:
+    get:
+      description: Full detail-screen payload for one listing, addressed by its Zillow
+        property ID.
+      parameters:
+      - description: Zillow property ID
+        in: path
+        name: zpid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.detailResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResponse'
+      summary: Get property detail
+      tags:
+      - properties
+swagger: "2.0"
