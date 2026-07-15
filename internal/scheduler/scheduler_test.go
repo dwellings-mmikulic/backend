@@ -3,6 +3,7 @@ package scheduler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/property"
+	"github.com/dwellingtw/backend/internal/zillow"
 )
 
 func testLogger() *slog.Logger {
@@ -56,6 +58,8 @@ type fakeSearch struct {
 	// location in order. Takes precedence over props.
 	byLocation map[string][]property.Property
 	queried    []string
+	// detailsErr, when set for a zpid, is returned by PropertyDetails.
+	detailsErr map[string]error
 	mu         sync.Mutex
 }
 
@@ -67,6 +71,14 @@ func (f *fakeSearch) Search(_ context.Context, c config.SearchCriteria) ([]prope
 		return f.byLocation[c.Location], nil
 	}
 	return f.props, nil
+}
+
+func (f *fakeSearch) PropertyDetails(_ context.Context, zpid string) (*property.Details, []byte, error) {
+	if err := f.detailsErr[zpid]; err != nil {
+		return nil, nil, err
+	}
+	pt := "SINGLE_FAMILY"
+	return &property.Details{PropertyType: &pt}, []byte(`{"status":"OK"}`), nil
 }
 
 // fakeUploader records peak concurrency and echoes the path into the URL so
@@ -91,6 +103,11 @@ func (u *fakeUploader) Upload(_ context.Context, path string, content io.Reader,
 type fakeStore struct {
 	upserts, ready, failed atomic.Int64
 	existing               map[string]bool
+	// missingDetails is what ListZPIDsMissingDetails returns (up to limit).
+	missingDetails []string
+	mu             sync.Mutex
+	detailsSet     []string // zpids passed to SetDetails, in order
+	detailsGot     map[string]*property.Details
 }
 
 func (s *fakeStore) Exists(_ context.Context, zpid string) (bool, error) {
@@ -108,6 +125,24 @@ func (s *fakeStore) SetVideoReady(context.Context, string, string, string, int) 
 }
 func (s *fakeStore) SetVideoFailed(context.Context, string) error {
 	s.failed.Add(1)
+	return nil
+}
+
+func (s *fakeStore) ListZPIDsMissingDetails(_ context.Context, limit int) ([]string, error) {
+	if len(s.missingDetails) > limit {
+		return s.missingDetails[:limit], nil
+	}
+	return s.missingDetails, nil
+}
+
+func (s *fakeStore) SetDetails(_ context.Context, zpid string, d *property.Details, _ []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.detailsSet = append(s.detailsSet, zpid)
+	if s.detailsGot == nil {
+		s.detailsGot = map[string]*property.Details{}
+	}
+	s.detailsGot[zpid] = d
 	return nil
 }
 
@@ -320,5 +355,72 @@ func TestDownloadPhotos_SkipsUndecodableData(t *testing.T) {
 	local := s.downloadPhotos(context.Background(), []string{srv.URL + "/broken.jpg"}, t.TempDir())
 	if len(local) != 0 {
 		t.Errorf("got %d local photos, want 0 (undecodable data must be skipped)", len(local))
+	}
+}
+
+func TestRunCycle_EnrichesDetailsUpToCap(t *testing.T) {
+	cfg := baseConfig()
+	cfg.SearchLocations = nil // no search work — isolate enrichment
+	cfg.DetailsPerCycle = 2
+
+	store := &fakeStore{missingDetails: []string{"Z1", "Z2", "Z3"}}
+	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.detailsSet) != 2 {
+		t.Fatalf("SetDetails calls = %v, want exactly the 2-cap", store.detailsSet)
+	}
+	if store.detailsSet[0] != "Z1" || store.detailsSet[1] != "Z2" {
+		t.Errorf("enriched %v, want [Z1 Z2] (oldest first)", store.detailsSet)
+	}
+	if d := store.detailsGot["Z1"]; d == nil || d.PropertyType == nil || *d.PropertyType != "SINGLE_FAMILY" {
+		t.Errorf("details not stored: %+v", store.detailsGot["Z1"])
+	}
+}
+
+func TestRunCycle_EnrichmentDisabledWhenCapZero(t *testing.T) {
+	cfg := baseConfig()
+	cfg.SearchLocations = nil
+	cfg.DetailsPerCycle = 0
+
+	store := &fakeStore{missingDetails: []string{"Z1"}}
+	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.detailsSet) != 0 {
+		t.Errorf("enrichment ran with cap 0: %v", store.detailsSet)
+	}
+}
+
+func TestRunCycle_EnrichmentErrorHandling(t *testing.T) {
+	cfg := baseConfig()
+	cfg.SearchLocations = nil
+	cfg.DetailsPerCycle = 10
+
+	search := &fakeSearch{detailsErr: map[string]error{
+		"DEAD":  zillow.ErrDetailsNotFound,  // definitive: mark fetched
+		"FLAKY": errors.New("500 whatever"), // transient: leave for retry
+	}}
+	store := &fakeStore{missingDetails: []string{"DEAD", "FLAKY", "OK1"}}
+	s := New(cfg, search, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// DEAD gets empty details recorded (no infinite retry); FLAKY is skipped;
+	// OK1 is enriched normally.
+	got := map[string]bool{}
+	for _, z := range store.detailsSet {
+		got[z] = true
+	}
+	if !got["DEAD"] || !got["OK1"] || got["FLAKY"] {
+		t.Errorf("SetDetails calls = %v, want DEAD and OK1 only", store.detailsSet)
+	}
+	if d := store.detailsGot["DEAD"]; d == nil || d.PropertyType != nil {
+		t.Errorf("DEAD must be recorded with empty details, got %+v", d)
 	}
 }

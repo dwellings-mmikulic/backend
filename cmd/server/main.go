@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dwellingtw/backend/internal/api"
 	"github.com/dwellingtw/backend/internal/bunny"
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/db"
@@ -69,7 +70,8 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("scheduler started", "schedule", cfg.CronSchedule)
 
-	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, log)
+	publicAPI := api.New(repo, log)
+	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
 	go func() {
 		log.Info("http server started", "port", cfg.HTTPPort)
 		if err := httpSrv.Start(); err != nil {

@@ -26,7 +26,8 @@ internal/bunny          Bunny CDN storage upload client
 internal/qrcode         QR PNG generation (listing detail URL)
 internal/video          ffmpeg slideshow renderer (overlays, QR, music)
 internal/feed           Roku Direct Publisher feed builder
-internal/server         HTTP server: /roku/feed.json, /healthz
+internal/api            public read-only listings API (browse + detail)
+internal/server         HTTP server: /roku/feed.json, /api/v1/properties*, /healthz
 internal/scheduler      cron ticker; orchestrates the full collection cycle
 ```
 
@@ -50,12 +51,49 @@ Bunny → store video_url + status.
 ### HTTP endpoints
 
 - `GET /roku/feed.json` — Roku Direct Publisher feed of all `ready` videos.
+- `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /healthz` — liveness.
+
+## API
+
+Public, read-only listings API. No auth required.
+
+- `GET /api/v1/properties` — paginated browse list. Query params (all optional):
+  - `zip`, `property_type` — exact-match filters. `city`, `state` — case-insensitive match.
+  - `min_price`, `max_price` — price range (whole dollars, e.g. `500000`).
+  - `min_beds`, `min_baths` — minimum bedrooms/bathrooms.
+  - `min_sqft`, `max_sqft` — home size range (sq ft).
+  - `sort` — `newest` (default), `price_asc`, or `price_desc`.
+  - `limit` — page size, `1`–`100` (default `24`).
+  - `cursor` — opaque pagination token, see below.
+
+  Response: `{"total": <int>, "results": [...], "next_cursor": <string|null>}`.
+  Each result is a browse-card summary (`zpid`, `price`, `address`, `city`,
+  `state`, `zip`, `bedrooms`, `bathrooms`, `home_size_sqft`, `property_type`,
+  `image_url`).
+
+- `GET /api/v1/properties/{zpid}` — full detail for one listing, including
+  enrichment fields (`description`, `year_built`, `heating`, `cooling`,
+  `garage`, `hoa_fee_monthly`, `mls_number`, `listing_status`, `agent`,
+  `latitude`, `longitude`, `lot_size_acres`) that are `null` until the
+  scheduler's details-enrichment step fills them in. Returns `404` with
+  `{"error":"not found"}` for an unknown `zpid`.
+
+**Pagination:** when a page has more results, the response includes
+`next_cursor`. Pass it back as `cursor` on the next request (with the same
+`sort`) to get the following page; `next_cursor` is `null` on the last page.
+
+Both endpoints send `Access-Control-Allow-Origin: *` and
+`Cache-Control: public, max-age=300`, and return `400` with
+`{"error": "..."}` for invalid query params.
 
 ## Collected fields
 
 Sale price, address, city, state, zip, home size (sq ft), lot size (sq ft),
-bedrooms, bathrooms, and image URLs (on Bunny CDN).
+bedrooms, bathrooms, and image URLs (on Bunny CDN). A capped number of
+listings per cycle (`DETAILS_PER_CYCLE`) are further enriched via a one-time
+details-API call: description, year built, heating/cooling, garage, HOA fee,
+MLS number, listing status, agent contact, and lat/long.
 
 ## Running locally (Docker)
 
@@ -86,6 +124,9 @@ All configuration is via environment variables — see `.env.example`. Required:
 
 `CRON_SCHEDULE` is a standard 5-field cron expression (default `0 * * * *`,
 hourly). A cycle also runs once immediately on startup.
+
+`DETAILS_PER_CYCLE` caps how many properties get a one-time details-API
+enrichment call per cycle (default `50`; `0` disables enrichment entirely).
 
 ## OpenWebNinja Zillow API
 
