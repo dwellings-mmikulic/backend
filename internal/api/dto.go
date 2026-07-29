@@ -59,6 +59,7 @@ type detailResponse struct {
 	Agent         *agentDTO `json:"agent"`
 	Latitude      *float64  `json:"latitude"`
 	Longitude     *float64  `json:"longitude"`
+	MapImageURL   *string   `json:"map_image_url"`
 	ImageURLs     []string  `json:"image_urls"`
 	VideoURL      *string   `json:"video_url"`
 	DetailURL     string    `json:"detail_url"`
@@ -98,6 +99,9 @@ func toDetailResponse(p *property.Property) detailResponse {
 	}
 	if p.VideoURL != "" {
 		d.VideoURL = &p.VideoURL
+	}
+	if p.MapImageURL != "" {
+		d.MapImageURL = &p.MapImageURL
 	}
 	if p.AgentName != nil || p.AgentPhone != nil || p.AgentBrokerage != nil {
 		d.Agent = &agentDTO{Name: p.AgentName, Phone: p.AgentPhone, Brokerage: p.AgentBrokerage}
