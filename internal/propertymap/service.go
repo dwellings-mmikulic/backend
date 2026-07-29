@@ -26,8 +26,14 @@ const (
 	// defaultCooldown is how long a zpid is skipped after a transient failure,
 	// so a LocationIQ outage cannot turn every request into a retry.
 	defaultCooldown = 10 * time.Minute
-	// defaultBudget caps generations per rolling hour. The detail endpoint is
-	// public and unauthenticated, so this bounds quota burn from enumeration.
+	// defaultBudget caps admitted Ensure attempts per tumbling window (see
+	// allow), which is an upper bound on generations, not an exact count of
+	// LocationIQ calls: allow() is checked before the singleflight collapse in
+	// generate, so N concurrent first-viewers of the same zpid can each
+	// consume a budget slot even though they share a single underlying
+	// geocode/map fetch. The detail endpoint is public and unauthenticated,
+	// so this bounds worst-case quota burn from enumeration; it is
+	// intentionally fail-closed (it can under-admit, never over-admit).
 	defaultBudget = 500
 )
 
@@ -69,7 +75,8 @@ type Service struct {
 }
 
 // New creates the service. Pass a nil *Service to consumers to disable maps —
-// Ensure is nil-receiver safe.
+// Ensure is nil-receiver safe. log must be non-nil: Ensure and generate log
+// through it unconditionally, and a nil *slog.Logger panics on first use.
 func New(client Client, up Uploader, store Store, log *slog.Logger) *Service {
 	return &Service{
 		client:    client,
@@ -92,6 +99,12 @@ func New(client Client, up Uploader, store Store, log *slog.Logger) *Service {
 //
 // It waits at most s.deadline. Generation that outlives the deadline keeps
 // running on a background context and persists its result for the next reader.
+//
+// Aliasing contract: when generation outlives the deadline, a background
+// goroutine keeps reading p after Ensure has returned. The caller must not
+// mutate p after calling Ensure, and p must not be a pointer shared across
+// requests (e.g. a cached singleton) — each call must own its own
+// *property.Property. This is what makes the detached goroutine safe.
 func (s *Service) Ensure(ctx context.Context, p *property.Property) (string, bool) {
 	if s == nil || p == nil || p.ZPID == "" {
 		return "", false
@@ -184,8 +197,14 @@ func (s *Service) generate(ctx context.Context, p *property.Property) (string, e
 	return url, nil
 }
 
-// allow applies the per-zpid cooldown and the rolling hourly budget, counting
-// the generation when it permits one.
+// allow applies the per-zpid cooldown and the hourly budget, counting the
+// attempt when it permits one.
+//
+// The budget window is tumbling, not rolling: it resets to a fresh count the
+// first time it is checked at least an hour after windowStart, rather than
+// sliding continuously. A burst just before a window boundary (e.g. at the
+// 59th minute) plus another burst just after it resets (e.g. at the 61st
+// minute) can therefore admit up to 2x the budget within a couple of minutes.
 func (s *Service) allow(zpid string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

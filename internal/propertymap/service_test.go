@@ -342,3 +342,122 @@ func TestEnsure_NilServiceIsDisabled(t *testing.T) {
 		t.Errorf("nil service Ensure = (%q, %v)", url, pending)
 	}
 }
+
+// sometimesFailClient fails its first N StaticMap calls, then succeeds. It
+// drives the cooldown-expiry test, where the transient failure must clear
+// once the guard readmits a retry.
+type sometimesFailClient struct {
+	lat, lon    float64
+	failTimes   atomic.Int32 // StaticMap calls left that should fail
+	staticCalls atomic.Int32
+}
+
+func (c *sometimesFailClient) Geocode(_ context.Context, _ locationiq.Address) (float64, float64, error) {
+	return c.lat, c.lon, nil
+}
+
+func (c *sometimesFailClient) StaticMap(_ context.Context, _, _ float64) ([]byte, error) {
+	c.staticCalls.Add(1)
+	if c.failTimes.Add(-1) >= 0 {
+		return nil, errors.New("locationiq 503")
+	}
+	return []byte("PNG"), nil
+}
+
+// TestEnsure_CooldownExpiryReadmitsRetry drives svc.now with a controllable
+// clock to cover the cooldown-expiry path: a transient failure denies
+// retries until the cooldown elapses, then the next attempt is admitted and,
+// since the underlying failure has cleared, succeeds.
+func TestEnsure_CooldownExpiryReadmitsRetry(t *testing.T) {
+	c := &sometimesFailClient{lat: 1, lon: 2}
+	c.failTimes.Store(1) // first StaticMap call fails, the rest succeed
+	u, s := &fakeUploader{}, newFakeStore()
+	svc := newTestService(c, u, s)
+
+	clock := time.Now()
+	svc.now = func() time.Time { return clock } // set before any Ensure call, per allow()'s locking contract
+
+	zpid := "COOL1"
+	newProp := func() *property.Property {
+		p := sampleProp()
+		p.ZPID = zpid
+		return p
+	}
+
+	// First attempt: transient failure, puts the zpid on cooldown.
+	if url, _ := svc.Ensure(context.Background(), newProp()); url != "" {
+		t.Errorf("first attempt url = %q, want empty", url)
+	}
+	if s.mapCalls != 0 {
+		t.Error("a transient failure must not stamp map_generated_at")
+	}
+
+	// Second attempt, same instant: cooldown still active, denied outright.
+	before := c.staticCalls.Load()
+	if url, pending := svc.Ensure(context.Background(), newProp()); url != "" || pending {
+		t.Errorf("Ensure during cooldown = (%q, %v)", url, pending)
+	}
+	if c.staticCalls.Load() != before {
+		t.Error("cooldown must suppress the retry")
+	}
+
+	// Advance the clock past the cooldown: the next attempt is admitted, and
+	// since the client's failure budget is spent, it now succeeds.
+	clock = clock.Add(svc.cooldown + time.Second)
+
+	url, pending := svc.Ensure(context.Background(), newProp())
+	if pending {
+		t.Fatal("fast fake should finish inside the deadline")
+	}
+	if url == "" {
+		t.Error("attempt after cooldown expiry should be admitted and succeed")
+	}
+	if s.mapURLs[zpid] != url {
+		t.Errorf("stored url = %q, want %q", s.mapURLs[zpid], url)
+	}
+}
+
+// TestEnsure_BudgetWindowRolloverReadmitsAfterAnHour drives svc.now with a
+// controllable clock to cover the window-rollover path: once the budget is
+// exhausted within a window, generation is denied until the clock advances
+// past the window, at which point the count resets and generation resumes.
+func TestEnsure_BudgetWindowRolloverReadmitsAfterAnHour(t *testing.T) {
+	c := &fakeClient{lat: 1, lon: 2}
+	u, s := &fakeUploader{}, newFakeStore()
+	svc := newTestService(c, u, s)
+	svc.budget = 1
+
+	clock := time.Now()
+	svc.now = func() time.Time { return clock } // set before any Ensure call, per allow()'s locking contract
+
+	first := sampleProp()
+	first.ZPID = "WIN1"
+	if url, pending := svc.Ensure(context.Background(), first); url == "" || pending {
+		t.Fatalf("first call = (%q, %v), want admitted and successful", url, pending)
+	}
+
+	second := sampleProp()
+	second.ZPID = "WIN2"
+	if url, pending := svc.Ensure(context.Background(), second); url != "" || pending {
+		t.Errorf("Ensure over budget = (%q, %v), want denied", url, pending)
+	}
+	if got := c.staticCalls.Load(); got != 1 {
+		t.Errorf("static map calls = %d, want 1 before rollover", got)
+	}
+
+	// Advance the clock past the tumbling window: the budget resets.
+	clock = clock.Add(time.Hour + time.Second)
+
+	third := sampleProp()
+	third.ZPID = "WIN3"
+	url, pending := svc.Ensure(context.Background(), third)
+	if pending {
+		t.Fatal("fast fake should finish inside the deadline")
+	}
+	if url == "" {
+		t.Error("call after window rollover should be admitted")
+	}
+	if got := c.staticCalls.Load(); got != 2 {
+		t.Errorf("static map calls = %d, want 2 after rollover", got)
+	}
+}
