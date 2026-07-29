@@ -235,13 +235,20 @@ SELECT zpid FROM properties
 // SetDetails stores the enrichment fields and raw API response, and stamps
 // details_fetched_at so the row is never enriched again. raw may be nil
 // (e.g. a definitive not-found still marks the row as fetched).
+//
+// latitude/longitude use COALESCE so a details response with no coordinates
+// (a NULL here) does not null out coordinates a map geocode already wrote
+// back via SetCoordinates — enrichment can run after map generation, and
+// without this it would silently regress the detail endpoint's
+// latitude/longitude to null even though the map itself is unaffected.
 func (r *Repository) SetDetails(ctx context.Context, zpid string, d *Details, raw []byte) error {
 	const q = `
 UPDATE properties SET
     property_type = $2, description = $3, year_built = $4, heating = $5,
     cooling = $6, garage = $7, hoa_fee_monthly = $8, mls_number = $9,
     listing_status = $10, agent_name = $11, agent_phone = $12,
-    agent_brokerage = $13, latitude = $14, longitude = $15,
+    agent_brokerage = $13, latitude = COALESCE($14, latitude),
+    longitude = COALESCE($15, longitude),
     details_raw = $16, details_fetched_at = now(), updated_at = now()
  WHERE zpid = $1`
 	_, err := r.pool.Exec(ctx, q, zpid,

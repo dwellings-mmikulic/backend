@@ -151,7 +151,12 @@ func Load() (*Config, error) {
 	if c.ZillowAPIKey == "" {
 		missing = append(missing, "ZILLOW_API_KEY")
 	}
-	if c.ImagesEnabled {
+	// Bunny is required whenever something uploads to it: listing images
+	// (ImagesEnabled) or property maps (LocationIQAPIKey set). Without this,
+	// maps could be enabled with images disabled and every admitted
+	// generation would geocode and fetch a static map only to fail at the
+	// upload step — burning LocationIQ quota with no possible success.
+	if c.ImagesEnabled || c.LocationIQAPIKey != "" {
 		if c.BunnyStorageZone == "" {
 			missing = append(missing, "BUNNY_STORAGE_ZONE")
 		}

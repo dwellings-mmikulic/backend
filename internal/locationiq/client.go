@@ -4,6 +4,7 @@
 package locationiq
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,14 @@ import (
 	"strconv"
 	"time"
 )
+
+// maxBodySize bounds how much of a response we will ever read. Static maps
+// are a few hundred KB at most; anything wildly larger is not a map (a proxy
+// or captive-portal page, say) and must not be read into memory in full.
+const maxBodySize = 5 << 20 // 5 MiB
+
+// pngSignature is the fixed 8-byte header every valid PNG starts with.
+var pngSignature = []byte("\x89PNG\r\n\x1a\n")
 
 // ErrNoMatch means LocationIQ could not geocode the address. Callers should
 // record the property as permanently unmappable rather than retrying.
@@ -134,6 +143,13 @@ func (c *Client) StaticMap(ctx context.Context, lat, lon float64) ([]byte, error
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("static map returned status %d: %s", status, truncate(body))
 	}
+	// A 200 with a non-PNG body (an HTML interstitial, a proxy or
+	// captive-portal page) must not be treated as a usable map: it would get
+	// uploaded and permanently stamped on the listing. This is a normal,
+	// retryable error, not ErrNoMatch — the address itself may be fine.
+	if !bytes.HasPrefix(body, pngSignature) {
+		return nil, fmt.Errorf("static map returned non-PNG content: %s", truncate(body))
+	}
 	return body, nil
 }
 
@@ -146,15 +162,33 @@ func (c *Client) get(ctx context.Context, endpoint string) ([]byte, int, error) 
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
-		return nil, 0, err
+		// c.http.Do failures are ordinary events (timeout, DNS failure) and
+		// come back as a *url.Error whose Error() string embeds the full
+		// request URL — including our API key query parameter. Redact it
+		// before it can reach a log line.
+		return nil, 0, redactURLError(err)
 	}
 	defer res.Body.Close()
 
-	body, err := io.ReadAll(res.Body)
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBodySize))
 	if err != nil {
-		return nil, res.StatusCode, err
+		return nil, 0, err
 	}
 	return body, res.StatusCode, nil
+}
+
+// redactURLError strips the request URL out of a *url.Error, since its
+// Error() string otherwise embeds the full URL — query string and all. It
+// preserves the operation and the underlying cause but deliberately does not
+// keep the *url.Error itself reachable via errors.As/errors.Unwrap: any
+// wrapping that left the original error in the chain would let a caller
+// recover the raw URL (and the API key in it) straight back out.
+func redactURLError(err error) error {
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	return fmt.Errorf("%s [redacted url]: %w", uerr.Op, uerr.Err)
 }
 
 // formatCoord renders a coordinate without a trailing exponent or padding,

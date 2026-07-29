@@ -66,8 +66,15 @@ background, the response carries `map_image_url: null` with a shortened
 `max-age=30`, and the next request serves the finished map. Addresses that
 cannot be geocoded are recorded once and never retried.
 
+Generation is also subject to a per-zpid cooldown after a transient failure
+and an hourly, process-wide generation budget. Either can make an otherwise
+mappable listing return `map_image_url: null` on an enabled deployment — this
+is expected backpressure, not a bug, and a later request will retry.
+
 Set `LOCATIONIQ_API_KEY` to enable maps; without it `map_image_url` is always
-`null`.
+`null`. Maps also require Bunny CDN configuration (`BUNNY_STORAGE_ZONE`,
+`BUNNY_API_KEY`, `BUNNY_CDN_BASE_URL`) — `config.Load` enforces this
+whenever `LOCATIONIQ_API_KEY` is set, even if `IMAGES_ENABLED=false`.
 
 ### HTTP endpoints
 
