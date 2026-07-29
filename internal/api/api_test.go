@@ -61,8 +61,13 @@ func sampleProp(zpid string, id int64) property.Property {
 
 func serve(t *testing.T, repo Repo, target string) *httptest.ResponseRecorder {
 	t.Helper()
+	return serveWithMaps(t, repo, nil, target)
+}
+
+func serveWithMaps(t *testing.T, repo Repo, maps MapEnsurer, target string) *httptest.ResponseRecorder {
+	t.Helper()
 	mux := http.NewServeMux()
-	New(repo, testLogger()).Register(mux)
+	New(repo, maps, testLogger()).Register(mux)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
 	return rec
@@ -285,5 +290,110 @@ func TestPublicHeaders_ErrorsNotCached(t *testing.T) {
 		if h.Get("Cache-Control") != "no-store" {
 			t.Errorf("%s: Cache-Control = %q, want %q", c.name, h.Get("Cache-Control"), "no-store")
 		}
+	}
+}
+
+// fakeMaps returns a canned Ensure result and records that it was called.
+type fakeMaps struct {
+	url     string
+	pending bool
+	calls   int
+}
+
+func (f *fakeMaps) Ensure(_ context.Context, _ *property.Property) (string, bool) {
+	f.calls++
+	return f.url, f.pending
+}
+
+func TestDetail_MapDisabledYieldsNullMapAndNormalCaching(t *testing.T) {
+	p := sampleProp("Z1", 1)
+	rec := serve(t, &fakeRepo{detail: &p}, "/api/v1/properties/Z1")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := body["map_image_url"]
+	if !ok {
+		t.Fatal("map_image_url missing from detail response")
+	}
+	if v != nil {
+		t.Errorf("map_image_url = %v, want null", v)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Errorf("Cache-Control = %q, want the default", got)
+	}
+}
+
+func TestDetail_StoredMapIsReturned(t *testing.T) {
+	p := sampleProp("Z1", 1)
+	p.MapImageURL = "https://cdn.example/maps/Z1.png"
+	maps := &fakeMaps{url: p.MapImageURL}
+
+	rec := serveWithMaps(t, &fakeRepo{detail: &p}, maps, "/api/v1/properties/Z1")
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["map_image_url"] != "https://cdn.example/maps/Z1.png" {
+		t.Errorf("map_image_url = %v", body["map_image_url"])
+	}
+}
+
+func TestDetail_FreshlyGeneratedMapIsReturned(t *testing.T) {
+	p := sampleProp("Z1", 1)
+	maps := &fakeMaps{url: "https://cdn.example/maps/Z1.png"}
+
+	rec := serveWithMaps(t, &fakeRepo{detail: &p}, maps, "/api/v1/properties/Z1")
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["map_image_url"] != "https://cdn.example/maps/Z1.png" {
+		t.Errorf("map_image_url = %v", body["map_image_url"])
+	}
+	if maps.calls != 1 {
+		t.Errorf("Ensure calls = %d, want 1", maps.calls)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Errorf("Cache-Control = %q, want the default", got)
+	}
+}
+
+func TestDetail_PendingMapReturnsNullWithShortCache(t *testing.T) {
+	p := sampleProp("Z1", 1)
+	maps := &fakeMaps{pending: true}
+
+	rec := serveWithMaps(t, &fakeRepo{detail: &p}, maps, "/api/v1/properties/Z1")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["map_image_url"] != nil {
+		t.Errorf("map_image_url = %v, want null while pending", body["map_image_url"])
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=30" {
+		t.Errorf("Cache-Control = %q, want the short pending value", got)
+	}
+}
+
+func TestDetail_NotFoundSkipsMapGeneration(t *testing.T) {
+	maps := &fakeMaps{}
+	rec := serveWithMaps(t, &fakeRepo{detailErr: property.ErrNotFound}, maps, "/api/v1/properties/nope")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if maps.calls != 0 {
+		t.Error("a 404 must not trigger map generation")
 	}
 }

@@ -13,7 +13,9 @@ import (
 	"github.com/dwellingtw/backend/internal/bunny"
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/db"
+	"github.com/dwellingtw/backend/internal/locationiq"
 	"github.com/dwellingtw/backend/internal/property"
+	"github.com/dwellingtw/backend/internal/propertymap"
 	"github.com/dwellingtw/backend/internal/scheduler"
 	"github.com/dwellingtw/backend/internal/server"
 	"github.com/dwellingtw/backend/internal/video"
@@ -59,6 +61,17 @@ func run(log *slog.Logger) error {
 	bunnyClient := bunny.New(cfg.BunnyStorageZone, cfg.BunnyAPIKey, cfg.BunnyStorageHost, cfg.BunnyCDNBaseURL, cfg.BunnyTimeout)
 	repo := property.NewRepository(pool)
 
+	// Property maps are optional: without a LocationIQ key the service stays
+	// nil and the detail endpoint simply returns a null map_image_url.
+	var mapSvc *propertymap.Service
+	if cfg.LocationIQAPIKey != "" {
+		mapSvc = propertymap.New(
+			locationiq.New(cfg.LocationIQAPIKey, cfg.HTTPTimeout),
+			bunnyClient, repo, log,
+		)
+		log.Info("property maps enabled")
+	}
+
 	var renderer *video.Renderer
 	if cfg.Video.Enabled {
 		renderer, err = video.New(cfg.Video)
@@ -75,7 +88,7 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("scheduler started", "schedule", cfg.CronSchedule)
 
-	publicAPI := api.New(repo, log)
+	publicAPI := api.New(repo, mapEnsurerOrNil(mapSvc), log)
 	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
 	go func() {
 		log.Info("http server started", "port", cfg.HTTPPort)
@@ -128,4 +141,13 @@ func rendererOrNil(r *video.Renderer) scheduler.Renderer {
 		return nil
 	}
 	return r
+}
+
+// mapEnsurerOrNil returns an interface-nil when maps are disabled, so the API's
+// nil check works correctly.
+func mapEnsurerOrNil(s *propertymap.Service) api.MapEnsurer {
+	if s == nil {
+		return nil
+	}
+	return s
 }

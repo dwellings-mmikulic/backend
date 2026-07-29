@@ -27,6 +27,8 @@ internal/qrcode         QR PNG generation (listing detail URL)
 internal/video          ffmpeg slideshow renderer (overlays, QR, music)
 internal/feed           Roku Direct Publisher feed builder
 internal/api            public read-only listings API (browse + detail)
+internal/locationiq     LocationIQ geocoding + static map client
+internal/propertymap    on-demand property map generation
 internal/server         HTTP server: /roku/feed.json, /api/v1/properties*, /healthz
 internal/scheduler      cron ticker; orchestrates the full collection cycle
 ```
@@ -47,6 +49,32 @@ Bunny → store video_url + status.
   deterministically by zpid. Empty dir → silent video.
 - Per-listing failures are logged + marked `failed`, retried next cycle, never fatal.
 - Needs the `ffmpeg` binary + a TTF font (both in the Docker image).
+
+### Property maps
+
+The detail endpoint returns `map_image_url`: a 600×400 static map from
+[LocationIQ](https://locationiq.com) with a pin on the home, stored at
+`maps/<zpid>.png` on Bunny CDN.
+
+Maps are generated **on demand** — the first request for a listing that has no
+map triggers generation, so listings nobody views cost nothing. If the property
+has no coordinates yet, its address is geocoded first and the coordinates are
+saved back to the row.
+
+The request waits up to 1.5s. If generation takes longer it finishes in the
+background, the response carries `map_image_url: null` with a shortened
+`max-age=30`, and the next request serves the finished map. Addresses that
+cannot be geocoded are recorded once and never retried.
+
+Generation is also subject to a per-zpid cooldown after a transient failure
+and an hourly, process-wide generation budget. Either can make an otherwise
+mappable listing return `map_image_url: null` on an enabled deployment — this
+is expected backpressure, not a bug, and a later request will retry.
+
+Set `LOCATIONIQ_API_KEY` to enable maps; without it `map_image_url` is always
+`null`. Maps also require Bunny CDN configuration (`BUNNY_STORAGE_ZONE`,
+`BUNNY_API_KEY`, `BUNNY_CDN_BASE_URL`) — `config.Load` enforces this
+whenever `LOCATIONIQ_API_KEY` is set, even if `IMAGES_ENABLED=false`.
 
 ### HTTP endpoints
 
@@ -79,8 +107,9 @@ Interactive docs: [https://api.dwellings.tv/swagger/index.html](https://api.dwel
   enrichment fields (`description`, `year_built`, `heating`, `cooling`,
   `garage`, `hoa_fee_monthly`, `mls_number`, `listing_status`, `agent`,
   `latitude`, `longitude`, `lot_size_acres`) that are `null` until the
-  scheduler's details-enrichment step fills them in. Returns `404` with
-  `{"error":"not found"}` for an unknown `zpid`.
+  scheduler's details-enrichment step fills them in, plus `map_image_url` — a
+  static LocationIQ map with a pin on the home, hosted on Bunny CDN. Returns
+  `404` with `{"error":"not found"}` for an unknown `zpid`.
 
 **Pagination:** when a page has more results, the response includes
 `next_cursor`. Pass it back as `cursor` on the next request (with the same

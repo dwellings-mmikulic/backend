@@ -16,15 +16,23 @@ type Repo interface {
 	GetByZPID(ctx context.Context, zpid string) (*property.Property, error)
 }
 
+// MapEnsurer returns a property's static map URL, generating it on demand.
+// url is empty when there is no map; pending means one is still being
+// generated in the background. May be nil when maps are disabled.
+type MapEnsurer interface {
+	Ensure(ctx context.Context, p *property.Property) (url string, pending bool)
+}
+
 // API serves the public read-only listings endpoints.
 type API struct {
 	repo Repo
+	maps MapEnsurer
 	log  *slog.Logger
 }
 
-// New creates the public API.
-func New(repo Repo, log *slog.Logger) *API {
-	return &API{repo: repo, log: log}
+// New creates the public API. maps may be nil, which disables property maps.
+func New(repo Repo, maps MapEnsurer, log *slog.Logger) *API {
+	return &API{repo: repo, maps: maps, log: log}
 }
 
 // Register mounts the public routes on mux.
@@ -94,6 +102,7 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 //
 //	@Summary		Get property detail
 //	@Description	Full detail-screen payload for one listing, addressed by its Zillow property ID.
+//	@Description	map_image_url is generated on first view; it may be null on the very first request for a listing and populated shortly after.
 //	@Tags			properties
 //	@Produce		json
 //	@Param			zpid	path		string	true	"Zillow property ID"
@@ -112,7 +121,25 @@ func (a *API) handleDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, toDetailResponse(p))
+	resp := toDetailResponse(p)
+
+	// Generate the map on demand. Ensure waits a short while; if it is still
+	// working we return a null map and shorten the cache so the next viewer
+	// picks up the finished one quickly.
+	pending := false
+	if a.maps != nil {
+		if url, stillWorking := a.maps.Ensure(r.Context(), p); url != "" {
+			resp.MapImageURL = &url
+		} else {
+			pending = stillWorking
+		}
+	}
+
+	cacheControl := defaultCacheControl
+	if pending {
+		cacheControl = pendingCacheControl
+	}
+	writeJSONCache(w, http.StatusOK, resp, cacheControl)
 }
 
 // cursorForLast builds the next-page cursor from the last row of this page.
@@ -128,9 +155,20 @@ func cursorForLast(sort property.Sort, last *property.Property) cursor {
 	return c
 }
 
+const (
+	defaultCacheControl = "public, max-age=300"
+	// pendingCacheControl is used when a map is still generating, so the null
+	// map is not cached for the full window.
+	pendingCacheControl = "public, max-age=30"
+)
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	writeJSONCache(w, status, v, defaultCacheControl)
+}
+
+func writeJSONCache(w http.ResponseWriter, status int, v any, cacheControl string) {
 	if status < 400 {
-		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("Cache-Control", cacheControl)
 	} else {
 		w.Header().Set("Cache-Control", "no-store")
 	}

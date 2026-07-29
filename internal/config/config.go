@@ -21,6 +21,10 @@ type Config struct {
 	ZillowBaseURL string
 	ZillowAPIKey  string
 
+	// LocationIQ — static property maps generated on demand by the detail
+	// endpoint. Empty disables maps entirely.
+	LocationIQAPIKey string
+
 	// ImagesEnabled controls whether listing images are downloaded and uploaded
 	// to Bunny CDN. When false, the source Zillow image URLs are stored directly
 	// and Bunny config is not required (useful for local/dev runs).
@@ -103,6 +107,7 @@ func Load() (*Config, error) {
 		CronSchedule:     getenv("CRON_SCHEDULE", "0 */12 * * *"), // every 12 hours
 		ZillowBaseURL:    getenv("ZILLOW_BASE_URL", "https://api.openwebninja.com/realtime-zillow-data"),
 		ZillowAPIKey:     getenv("ZILLOW_API_KEY", ""),
+		LocationIQAPIKey: getenv("LOCATIONIQ_API_KEY", ""),
 		ImagesEnabled:    getenvBool("IMAGES_ENABLED", true),
 		SkipExisting:     getenvBool("SKIP_EXISTING", true),
 		DetailsPerCycle:  getenvInt("DETAILS_PER_CYCLE", 50),
@@ -146,7 +151,12 @@ func Load() (*Config, error) {
 	if c.ZillowAPIKey == "" {
 		missing = append(missing, "ZILLOW_API_KEY")
 	}
-	if c.ImagesEnabled {
+	// Bunny is required whenever something uploads to it: listing images
+	// (ImagesEnabled) or property maps (LocationIQAPIKey set). Without this,
+	// maps could be enabled with images disabled and every admitted
+	// generation would geocode and fetch a static map only to fail at the
+	// upload step — burning LocationIQ quota with no possible success.
+	if c.ImagesEnabled || c.LocationIQAPIKey != "" {
 		if c.BunnyStorageZone == "" {
 			missing = append(missing, "BUNNY_STORAGE_ZONE")
 		}

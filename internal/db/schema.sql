@@ -48,6 +48,13 @@ ALTER TABLE properties ADD COLUMN IF NOT EXISTS longitude          DOUBLE PRECIS
 ALTER TABLE properties ADD COLUMN IF NOT EXISTS details_raw        JSONB;
 ALTER TABLE properties ADD COLUMN IF NOT EXISTS details_fetched_at TIMESTAMPTZ;
 
+-- Static property map (LocationIQ), generated on demand by the detail endpoint
+-- (see docs/superpowers/specs/2026-07-29-property-maps-locationiq-design.md).
+-- map_generated_at set with a NULL map_image_url means the address could not
+-- be geocoded; clearing it makes the row eligible again.
+ALTER TABLE properties ADD COLUMN IF NOT EXISTS map_image_url      TEXT;
+ALTER TABLE properties ADD COLUMN IF NOT EXISTS map_generated_at   TIMESTAMPTZ;
+
 -- Public listing API filter/sort indexes.
 CREATE INDEX IF NOT EXISTS idx_properties_zip           ON properties (zip);
 CREATE INDEX IF NOT EXISTS idx_properties_property_type ON properties (property_type);

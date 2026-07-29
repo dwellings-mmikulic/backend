@@ -179,7 +179,8 @@ SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
        property_type, description, year_built, heating, cooling, garage,
        hoa_fee_monthly, mls_number, listing_status,
        agent_name, agent_phone, agent_brokerage, latitude, longitude,
-       details_fetched_at, created_at, updated_at
+       details_fetched_at, COALESCE(map_image_url,''), map_generated_at,
+       created_at, updated_at
   FROM properties WHERE zpid = $1`
 
 	var p Property
@@ -191,7 +192,8 @@ SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
 		&p.PropertyType, &p.Description, &p.YearBuilt, &p.Heating, &p.Cooling, &p.Garage,
 		&p.HOAFeeMonthly, &p.MLSNumber, &p.ListingStatus,
 		&p.AgentName, &p.AgentPhone, &p.AgentBrokerage, &p.Latitude, &p.Longitude,
-		&p.DetailsFetchedAt, &p.CreatedAt, &p.UpdatedAt,
+		&p.DetailsFetchedAt, &p.MapImageURL, &p.MapGeneratedAt,
+		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -233,13 +235,20 @@ SELECT zpid FROM properties
 // SetDetails stores the enrichment fields and raw API response, and stamps
 // details_fetched_at so the row is never enriched again. raw may be nil
 // (e.g. a definitive not-found still marks the row as fetched).
+//
+// latitude/longitude use COALESCE so a details response with no coordinates
+// (a NULL here) does not null out coordinates a map geocode already wrote
+// back via SetCoordinates — enrichment can run after map generation, and
+// without this it would silently regress the detail endpoint's
+// latitude/longitude to null even though the map itself is unaffected.
 func (r *Repository) SetDetails(ctx context.Context, zpid string, d *Details, raw []byte) error {
 	const q = `
 UPDATE properties SET
     property_type = $2, description = $3, year_built = $4, heating = $5,
     cooling = $6, garage = $7, hoa_fee_monthly = $8, mls_number = $9,
     listing_status = $10, agent_name = $11, agent_phone = $12,
-    agent_brokerage = $13, latitude = $14, longitude = $15,
+    agent_brokerage = $13, latitude = COALESCE($14, latitude),
+    longitude = COALESCE($15, longitude),
     details_raw = $16, details_fetched_at = now(), updated_at = now()
  WHERE zpid = $1`
 	_, err := r.pool.Exec(ctx, q, zpid,
@@ -250,6 +259,34 @@ UPDATE properties SET
 	)
 	if err != nil {
 		return fmt.Errorf("set details zpid=%s: %w", zpid, err)
+	}
+	return nil
+}
+
+// SetMapImage records the property's static map URL and stamps
+// map_generated_at. An empty url records a permanently unmappable row (the
+// address could not be geocoded) so it is never retried.
+func (r *Repository) SetMapImage(ctx context.Context, zpid, url string) error {
+	const q = `
+UPDATE properties SET
+    map_image_url = NULLIF($2, ''), map_generated_at = now(), updated_at = now()
+ WHERE zpid = $1`
+	if _, err := r.pool.Exec(ctx, q, zpid, url); err != nil {
+		return fmt.Errorf("set map image zpid=%s: %w", zpid, err)
+	}
+	return nil
+}
+
+// SetCoordinates writes geocoded coordinates back to the row. It deliberately
+// touches only latitude/longitude — SetDetails writes the whole enrichment
+// block and would clobber the other fields with nils.
+func (r *Repository) SetCoordinates(ctx context.Context, zpid string, lat, lon float64) error {
+	const q = `
+UPDATE properties SET
+    latitude = $2, longitude = $3, updated_at = now()
+ WHERE zpid = $1`
+	if _, err := r.pool.Exec(ctx, q, zpid, lat, lon); err != nil {
+		return fmt.Errorf("set coordinates zpid=%s: %w", zpid, err)
 	}
 	return nil
 }
