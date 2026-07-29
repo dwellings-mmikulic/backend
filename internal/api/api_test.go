@@ -386,6 +386,42 @@ func TestDetail_PendingMapReturnsNullWithShortCache(t *testing.T) {
 	}
 }
 
+// The third Ensure state — no map and none coming — with the service ENABLED.
+// This is the steady state for a listing whose address cannot be geocoded, and
+// for one the cooldown or hourly budget just turned away. It takes a different
+// branch from TestDetail_MapDisabledYieldsNullMapAndNormalCaching, where a nil
+// MapEnsurer skips the call entirely: here Ensure really runs and still must
+// produce a null map at the NORMAL cache age. Getting the short age here would
+// make every viewer of an unmappable listing re-request it every 30 seconds.
+func TestDetail_UnmappableListingYieldsNullMapAndNormalCaching(t *testing.T) {
+	p := sampleProp("Z1", 1)
+	maps := &fakeMaps{} // url "", pending false
+
+	rec := serveWithMaps(t, &fakeRepo{detail: &p}, maps, "/api/v1/properties/Z1")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+	if maps.calls != 1 {
+		t.Errorf("Ensure calls = %d, want 1 — the enabled service must be consulted", maps.calls)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := body["map_image_url"]
+	if !ok {
+		t.Fatal("map_image_url missing from detail response")
+	}
+	if v != nil {
+		t.Errorf("map_image_url = %v, want null", v)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Errorf("Cache-Control = %q, want the default — nothing is pending", got)
+	}
+}
+
 func TestDetail_NotFoundSkipsMapGeneration(t *testing.T) {
 	maps := &fakeMaps{}
 	rec := serveWithMaps(t, &fakeRepo{detailErr: property.ErrNotFound}, maps, "/api/v1/properties/nope")
