@@ -280,3 +280,112 @@ func TestStaticMap_TransportErrorDoesNotLeakAPIKey(t *testing.T) {
 		t.Errorf("StaticMap error leaks API key: %v", err)
 	}
 }
+
+// The response body is the second route an API key can reach a log. Upstream
+// error pages and proxies routinely quote the request URI back at you, and the
+// non-2xx / non-PNG paths put up to 200 bytes of that body straight into the
+// error message. These tests make the server echo the request URI — exactly
+// what a captive portal or a 4xx page from a proxy does.
+
+// echoRequestURIServer replies with the given status and a body that quotes the
+// full request URI, key query parameter and all.
+func echoRequestURIServer(t *testing.T, status int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`<html><body>Blocked request: ` + r.URL.RequestURI() + `</body></html>`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestGeocode_ErrorBodyEchoingRequestDoesNotLeakAPIKey(t *testing.T) {
+	srv := echoRequestURIServer(t, http.StatusBadGateway)
+
+	c := New(fakeAPIKey, 5*time.Second)
+	c.geocodeURL = srv.URL
+
+	_, _, err := c.Geocode(context.Background(), testAddress())
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if strings.Contains(err.Error(), fakeAPIKey) {
+		t.Errorf("geocode error leaks API key via the response body: %v", err)
+	}
+	if !strings.Contains(err.Error(), redactedKey) {
+		t.Errorf("expected the key to be replaced with %q, got: %v", redactedKey, err)
+	}
+}
+
+func TestStaticMap_ErrorBodyEchoingRequestDoesNotLeakAPIKey(t *testing.T) {
+	srv := echoRequestURIServer(t, http.StatusForbidden)
+
+	c := New(fakeAPIKey, 5*time.Second)
+	c.staticMapURL = srv.URL
+
+	_, err := c.StaticMap(context.Background(), 30.2672, -97.7431)
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if strings.Contains(err.Error(), fakeAPIKey) {
+		t.Errorf("static map error leaks API key via the response body: %v", err)
+	}
+}
+
+// The non-PNG path is a 200, so it bypasses the status-code branch entirely
+// and needs its own scrubbing.
+func TestStaticMap_NonPNGBodyEchoingRequestDoesNotLeakAPIKey(t *testing.T) {
+	srv := echoRequestURIServer(t, http.StatusOK)
+
+	c := New(fakeAPIKey, 5*time.Second)
+	c.staticMapURL = srv.URL
+
+	_, err := c.StaticMap(context.Background(), 30.2672, -97.7431)
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if strings.Contains(err.Error(), fakeAPIKey) {
+		t.Errorf("non-PNG error leaks API key via the response body: %v", err)
+	}
+}
+
+// A body may carry key material that is not our literal key — a differently
+// encoded copy, or another tenant's key echoed by a shared proxy. The generic
+// key= backstop has to catch those too.
+func TestScrub_RedactsForeignKeyMaterial(t *testing.T) {
+	c := New(fakeAPIKey, time.Second)
+
+	for _, tc := range []struct {
+		name string
+		in   string
+	}{
+		{"our key", "https://x/v1/search?key=" + fakeAPIKey + "&city=Austin"},
+		{"another key", "https://x/v1/search?key=pk.someoneelseskey123&city=Austin"},
+		{"uppercase param", "https://x/v1/search?KEY=pk.shouty456&city=Austin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := c.scrub(tc.in)
+			if strings.Contains(got, "pk.") {
+				t.Errorf("scrub left key material: %q", got)
+			}
+			if !strings.Contains(got, "city=Austin") {
+				t.Errorf("scrub destroyed non-secret context: %q", got)
+			}
+		})
+	}
+}
+
+// A malformed endpoint fails inside http.NewRequestWithContext, which returns
+// a *url.Error carrying the whole URL before any request is sent.
+func TestGeocode_MalformedEndpointDoesNotLeakAPIKey(t *testing.T) {
+	c := New(fakeAPIKey, time.Second)
+	c.geocodeURL = "http://bad\x7fhost/v1/search" // control byte: url.Parse rejects it
+
+	_, _, err := c.Geocode(context.Background(), testAddress())
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if strings.Contains(err.Error(), fakeAPIKey) {
+		t.Errorf("request-build error leaks API key: %v", err)
+	}
+}
