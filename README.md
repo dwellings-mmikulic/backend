@@ -47,7 +47,18 @@ Bunny → store video_url + status.
 - Pacing: every photo for `VIDEO_SECONDS_PER_PHOTO` seconds (default 4).
 - Music: 10 bundled CC0 tracks in `assets/music/` (public domain), chosen
   deterministically by zpid. Empty dir → silent video.
-- Per-listing failures are logged + marked `failed`, retried next cycle, never fatal.
+- Per-listing failures are logged + marked `failed`, never fatal. A listing with
+  no `ready` video is re-rendered on a later cycle even when `SKIP_EXISTING` is
+  set — the revisit renders only, and does not re-upload photos or refresh the
+  row. To clear an existing backlog in one pass (a listing only gets revisited
+  when it resurfaces in search results), run `cmd/backfill-videos`:
+
+  ```bash
+  go run ./cmd/backfill-videos -dry-run   # report what would render
+  go run ./cmd/backfill-videos            # render, upload, record
+  ```
+
+  It renders from the stored CDN photos, so it costs no Zillow API quota.
 - Needs the `ffmpeg` binary + a TTF font (both in the Docker image).
 
 ### Property maps

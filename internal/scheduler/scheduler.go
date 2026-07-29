@@ -39,6 +39,7 @@ type uploader interface {
 // store persists properties and their video state.
 type store interface {
 	Exists(ctx context.Context, zpid string) (bool, error)
+	NeedsVideo(ctx context.Context, zpid string) (bool, error)
 	Upsert(ctx context.Context, p *property.Property) error
 	SetVideoReady(ctx context.Context, zpid, videoURL, contentHash string, durationSecs int) error
 	SetVideoFailed(ctx context.Context, zpid string) error
@@ -176,14 +177,31 @@ func (s *Scheduler) processListing(ctx context.Context, p *property.Property) (b
 		return false, fmt.Errorf("empty zpid (address %q)", p.Address)
 	}
 
+	// revisitForVideo means the listing is already stored and would normally be
+	// left alone, but has no ready video. Without this, a listing whose render
+	// failed once could never retry under SkipExisting: we would return here,
+	// before renderVideo, on every subsequent cycle. When set, we do the work
+	// the render needs (download the photos) and nothing else — no re-upload of
+	// images, no upsert.
+	revisitForVideo := false
+
 	if s.cfg.SkipExisting {
 		exists, err := s.repo.Exists(ctx, p.ZPID)
 		if err != nil {
 			return false, err
 		}
 		if exists {
-			s.log.Debug("skipping existing listing", "zpid", p.ZPID)
-			return true, nil
+			videoWanted := s.cfg.Video.Enabled && s.render != nil
+			if videoWanted {
+				if revisitForVideo, err = s.repo.NeedsVideo(ctx, p.ZPID); err != nil {
+					return false, err
+				}
+			}
+			if !revisitForVideo {
+				s.log.Debug("skipping existing listing", "zpid", p.ZPID)
+				return true, nil
+			}
+			s.log.Info("existing listing has no ready video, re-rendering", "zpid", p.ZPID)
 		}
 	}
 
@@ -201,14 +219,19 @@ func (s *Scheduler) processListing(ctx context.Context, p *property.Property) (b
 		localPhotos = s.downloadPhotos(ctx, p.ImageURLs, workDir)
 	}
 
-	// Upload images to Bunny (replacing source URLs) when enabled.
-	if s.cfg.ImagesEnabled {
+	// Upload images to Bunny (replacing source URLs) when enabled. On a
+	// video-only revisit the stored photos are already on the CDN, so this and
+	// the upsert below are skipped: the listing's data is not being refreshed,
+	// only its missing video rendered.
+	if s.cfg.ImagesEnabled && !revisitForVideo {
 		p.ImageURLs = s.uploadPhotos(ctx, p.ZPID, localPhotos)
 	}
 
-	// Persist; Upsert populates p.VideoStatus and p.VideoContentHash from the DB.
-	if err := s.repo.Upsert(ctx, p); err != nil {
-		return false, err
+	if !revisitForVideo {
+		// Persist; Upsert populates p.VideoStatus and p.VideoContentHash from the DB.
+		if err := s.repo.Upsert(ctx, p); err != nil {
+			return false, err
+		}
 	}
 
 	// Render + upload the video.

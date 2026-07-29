@@ -204,6 +204,26 @@ SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
 	return &p, nil
 }
 
+// NeedsVideo reports whether the stored listing lacks a ready video. It is
+// what lets the collection cycle revisit a listing whose render failed:
+// SkipExisting would otherwise return before the render step and strand that
+// listing without a video forever.
+func (r *Repository) NeedsVideo(ctx context.Context, zpid string) (bool, error) {
+	const q = `
+SELECT video_status IS DISTINCT FROM 'ready' OR video_url IS NULL OR video_url = ''
+  FROM properties WHERE zpid = $1`
+	var needs bool
+	err := r.pool.QueryRow(ctx, q, zpid).Scan(&needs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Not stored yet, so the normal new-listing path renders it.
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("needs video zpid=%s: %w", zpid, err)
+	}
+	return needs, nil
+}
+
 // ListZPIDsMissingDetails returns up to limit zpids that have never been
 // enriched, oldest first (so backfill drains deterministically).
 func (r *Repository) ListZPIDsMissingDetails(ctx context.Context, limit int) ([]string, error) {
