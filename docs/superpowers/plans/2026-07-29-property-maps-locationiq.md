@@ -231,6 +231,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -240,7 +241,7 @@ func testAddress() Address {
 }
 
 func TestGeocode_BuildsStructuredQueryAndParsesResult(t *testing.T) {
-	var gotQuery map[string][]string
+	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
@@ -325,7 +326,7 @@ func TestGeocode_ServerErrorIsNotErrNoMatch(t *testing.T) {
 }
 
 func TestStaticMap_BuildsPinnedMapURLAndReturnsBytes(t *testing.T) {
-	var gotQuery map[string][]string
+	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "image/png")
