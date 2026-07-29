@@ -57,6 +57,11 @@ type Property struct {
 	VideoRenderedAt   *time.Time
 	VideoDurationSecs int
 
+	// Static map state. MapGeneratedAt non-nil with an empty MapImageURL means
+	// the address could not be geocoded and no map will be attempted again.
+	MapImageURL    string
+	MapGeneratedAt *time.Time
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
