@@ -85,6 +85,9 @@ func (f *fakeSearch) PropertyDetails(_ context.Context, zpid string) (*property.
 // ordering can be asserted.
 type fakeUploader struct {
 	cur, peak atomic.Int64
+
+	mu       sync.Mutex
+	uploaded []string // every path passed to Upload, in completion order
 }
 
 func (u *fakeUploader) Upload(_ context.Context, path string, content io.Reader, _ string) (string, error) {
@@ -97,12 +100,25 @@ func (u *fakeUploader) Upload(_ context.Context, path string, content io.Reader,
 	}
 	_, _ = io.Copy(io.Discard, content)
 	u.cur.Add(-1)
+
+	u.mu.Lock()
+	u.uploaded = append(u.uploaded, path)
+	u.mu.Unlock()
 	return "https://cdn.example/" + path, nil
+}
+
+// paths returns a copy of the recorded upload paths.
+func (u *fakeUploader) paths() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.uploaded...)
 }
 
 type fakeStore struct {
 	upserts, ready, failed atomic.Int64
 	existing               map[string]bool
+	// needsVideo is what NeedsVideo reports for an already-stored listing.
+	needsVideo map[string]bool
 	// missingDetails is what ListZPIDsMissingDetails returns (up to limit).
 	missingDetails []string
 	mu             sync.Mutex
@@ -112,6 +128,10 @@ type fakeStore struct {
 
 func (s *fakeStore) Exists(_ context.Context, zpid string) (bool, error) {
 	return s.existing[zpid], nil
+}
+
+func (s *fakeStore) NeedsVideo(_ context.Context, zpid string) (bool, error) {
+	return s.needsVideo[zpid], nil
 }
 
 func (s *fakeStore) Upsert(_ context.Context, p *property.Property) error {
@@ -260,6 +280,51 @@ func TestRunCycle_SkipsExisting(t *testing.T) {
 	}
 	if got := store.ready.Load(); got != 2 {
 		t.Errorf("video ready = %d, want 2", got)
+	}
+}
+
+// A stored listing whose render failed previously must be revisited so the
+// video can be retried. Before this, SkipExisting returned before renderVideo
+// ran, so a single failed render stranded that listing without a video for
+// good — which is how 24 production listings ended up permanently videoless.
+// The revisit renders only: it must not re-upload images or re-upsert the row.
+func TestRunCycle_ExistingListingWithoutVideoIsReRendered(t *testing.T) {
+	imgSrv := jpegServer(t)
+
+	var props []property.Property
+	for i := 0; i < 4; i++ {
+		props = append(props, property.Property{
+			ZPID:      fmt.Sprintf("ZP%d", i),
+			ImageURLs: []string{imgSrv.URL + "/a.jpg"},
+		})
+	}
+
+	cfg := baseConfig()
+	cfg.SkipExisting = true
+	store := &fakeStore{
+		// All four are stored already.
+		existing: map[string]bool{"ZP0": true, "ZP1": true, "ZP2": true, "ZP3": true},
+		// ZP1 and ZP2 have no ready video — only those two get revisited.
+		needsVideo: map[string]bool{"ZP1": true, "ZP2": true},
+	}
+	up := &fakeUploader{}
+	s := New(cfg, &fakeSearch{props: props}, up, store, &fakeRenderer{}, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.ready.Load(); got != 2 {
+		t.Errorf("video ready = %d, want 2 (ZP1 and ZP2 re-rendered)", got)
+	}
+	if got := store.upserts.Load(); got != 0 {
+		t.Errorf("upserts = %d, want 0 — a video revisit must not rewrite the row", got)
+	}
+	// Only the rendered videos should be uploaded; no listing photos.
+	for _, path := range up.paths() {
+		if !strings.HasPrefix(path, "videos/") {
+			t.Errorf("unexpected upload %q — a video revisit must not re-upload photos", path)
+		}
 	}
 }
 
