@@ -12,9 +12,21 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// redactedKey replaces API key material in anything destined for an error
+// message or a log line.
+const redactedKey = "[redacted]"
+
+// keyParamRE matches a key query parameter and its value in text echoed back
+// to us — an upstream error page or proxy quoting the request URI, say. It is
+// the backstop for key material we cannot match literally (percent-encoded
+// differently, or a key belonging to some other request entirely).
+var keyParamRE = regexp.MustCompile(`(?i)key=[^&\s"'<>]+`)
 
 // maxBodySize bounds how much of a response we will ever read. Static maps
 // are a few hundred KB at most; anything wildly larger is not a map (a proxy
@@ -117,7 +129,7 @@ func (c *Client) Geocode(ctx context.Context, a Address) (float64, float64, erro
 		return 0, 0, ErrNoMatch
 	}
 	if status != http.StatusOK {
-		return 0, 0, fmt.Errorf("geocode returned status %d: %s", status, truncate(body))
+		return 0, 0, fmt.Errorf("geocode returned status %d: %s", status, c.scrub(truncate(body)))
 	}
 
 	var results []geocodeResult
@@ -163,14 +175,14 @@ func (c *Client) StaticMap(ctx context.Context, lat, lon float64) ([]byte, error
 		return nil, fmt.Errorf("static map request: %w", err)
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("static map returned status %d: %s", status, truncate(body))
+		return nil, fmt.Errorf("static map returned status %d: %s", status, c.scrub(truncate(body)))
 	}
 	// A 200 with a non-PNG body (an HTML interstitial, a proxy or
 	// captive-portal page) must not be treated as a usable map: it would get
 	// uploaded and permanently stamped on the listing. This is a normal,
 	// retryable error, not ErrNoMatch — the address itself may be fine.
 	if !bytes.HasPrefix(body, pngSignature) {
-		return nil, fmt.Errorf("static map returned non-PNG content: %s", truncate(body))
+		return nil, fmt.Errorf("static map returned non-PNG content: %s", c.scrub(truncate(body)))
 	}
 	return body, nil
 }
@@ -180,7 +192,9 @@ func (c *Client) StaticMap(ctx context.Context, lat, lon float64) ([]byte, error
 func (c *Client) get(ctx context.Context, endpoint string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, 0, err
+		// A malformed endpoint surfaces as a *url.Error from url.Parse, which
+		// carries the whole URL — key included.
+		return nil, 0, c.redactErr(err)
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
@@ -188,13 +202,13 @@ func (c *Client) get(ctx context.Context, endpoint string) ([]byte, int, error) 
 		// come back as a *url.Error whose Error() string embeds the full
 		// request URL — including our API key query parameter. Redact it
 		// before it can reach a log line.
-		return nil, 0, redactURLError(err)
+		return nil, 0, c.redactErr(err)
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(res.Body, maxBodySize))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, c.redactErr(err)
 	}
 	return body, res.StatusCode, nil
 }
@@ -211,6 +225,31 @@ func redactURLError(err error) error {
 		return err
 	}
 	return fmt.Errorf("%s [redacted url]: %w", uerr.Op, uerr.Err)
+}
+
+// scrub removes API key material from text that is about to become an error
+// message. Response bodies are the second route a key can reach a log: an
+// upstream error page or a proxy that quotes the request URI back at us puts
+// the key in the body, which callers then log alongside the status code.
+func (c *Client) scrub(s string) string {
+	if c.apiKey != "" {
+		s = strings.ReplaceAll(s, c.apiKey, redactedKey)
+		s = strings.ReplaceAll(s, url.QueryEscape(c.apiKey), redactedKey)
+	}
+	return keyParamRE.ReplaceAllString(s, "key="+redactedKey)
+}
+
+// redactErr makes an arbitrary error safe to log: it strips the URL out of a
+// *url.Error, then verifies no key material survived. If any did, the message
+// is scrubbed and the chain dropped — an unwrappable error is a fair price for
+// not printing a live credential.
+func (c *Client) redactErr(err error) error {
+	red := redactURLError(err)
+	msg := red.Error()
+	if scrubbed := c.scrub(msg); scrubbed != msg {
+		return errors.New(scrubbed)
+	}
+	return red
 }
 
 // formatCoord renders a coordinate without a trailing exponent or padding,
