@@ -74,18 +74,35 @@ func New(apiKey string, timeout time.Duration) *Client {
 // geocodeResult is one entry of the forward-geocoding response array.
 // LocationIQ returns the coordinates as strings.
 type geocodeResult struct {
-	Lat string `json:"lat"`
-	Lon string `json:"lon"`
+	Lat     string `json:"lat"`
+	Lon     string `json:"lon"`
+	Address struct {
+		HouseNumber string `json:"house_number"`
+		Road        string `json:"road"`
+	} `json:"address"`
 }
 
 // Geocode resolves a street address to coordinates. It returns ErrNoMatch when
-// LocationIQ has no result for the address, which is a permanent answer;
-// every other error is transient and safe to retry.
+// LocationIQ cannot resolve the address to a street, which is a permanent
+// answer; every other error is transient and safe to retry.
+//
+// LocationIQ does not report an unresolvable US address as an error or an empty
+// result. It falls back to a coarser match — for a wholly bogus address, the
+// country centroid, which lands in Kansas with display_name "USA". Taking that
+// at face value would pin a listing's map thousands of miles from the property
+// and, because the caller treats a stored map as final, never correct it. So we
+// request addressdetails and require the result to carry a road: a genuine
+// street-level match always has one, and the centroid fallback never does.
+//
+// Deliberately NOT validated: that the returned postcode/city match the request.
+// Correct matches routinely differ — 1600 Pennsylvania Ave NW resolves with
+// postcode 20006 when queried as 20500 — so comparing them rejects good results.
 func (c *Client) Geocode(ctx context.Context, a Address) (float64, float64, error) {
 	q := url.Values{}
 	q.Set("key", c.apiKey)
 	q.Set("format", "json")
 	q.Set("country", "us")
+	q.Set("addressdetails", "1")
 	q.Set("street", a.Street)
 	q.Set("city", a.City)
 	q.Set("state", a.State)
@@ -108,6 +125,11 @@ func (c *Client) Geocode(ctx context.Context, a Address) (float64, float64, erro
 		return 0, 0, fmt.Errorf("decode geocode response: %w", err)
 	}
 	if len(results) == 0 {
+		return 0, 0, ErrNoMatch
+	}
+	// No road means LocationIQ fell back to a city/state/country centroid
+	// rather than finding the street. Treat it as unresolvable.
+	if results[0].Address.Road == "" {
 		return 0, 0, ErrNoMatch
 	}
 

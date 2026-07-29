@@ -20,7 +20,8 @@ func TestGeocode_BuildsStructuredQueryAndParsesResult(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"lat":"30.2672","lon":"-97.7431","display_name":"Austin, TX"}]`))
+		_, _ = w.Write([]byte(`[{"lat":"30.2672","lon":"-97.7431","display_name":"1234 Hilltop Drive, Austin, TX",
+			"address":{"house_number":"1234","road":"Hilltop Drive","city":"Austin","state":"Texas","postcode":"78746"}}]`))
 	}))
 	defer srv.Close()
 
@@ -36,18 +37,80 @@ func TestGeocode_BuildsStructuredQueryAndParsesResult(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"key":        "test-key",
-		"format":     "json",
-		"country":    "us",
-		"street":     "1234 Hilltop Drive",
-		"city":       "Austin",
-		"state":      "TX",
-		"postalcode": "78746",
+		"key":            "test-key",
+		"format":         "json",
+		"country":        "us",
+		"addressdetails": "1",
+		"street":         "1234 Hilltop Drive",
+		"city":           "Austin",
+		"state":          "TX",
+		"postalcode":     "78746",
 	}
 	for k, v := range want {
 		if got := gotQuery.Get(k); got != v {
 			t.Errorf("query %q = %q, want %q", k, got, v)
 		}
+	}
+}
+
+// LocationIQ does not report an unresolvable US address as an error or an empty
+// result — it falls back to the country centroid. This fixture is the real
+// response captured live for "99999 Zzqqxx Nonexistent Boulevard, Zzqqxxville,
+// ZZ 00000": coordinates in Kansas, display_name "USA", and an address object
+// with nothing below country level. Accepting it would pin a listing's map
+// thousands of miles from the property, permanently.
+func TestGeocode_CountryCentroidFallbackIsErrNoMatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"place_id":"330080572487","lat":"39.71614","lon":"-96.999246",
+			"display_name":"USA","importance":0.025,
+			"address":{"country":"United States of America","country_code":"us"}}]`))
+	}))
+	defer srv.Close()
+
+	c := New("k", 5*time.Second)
+	c.geocodeURL = srv.URL
+
+	lat, lon, err := c.Geocode(context.Background(), testAddress())
+	if !errors.Is(err, ErrNoMatch) {
+		t.Errorf("err = %v, want ErrNoMatch (got coords %v, %v)", err, lat, lon)
+	}
+}
+
+// A city-level match (no house number, no road) is the same failure in a
+// subtler form: the right town, the wrong house.
+func TestGeocode_CityLevelFallbackIsErrNoMatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"lat":"30.2672","lon":"-97.7431","display_name":"Austin, Texas, USA",
+			"address":{"city":"Austin","state":"Texas","country_code":"us"}}]`))
+	}))
+	defer srv.Close()
+
+	c := New("k", 5*time.Second)
+	c.geocodeURL = srv.URL
+
+	if _, _, err := c.Geocode(context.Background(), testAddress()); !errors.Is(err, ErrNoMatch) {
+		t.Errorf("err = %v, want ErrNoMatch", err)
+	}
+}
+
+// A street-level match without a house number is still the right street, which
+// is good enough to pin a map on.
+func TestGeocode_RoadWithoutHouseNumberIsAccepted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"lat":"30.2672","lon":"-97.7431","display_name":"Hilltop Drive, Austin",
+			"address":{"road":"Hilltop Drive","city":"Austin","state":"Texas"}}]`))
+	}))
+	defer srv.Close()
+
+	c := New("k", 5*time.Second)
+	c.geocodeURL = srv.URL
+
+	lat, lon, err := c.Geocode(context.Background(), testAddress())
+	if err != nil {
+		t.Fatalf("Geocode: %v", err)
+	}
+	if lat != 30.2672 || lon != -97.7431 {
+		t.Errorf("coords = %v, %v", lat, lon)
 	}
 }
 
