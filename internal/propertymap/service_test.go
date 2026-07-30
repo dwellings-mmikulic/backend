@@ -114,10 +114,10 @@ func TestEnsure_ReturnsExistingURLWithoutAPICalls(t *testing.T) {
 	svc := newTestService(c, u, s)
 
 	p := sampleProp()
-	p.MapImageURL = "https://cdn.example/maps/Z1.png"
+	p.MapImageURL = "https://cdn.example/maps/" + locationiq.StyleVersion + "/Z1.png"
 
 	url, pending := svc.Ensure(context.Background(), p)
-	if url != "https://cdn.example/maps/Z1.png" || pending {
+	if url != "https://cdn.example/maps/"+locationiq.StyleVersion+"/Z1.png" || pending {
 		t.Errorf("Ensure = (%q, %v)", url, pending)
 	}
 	if c.geocodeCalls.Load() != 0 || c.staticCalls.Load() != 0 {
@@ -151,11 +151,15 @@ func TestEnsure_GeocodesThenGeneratesAndPersists(t *testing.T) {
 	if pending {
 		t.Fatal("fast fakes should finish inside the deadline")
 	}
-	if url != "https://cdn.example/maps/Z1.png" {
-		t.Errorf("url = %q", url)
+	// Built from the constant, not hardcoded: a restyle bumps StyleVersion, and
+	// the invariant under test is that the version is IN the path (so restyled
+	// maps get a fresh CDN URL), not which version happens to be current.
+	wantPath := "maps/" + locationiq.StyleVersion + "/Z1.png"
+	if url != "https://cdn.example/"+wantPath {
+		t.Errorf("url = %q, want https://cdn.example/%s", url, wantPath)
 	}
-	if u.gotPath != "maps/Z1.png" {
-		t.Errorf("upload path = %q, want maps/Z1.png", u.gotPath)
+	if u.gotPath != wantPath {
+		t.Errorf("upload path = %q, want %q", u.gotPath, wantPath)
 	}
 	if got := s.coords["Z1"]; got != [2]float64{30.2672, -97.7431} {
 		t.Errorf("coords written = %v", got)

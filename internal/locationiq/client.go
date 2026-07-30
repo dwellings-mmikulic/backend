@@ -40,11 +40,34 @@ var pngSignature = []byte("\x89PNG\r\n\x1a\n")
 // record the property as permanently unmappable rather than retrying.
 var ErrNoMatch = errors.New("locationiq: no match for address")
 
+// StyleVersion identifies the current static-map look. It is part of the CDN
+// object path, so bumping it gives restyled maps a fresh URL instead of
+// overwriting the old object — a pull zone would otherwise keep serving the
+// cached previous image and the change would appear not to have worked.
+//
+// Bump this whenever any rendering parameter below changes, and clear
+// map_image_url/map_generated_at so stored maps regenerate:
+//
+//	UPDATE properties SET map_image_url = NULL, map_generated_at = NULL;
+//
+// v1: zoom 16, 600x400. v2: zoom 15, 1200x800 (wider framing, sharper on TV).
+const StyleVersion = "v2"
+
 // Static map rendering parameters. Constants rather than configuration —
 // every listing map looks the same.
 const (
-	mapZoom       = "16"
-	mapSize       = "600x400"
+	// mapZoom 15 at mapSize 1200x800 frames a named arterial road or landmark
+	// alongside the pin while keeping the property's own street legible; at 16
+	// the frame was all unnamed residential streets, which viewers could not
+	// place. Zoom and size are chosen together: doubling the size at a fixed
+	// zoom doubles the ground area covered, so changing one without the other
+	// reframes the map. Changing either does NOT restyle maps already
+	// generated; see StyleVersion.
+	mapZoom = "15"
+	// mapSize is deliberately larger than the display size: these are shown on
+	// 1080p TV screens via Roku, where a 600x400 image visibly softens when
+	// upscaled. LocationIQ caps size at 1280x1280.
+	mapSize       = "1200x800"
 	mapFormat     = "png"
 	mapType       = "streets"
 	mapMarkerIcon = "large-red-cutout"

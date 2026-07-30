@@ -186,8 +186,8 @@ func TestStaticMap_BuildsPinnedMapURLAndReturnsBytes(t *testing.T) {
 	want := map[string]string{
 		"key":     "test-key",
 		"center":  "30.2672,-97.7431",
-		"zoom":    "16",
-		"size":    "600x400",
+		"zoom":    "15",
+		"size":    "1200x800",
 		"format":  "png",
 		"maptype": "streets",
 		"markers": "icon:large-red-cutout|30.2672,-97.7431",

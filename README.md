@@ -63,9 +63,23 @@ Bunny → store video_url + status.
 
 ### Property maps
 
-The detail endpoint returns `map_image_url`: a 600×400 static map from
+The detail endpoint returns `map_image_url`: a 1200×800 static map from
 [LocationIQ](https://locationiq.com) with a pin on the home, stored at
-`maps/<zpid>.png` on Bunny CDN.
+`maps/<style>/<zpid>.png` on Bunny CDN.
+
+The framing is zoom 15 at 1200×800: wide enough to show a named arterial road
+or landmark near the property, not just its own residential block, and sharp
+enough not to soften when a Roku upscales it to 1080p. Zoom and size are chosen
+**together** — doubling the size at a fixed zoom doubles the ground area
+covered, so changing one alone reframes the map rather than just resizing it.
+
+Restyling means changing the constants in `internal/locationiq`, bumping
+`StyleVersion` there so restyled maps get a fresh CDN path instead of a cached
+stale object, and clearing the stored maps so they regenerate:
+
+```sql
+UPDATE properties SET map_image_url = NULL, map_generated_at = NULL;
+```
 
 Maps are generated **on demand** — the first request for a listing that has no
 map triggers generation, so listings nobody views cost nothing. If the property
