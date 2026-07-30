@@ -180,7 +180,10 @@ func (s *Service) generate(ctx context.Context, p *property.Property) (string, e
 			return "", err
 		}
 
-		url, err := s.uploader.Upload(ctx, "maps/"+p.ZPID+".png", bytes.NewReader(png), "image/png")
+		// The style version is in the path so a restyle lands on a fresh URL
+		// rather than overwriting an object the CDN may still be serving.
+		dest := "maps/" + locationiq.StyleVersion + "/" + p.ZPID + ".png"
+		url, err := s.uploader.Upload(ctx, dest, bytes.NewReader(png), "image/png")
 		if err != nil {
 			return "", err
 		}
