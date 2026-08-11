@@ -107,13 +107,6 @@ func (c *Client) SearchPages(ctx context.Context, s config.SearchCriteria) ([]pr
 	return out, pages, nil
 }
 
-// Search is SearchPages without page accounting. Deprecated: the scheduler
-// uses SearchPages; this remains only until callers migrate.
-func (c *Client) Search(ctx context.Context, s config.SearchCriteria) ([]property.Property, error) {
-	props, _, err := c.SearchPages(ctx, s)
-	return props, err
-}
-
 // Usage reports the account's current quota for this API, queried from the
 // provider's /usage endpoint (which lives at the API host root, not under the
 // per-API base path). The api_id is derived from the base URL's last path

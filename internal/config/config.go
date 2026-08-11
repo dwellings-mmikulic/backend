@@ -52,13 +52,9 @@ type Config struct {
 	BunnyCDNBaseURL  string // public pull-zone base, e.g. https://dwellings.b-cdn.net
 
 	// Search criteria shared across all searched locations (home status, price,
-	// bedrooms, max results). The per-search Location is filled in from
-	// SearchLocations by the scheduler.
+	// bedrooms, max results). The per-search Location is filled in from the
+	// ZIP rotation by the scheduler.
 	Search SearchCriteria
-
-	// SearchLocations is the set of locations (ZIP codes) searched each cycle,
-	// parsed from the comma-separated SEARCH_LOCATION env var.
-	SearchLocations []string
 
 	// Video rendering
 	Video VideoConfig
@@ -130,7 +126,6 @@ func Load() (*Config, error) {
 			MinBedrooms: getenvInt("SEARCH_MIN_BEDROOMS", 0),
 			MaxResults:  getenvInt("SEARCH_MAX_RESULTS", 50),
 		},
-		SearchLocations: parseLocations(getenv("SEARCH_LOCATION", "")),
 		Video: VideoConfig{
 			Enabled:         getenvBool("VIDEO_ENABLED", true),
 			SecondsPerPhoto: getenvInt("VIDEO_SECONDS_PER_PHOTO", 4),
@@ -180,18 +175,6 @@ func Load() (*Config, error) {
 	}
 
 	return c, nil
-}
-
-// parseLocations splits a comma-separated location list (e.g. "33950,33948")
-// into trimmed, non-empty entries, preserving order.
-func parseLocations(raw string) []string {
-	var out []string
-	for _, part := range strings.Split(raw, ",") {
-		if loc := strings.TrimSpace(part); loc != "" {
-			out = append(out, loc)
-		}
-	}
-	return out
 }
 
 func getenv(key, def string) string {

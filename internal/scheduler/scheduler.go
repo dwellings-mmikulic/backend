@@ -25,10 +25,18 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// zillowAPI discovers properties and fetches their one-time details record.
+// zillowAPI discovers properties, fetches their one-time details record, and
+// reports the provider's quota state.
 type zillowAPI interface {
-	Search(ctx context.Context, s config.SearchCriteria) ([]property.Property, error)
+	SearchPages(ctx context.Context, s config.SearchCriteria) ([]property.Property, int, error)
 	PropertyDetails(ctx context.Context, zpid string) (*property.Details, []byte, error)
+	Usage(ctx context.Context) (*zillow.Usage, error)
+}
+
+// zipSource yields ZIP codes in rotation order and records searches.
+type zipSource interface {
+	NextBatch(ctx context.Context, limit int) ([]string, error)
+	MarkSearched(ctx context.Context, zip string, listingCount int) error
 }
 
 // uploader stores content and returns its public CDN URL.
@@ -54,23 +62,26 @@ type Renderer interface {
 
 // Scheduler wires the collection cycle together and runs it on a cron schedule.
 type Scheduler struct {
-	cfg    *config.Config
-	zillow zillowAPI
-	bunny  uploader
-	repo   store
-	render Renderer
-	http   *http.Client
-	log    *slog.Logger
-	cron   *cron.Cron
+	cfg     *config.Config
+	zillow  zillowAPI
+	bunny   uploader
+	repo    store
+	zips    zipSource
+	render  Renderer
+	http    *http.Client
+	log     *slog.Logger
+	cron    *cron.Cron
+	running atomic.Bool // overlap guard: one cycle at a time
 }
 
 // New creates a Scheduler. render may be nil when video rendering is disabled.
-func New(cfg *config.Config, z zillowAPI, b uploader, repo store, render Renderer, log *slog.Logger) *Scheduler {
+func New(cfg *config.Config, z zillowAPI, b uploader, repo store, zips zipSource, render Renderer, log *slog.Logger) *Scheduler {
 	return &Scheduler{
 		cfg:    cfg,
 		zillow: z,
 		bunny:  b,
 		repo:   repo,
+		zips:   zips,
 		render: render,
 		http:   &http.Client{Timeout: cfg.HTTPTimeout},
 		log:    log,
@@ -103,48 +114,112 @@ func (s *Scheduler) Stop() {
 	<-ctx.Done()
 }
 
-// RunCycle performs one full cycle: for each configured location, discover
-// listings and process each. Locations run sequentially; a single location's
-// search failure is logged and skipped so the others still run. Tallies
-// aggregate across all locations.
+// zipBatchSize is how many ZIPs are pulled from the rotation per query.
+// Small enough that a budget-exhausted cycle doesn't skip far ahead of the
+// cursor, large enough to avoid a query per ZIP.
+const zipBatchSize = 25
+
+// RunCycle performs one full cycle: check the provider quota, then search
+// ZIPs in rotation order until the per-cycle API budget is spent, processing
+// every discovered listing, then enrich details. Only one cycle runs at a
+// time; a cycle that fires while another is running is skipped.
 func (s *Scheduler) RunCycle(ctx context.Context) error {
+	if !s.running.CompareAndSwap(false, true) {
+		s.log.Warn("collection cycle still running, skipping this trigger")
+		return nil
+	}
+	defer s.running.Store(false)
+
+	if !s.quotaAllowsCycle(ctx) {
+		return nil
+	}
+
 	start := time.Now()
-	s.log.Info("collection cycle started", "locations", s.cfg.SearchLocations)
+	searchBudget := s.cfg.APIBudgetPerCycle - s.cfg.DetailsPerCycle
+	if searchBudget < 0 {
+		searchBudget = 0
+	}
+	s.log.Info("collection cycle started",
+		"search_budget", searchBudget, "details_cap", s.cfg.DetailsPerCycle)
 
 	var saved, skipped, failed atomic.Int64
-	for _, loc := range s.cfg.SearchLocations {
-		if ctx.Err() != nil {
-			break // shutting down — stop searching new locations
+	zipsSearched := 0
+	for searchBudget > 0 && ctx.Err() == nil {
+		batch, err := s.zips.NextBatch(ctx, min(zipBatchSize, searchBudget))
+		if err != nil {
+			s.log.Error("next zip batch failed", "error", err)
+			break
 		}
-		criteria := s.cfg.Search
-		criteria.Location = loc
-		s.runLocation(ctx, criteria, &saved, &skipped, &failed)
+		if len(batch) == 0 {
+			break
+		}
+		for _, zip := range batch {
+			if searchBudget <= 0 || ctx.Err() != nil {
+				break
+			}
+			criteria := s.cfg.Search
+			criteria.Location = zip
+			criteria.MaxPages = searchBudget
+			props, pages, err := s.zillow.SearchPages(ctx, criteria)
+			if pages < 1 {
+				pages = 1 // an attempt was made; charge at least one request
+			}
+			searchBudget -= pages
+			if err != nil {
+				// Not marked searched — stays at the rotation front, retries
+				// next cycle.
+				s.log.Error("search failed", "zip", zip, "error", err)
+				continue
+			}
+			s.log.Info("properties discovered", "zip", zip,
+				"count", len(props), "pages", pages)
+			s.processListings(ctx, props, &saved, &skipped, &failed)
+			if err := s.zips.MarkSearched(ctx, zip, len(props)); err != nil {
+				s.log.Error("mark zip searched failed", "zip", zip, "error", err)
+			}
+			zipsSearched++
+		}
 	}
 
 	s.enrichDetails(ctx)
 
 	s.log.Info("collection cycle finished",
+		"zips_searched", zipsSearched, "search_budget_left", searchBudget,
 		"saved", saved.Load(), "skipped", skipped.Load(), "failed", failed.Load(),
 		"duration", time.Since(start).String())
 	return nil
 }
 
-// runLocation discovers and processes all listings for a single location,
-// adding to the shared tallies. A search failure is logged and returns without
-// affecting other locations.
-func (s *Scheduler) runLocation(ctx context.Context, criteria config.SearchCriteria, saved, skipped, failed *atomic.Int64) {
-	props, err := s.zillow.Search(ctx, criteria)
+// quotaAllowsCycle checks the provider's usage report before spending any
+// searches. It skips the cycle when the quota is exhausted or has less
+// headroom than one cycle's budget — continuing would only burn 429s. A
+// failed usage check proceeds (fail-open) so a flaky endpoint cannot halt
+// collection.
+func (s *Scheduler) quotaAllowsCycle(ctx context.Context) bool {
+	u, err := s.zillow.Usage(ctx)
 	if err != nil {
-		s.log.Error("search failed", "location", criteria.Location, "error", err)
-		return
+		s.log.Warn("zillow usage check failed, proceeding", "error", err)
+		return true
 	}
-	s.log.Info("properties discovered", "location", criteria.Location,
-		"count", len(props), "listing_concurrency", s.cfg.Concurrency.Listings)
+	if u.Status == "exceeded" {
+		s.log.Warn("zillow quota exhausted, skipping cycle", "status", u.Status)
+		return false
+	}
+	for _, q := range u.Quotas {
+		if q.Name == "Requests" && q.Remaining < s.cfg.APIBudgetPerCycle {
+			s.log.Warn("zillow quota below one cycle's budget, skipping cycle",
+				"remaining", q.Remaining, "budget", s.cfg.APIBudgetPerCycle)
+			return false
+		}
+	}
+	return true
+}
 
-	// Process listings concurrently (each does a CPU-heavy render), bounded by
-	// LISTING_CONCURRENCY. No errgroup context: one listing's failure must not
-	// cancel its siblings, so each task handles its own error and we tally with
-	// atomics.
+// processListings handles one ZIP's discovered listings concurrently, adding
+// to the shared tallies. No errgroup context: one listing's failure must not
+// cancel its siblings, so each task handles its own error and we tally with
+// atomics.
+func (s *Scheduler) processListings(ctx context.Context, props []property.Property, saved, skipped, failed *atomic.Int64) {
 	var g errgroup.Group
 	g.SetLimit(s.cfg.Concurrency.Listings)
 	for i := range props {

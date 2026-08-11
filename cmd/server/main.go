@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -20,6 +21,8 @@ import (
 	"github.com/dwellingtw/backend/internal/server"
 	"github.com/dwellingtw/backend/internal/video"
 	"github.com/dwellingtw/backend/internal/zillow"
+	"github.com/dwellingtw/backend/internal/zipcode"
+	"github.com/dwellingtw/backend/internal/zipseed"
 )
 
 // @title        Dwellings API
@@ -56,6 +59,14 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("database ready")
 
+	seeded, err := zipseed.Seed(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("seed zip codes: %w", err)
+	}
+	if seeded > 0 {
+		log.Info("zip rotation table seeded", "zips", seeded)
+	}
+
 	zillowClient := zillow.New(cfg.ZillowBaseURL, cfg.ZillowAPIKey, cfg.HTTPTimeout)
 	logZillowQuota(ctx, zillowClient, log)
 	bunnyClient := bunny.New(cfg.BunnyStorageZone, cfg.BunnyAPIKey, cfg.BunnyStorageHost, cfg.BunnyCDNBaseURL, cfg.BunnyTimeout)
@@ -82,7 +93,8 @@ func run(log *slog.Logger) error {
 	}
 
 	// nil-safe: pass a typed-nil renderer through as an untyped nil when disabled.
-	sched := scheduler.New(cfg, zillowClient, bunnyClient, repo, rendererOrNil(renderer), log)
+	zipRepo := zipcode.NewRepository(pool)
+	sched := scheduler.New(cfg, zillowClient, bunnyClient, repo, zipRepo, rendererOrNil(renderer), log)
 	if err := sched.Start(ctx); err != nil {
 		return err
 	}
