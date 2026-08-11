@@ -110,19 +110,19 @@ type SearchCriteria struct {
 // validating required values.
 func Load() (*Config, error) {
 	c := &Config{
-		DatabaseURL:      getenv("DATABASE_URL", ""),
-		CronSchedule:     getenv("CRON_SCHEDULE", "0 */12 * * *"), // every 12 hours
-		ZillowBaseURL:    getenv("ZILLOW_BASE_URL", "https://api.openwebninja.com/realtime-zillow-data"),
-		ZillowAPIKey:     getenv("ZILLOW_API_KEY", ""),
-		LocationIQAPIKey: getenv("LOCATIONIQ_API_KEY", ""),
-		ImagesEnabled:    getenvBool("IMAGES_ENABLED", true),
-		SkipExisting:     getenvBool("SKIP_EXISTING", true),
-		DetailsPerCycle:  getenvInt("DETAILS_PER_CYCLE", 50),
+		DatabaseURL:       getenv("DATABASE_URL", ""),
+		CronSchedule:      getenv("CRON_SCHEDULE", "0 */12 * * *"), // every 12 hours
+		ZillowBaseURL:     getenv("ZILLOW_BASE_URL", "https://api.openwebninja.com/realtime-zillow-data"),
+		ZillowAPIKey:      getenv("ZILLOW_API_KEY", ""),
+		LocationIQAPIKey:  getenv("LOCATIONIQ_API_KEY", ""),
+		ImagesEnabled:     getenvBool("IMAGES_ENABLED", true),
+		SkipExisting:      getenvBool("SKIP_EXISTING", true),
+		DetailsPerCycle:   getenvInt("DETAILS_PER_CYCLE", 50),
 		APIBudgetPerCycle: getenvInt("API_BUDGET_PER_CYCLE", 150),
-		BunnyStorageZone: getenv("BUNNY_STORAGE_ZONE", ""),
-		BunnyAPIKey:      getenv("BUNNY_API_KEY", ""),
-		BunnyStorageHost: getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),
-		BunnyCDNBaseURL:  strings.TrimRight(getenv("BUNNY_CDN_BASE_URL", ""), "/"),
+		BunnyStorageZone:  getenv("BUNNY_STORAGE_ZONE", ""),
+		BunnyAPIKey:       getenv("BUNNY_API_KEY", ""),
+		BunnyStorageHost:  getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),
+		BunnyCDNBaseURL:   strings.TrimRight(getenv("BUNNY_CDN_BASE_URL", ""), "/"),
 		Search: SearchCriteria{
 			HomeStatus:  getenv("SEARCH_HOME_STATUS", "FOR_SALE"),
 			MinPrice:    getenvInt("SEARCH_MIN_PRICE", 0),
