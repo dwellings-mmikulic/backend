@@ -59,3 +59,20 @@ ALTER TABLE properties ADD COLUMN IF NOT EXISTS map_generated_at   TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_properties_zip           ON properties (zip);
 CREATE INDEX IF NOT EXISTS idx_properties_property_type ON properties (property_type);
 CREATE INDEX IF NOT EXISTS idx_properties_created_at    ON properties (created_at DESC, id DESC);
+
+-- ZIP rotation table for nationwide collection (see
+-- docs/superpowers/specs/2026-08-10-nationwide-zip-rotation-design.md).
+-- Seeded from an embedded CSV at startup when empty; last_searched_at is the
+-- rotation cursor (NULL = never searched).
+CREATE TABLE IF NOT EXISTS zip_codes (
+    zip                TEXT PRIMARY KEY,
+    city               TEXT NOT NULL DEFAULT '',
+    state              TEXT NOT NULL DEFAULT '',
+    county             TEXT NOT NULL DEFAULT '',
+    population         INTEGER NOT NULL DEFAULT 0,
+    last_searched_at   TIMESTAMPTZ,
+    last_listing_count INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_zip_codes_rotation
+    ON zip_codes (last_searched_at ASC NULLS FIRST, population DESC);

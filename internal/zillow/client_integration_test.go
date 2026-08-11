@@ -37,7 +37,7 @@ func TestSearch_AgainstRealFixture(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "secret-key", 10*time.Second)
-	props, err := c.Search(context.Background(), config.SearchCriteria{
+	props, _, err := c.SearchPages(context.Background(), config.SearchCriteria{
 		Location:   "Punta Gorda, FL",
 		HomeStatus: "FOR_SALE",
 		MaxResults: 1000,
@@ -89,7 +89,7 @@ func TestSearch_FilterByPrice(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "k", 10*time.Second)
-	props, err := c.Search(context.Background(), config.SearchCriteria{
+	props, _, err := c.SearchPages(context.Background(), config.SearchCriteria{
 		Location:   "Punta Gorda, FL",
 		MinPrice:   300000,
 		MaxResults: 1000,

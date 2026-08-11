@@ -58,19 +58,74 @@ type fakeSearch struct {
 	// location in order. Takes precedence over props.
 	byLocation map[string][]property.Property
 	queried    []string
+	// maxPages records each call's criteria.MaxPages, in call order — lets
+	// tests assert the per-search page cap tracked the remaining budget.
+	maxPages []int
+	// searchErr, when set for a location, is returned by SearchPages for it.
+	searchErr map[string]error
+	// pagesFor, when set for a location, is the page count SearchPages reports
+	// for it (default 1).
+	pagesFor map[string]int
 	// detailsErr, when set for a zpid, is returned by PropertyDetails.
 	detailsErr map[string]error
-	mu         sync.Mutex
+	// usage is returned by Usage; usageErr takes precedence. A nil usage with
+	// nil usageErr returns an "ok" report with ample remaining quota.
+	usage    *zillow.Usage
+	usageErr error
+	// blockSearch, when non-nil, is closed-waited inside SearchPages after
+	// signalling searchEntered — for overlap-guard tests.
+	blockSearch   chan struct{}
+	searchEntered chan struct{}
+	mu            sync.Mutex
 }
 
-func (f *fakeSearch) Search(_ context.Context, c config.SearchCriteria) ([]property.Property, error) {
-	if f.byLocation != nil {
-		f.mu.Lock()
-		f.queried = append(f.queried, c.Location)
-		f.mu.Unlock()
-		return f.byLocation[c.Location], nil
+func (f *fakeSearch) SearchPages(_ context.Context, c config.SearchCriteria) ([]property.Property, int, error) {
+	if f.searchEntered != nil {
+		f.searchEntered <- struct{}{}
 	}
-	return f.props, nil
+	if f.blockSearch != nil {
+		<-f.blockSearch
+	}
+	f.mu.Lock()
+	f.queried = append(f.queried, c.Location)
+	f.maxPages = append(f.maxPages, c.MaxPages)
+	f.mu.Unlock()
+
+	pages := 1
+	if p, ok := f.pagesFor[c.Location]; ok {
+		pages = p
+	}
+	if err := f.searchErr[c.Location]; err != nil {
+		return nil, pages, err
+	}
+	if f.byLocation != nil {
+		return f.byLocation[c.Location], pages, nil
+	}
+	return f.props, pages, nil
+}
+
+func (f *fakeSearch) Usage(_ context.Context) (*zillow.Usage, error) {
+	if f.usageErr != nil {
+		return nil, f.usageErr
+	}
+	if f.usage != nil {
+		return f.usage, nil
+	}
+	u := &zillow.Usage{Status: "ok"}
+	u.Quotas = []zillow.QuotaMetric{{Name: "Requests", Limit: 10000, Used: 0, Remaining: 10000}}
+	return u, nil
+}
+
+func (f *fakeSearch) queriedLocations() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.queried...)
+}
+
+func (f *fakeSearch) maxPagesRecorded() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.maxPages...)
 }
 
 func (f *fakeSearch) PropertyDetails(_ context.Context, zpid string) (*property.Details, []byte, error) {
@@ -183,12 +238,56 @@ func (r *fakeRenderer) Render(_ context.Context, _ *property.Property, imgs []st
 	return len(imgs) * 2, nil
 }
 
+// fakeZips serves a fixed queue in order, skipping already-marked ZIPs —
+// mirroring the real rotation query, where marking pushes a ZIP to the back.
+type fakeZips struct {
+	mu     sync.Mutex
+	queue  []string
+	marked map[string]int // zip → listing count recorded by MarkSearched
+}
+
+func (f *fakeZips) NextBatch(_ context.Context, limit int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, z := range f.queue {
+		if _, done := f.marked[z]; done {
+			continue
+		}
+		out = append(out, z)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeZips) MarkSearched(_ context.Context, zip string, listingCount int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.marked == nil {
+		f.marked = map[string]int{}
+	}
+	f.marked[zip] = listingCount
+	return nil
+}
+
+func (f *fakeZips) markedZips() map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]int{}
+	for k, v := range f.marked {
+		out[k] = v
+	}
+	return out
+}
+
 func baseConfig() *config.Config {
 	return &config.Config{
-		ImagesEnabled:   true,
-		Video:           config.VideoConfig{Enabled: true, SecondsPerPhoto: 2},
-		Concurrency:     config.ConcurrencyConfig{Listings: 4, Images: 4},
-		SearchLocations: []string{"33950"},
+		ImagesEnabled:     true,
+		Video:             config.VideoConfig{Enabled: true, SecondsPerPhoto: 2},
+		Concurrency:       config.ConcurrencyConfig{Listings: 4, Images: 4},
+		APIBudgetPerCycle: 1000,
 	}
 }
 
@@ -202,7 +301,8 @@ func TestUploadPhotos_PreservesOrder(t *testing.T) {
 		}
 		local = append(local, p)
 	}
-	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, zips, &fakeRenderer{}, testLogger())
 
 	urls := s.uploadPhotos(context.Background(), "ZP1", local)
 	if len(urls) != 12 {
@@ -231,7 +331,8 @@ func TestRunCycle_AllListingsRenderedConcurrently(t *testing.T) {
 
 	store := &fakeStore{}
 	render := &fakeRenderer{}
-	s := New(baseConfig(), &fakeSearch{props: props}, &fakeUploader{}, store, render, testLogger())
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(baseConfig(), &fakeSearch{props: props}, &fakeUploader{}, store, zips, render, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -269,7 +370,8 @@ func TestRunCycle_SkipsExisting(t *testing.T) {
 	cfg.SkipExisting = true
 	// ZP0, ZP1, ZP2 already exist → should be skipped.
 	store := &fakeStore{existing: map[string]bool{"ZP0": true, "ZP1": true, "ZP2": true}}
-	s := New(cfg, &fakeSearch{props: props}, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(cfg, &fakeSearch{props: props}, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -308,7 +410,8 @@ func TestRunCycle_ExistingListingWithoutVideoIsReRendered(t *testing.T) {
 		needsVideo: map[string]bool{"ZP1": true, "ZP2": true},
 	}
 	up := &fakeUploader{}
-	s := New(cfg, &fakeSearch{props: props}, up, store, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(cfg, &fakeSearch{props: props}, up, store, zips, &fakeRenderer{}, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -328,54 +431,299 @@ func TestRunCycle_ExistingListingWithoutVideoIsReRendered(t *testing.T) {
 	}
 }
 
-func TestRunCycle_SearchesEachLocation(t *testing.T) {
-	imgSrv := jpegServer(t)
-
-	// prop builds n listings for a location, with zpids prefixed by the location.
-	prop := func(loc string, n int) []property.Property {
-		var out []property.Property
-		for i := 0; i < n; i++ {
-			out = append(out, property.Property{
-				ZPID:      fmt.Sprintf("%s-ZP%d", loc, i),
-				ImageURLs: []string{imgSrv.URL + "/a.jpg"},
-			})
-		}
-		return out
+func TestRunCycle_RotatesUntilBudgetExhausted(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 3, // no details reserve → 3 search pages
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
 	}
-
-	search := &fakeSearch{byLocation: map[string][]property.Property{
-		"33950": prop("33950", 3),
-		"33948": prop("33948", 2),
-		"33983": prop("33983", 4),
-	}}
-
-	cfg := baseConfig()
-	cfg.SearchLocations = []string{"33950", "33948", "33983"}
+	search := &fakeSearch{byLocation: map[string][]property.Property{}} // every zip: 0 listings, 1 page
+	zips := &fakeZips{queue: []string{"11111", "22222", "33333", "44444", "55555"}}
 	store := &fakeStore{}
-	s := New(cfg, search, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+	s := New(cfg, search, &fakeUploader{}, store, zips, nil, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	// Every configured location must be searched, in order.
-	want := []string{"33950", "33948", "33983"}
-	if len(search.queried) != len(want) {
-		t.Fatalf("queried %v, want %v", search.queried, want)
+	marked := zips.markedZips()
+	if len(marked) != 3 {
+		t.Fatalf("marked %d zips, want 3 (budget): %v", len(marked), marked)
 	}
-	for i, loc := range want {
-		if search.queried[i] != loc {
-			t.Errorf("queried[%d] = %q, want %q", i, search.queried[i], loc)
+	for _, z := range []string{"11111", "22222", "33333"} {
+		if _, ok := marked[z]; !ok {
+			t.Errorf("zip %s not marked; queue order should win", z)
 		}
 	}
+}
 
-	// All 3+2+4 = 9 listings across the three ZIPs must be processed.
-	if got := store.upserts.Load(); got != 9 {
-		t.Errorf("upserts = %d, want 9 (across all locations)", got)
+func TestRunCycle_DetailsReserveShrinksSearchBudget(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 3,
+		DetailsPerCycle:   2, // search budget = 3 - 2 = 1
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
 	}
-	if got := store.ready.Load(); got != 9 {
-		t.Errorf("video ready = %d, want 9", got)
+	search := &fakeSearch{byLocation: map[string][]property.Property{}}
+	zips := &fakeZips{queue: []string{"11111", "22222"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
 	}
+	if got := len(zips.markedZips()); got != 1 {
+		t.Fatalf("marked %d zips, want 1 (search budget 1)", got)
+	}
+}
+
+func TestRunCycle_FailedSearchNotMarkedButBudgetSpent(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 2,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		searchErr:  map[string]error{"11111": errors.New("boom")},
+	}
+	zips := &fakeZips{queue: []string{"11111", "22222"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	marked := zips.markedZips()
+	if _, ok := marked["11111"]; ok {
+		t.Error("failed zip 11111 must not be marked (retries next cycle)")
+	}
+	if _, ok := marked["22222"]; !ok {
+		t.Error("zip 22222 should be searched with the remaining budget")
+	}
+}
+
+// TestRunCycle_FailedZipAttemptedOnceThenSkipped covers the "tried" guard: a
+// failed ZIP stays unmarked (genuinely retries next cycle) but must not be
+// re-attempted within the SAME cycle, or a persistently failing ZIP at the
+// rotation front would burn the whole budget retrying just it.
+func TestRunCycle_FailedZipAttemptedOnceThenSkipped(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 5,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		searchErr:  map[string]error{"11111": errors.New("boom")},
+	}
+	zips := &fakeZips{queue: []string{"11111", "22222"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var attempts int
+	for _, z := range search.queriedLocations() {
+		if z == "11111" {
+			attempts++
+		}
+	}
+	if attempts != 1 {
+		t.Errorf("11111 queried %d times, want exactly 1 (must not retry within the cycle)", attempts)
+	}
+
+	marked := zips.markedZips()
+	if _, ok := marked["11111"]; ok {
+		t.Error("failed zip 11111 must not be marked")
+	}
+	if _, ok := marked["22222"]; !ok {
+		t.Error("zip 22222 should still be marked")
+	}
+}
+
+// TestRunCycle_MultiPageSearchChargesBudget covers multi-page budget
+// accounting: a search reporting more than one page must deduct that many
+// requests, and each search's MaxPages must reflect the budget remaining
+// when it was issued.
+func TestRunCycle_MultiPageSearchChargesBudget(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 3,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		pagesFor:   map[string]int{"11111": 2},
+	}
+	zips := &fakeZips{queue: []string{"11111", "22222", "33333"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	marked := zips.markedZips()
+	if _, ok := marked["11111"]; !ok {
+		t.Error("zip 11111 (2 pages) should be marked")
+	}
+	if _, ok := marked["22222"]; !ok {
+		t.Error("zip 22222 (1 page) should be marked")
+	}
+	if _, ok := marked["33333"]; ok {
+		t.Error("zip 33333 should never be queried — budget exhausted by 11111+22222 (2+1=3)")
+	}
+
+	want := []int{3, 1}
+	got := search.maxPagesRecorded()
+	if len(got) != len(want) {
+		t.Fatalf("maxPages recorded = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("maxPages[%d] = %d, want %d (MaxPages must equal budget remaining at call time)", i, got[i], want[i])
+		}
+	}
+}
+
+// TestRunCycle_BudgetExhaustsMidBatch covers a batch of ZIPs where the first
+// one alone spends the entire budget: the rest of that same batch must be
+// left untouched, not queried.
+func TestRunCycle_BudgetExhaustsMidBatch(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 3,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		pagesFor:   map[string]int{"11111": 3},
+	}
+	zips := &fakeZips{queue: []string{"11111", "22222", "33333"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := search.queriedLocations(); len(got) != 1 || got[0] != "11111" {
+		t.Fatalf("queried = %v, want only [11111]", got)
+	}
+	marked := zips.markedZips()
+	if _, ok := marked["11111"]; !ok {
+		t.Error("zip 11111 should be marked")
+	}
+	if _, ok := marked["22222"]; ok {
+		t.Error("zip 22222 must not be touched — budget exhausted by 11111 alone")
+	}
+	if _, ok := marked["33333"]; ok {
+		t.Error("zip 33333 must not be touched — budget exhausted by 11111 alone")
+	}
+}
+
+func TestRunCycle_MarksListingCount(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 10,
+		SkipExisting:      true,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{byLocation: map[string][]property.Property{
+		"33950": {{ZPID: "a"}, {ZPID: "b"}},
+	}}
+	store := &fakeStore{existing: map[string]bool{"a": true, "b": true}}
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(cfg, search, &fakeUploader{}, store, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := zips.markedZips()["33950"]; got != 2 {
+		t.Errorf("last_listing_count = %d, want 2", got)
+	}
+}
+
+func TestRunCycle_SkipsWhenQuotaExceeded(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 10,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{usage: &zillow.Usage{Status: "exceeded"}}
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := search.queriedLocations(); len(got) != 0 {
+		t.Errorf("searched %v, want none when quota exceeded", got)
+	}
+}
+
+func TestRunCycle_SkipsWhenRemainingBelowBudget(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 150,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	u := &zillow.Usage{Status: "ok"}
+	u.Quotas = []zillow.QuotaMetric{{Name: "Requests", Limit: 10000, Used: 9900, Remaining: 100}}
+	search := &fakeSearch{usage: u}
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := search.queriedLocations(); len(got) != 0 {
+		t.Errorf("searched %v, want none when remaining < budget", got)
+	}
+}
+
+func TestRunCycle_ProceedsWhenUsageCheckFails(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 10,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		usageErr:   errors.New("usage endpoint down"),
+	}
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := zips.markedZips()["33950"]; !ok {
+		t.Error("cycle should proceed (fail-open) when the usage check errors")
+	}
+}
+
+func TestRunCycle_SkipsOverlappingCycle(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 10,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation:    map[string][]property.Property{},
+		blockSearch:   make(chan struct{}),
+		searchEntered: make(chan struct{}, 1),
+	}
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	done := make(chan struct{})
+	go func() {
+		_ = s.RunCycle(context.Background())
+		close(done)
+	}()
+	<-search.searchEntered // first cycle is now mid-search
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(search.queriedLocations()); got != 0 {
+		// queried is appended after the block, so at this point the first
+		// cycle hasn't recorded its search yet; any entry means the second
+		// cycle ran a search.
+		t.Errorf("second cycle performed %d searches, want 0", got)
+	}
+
+	close(search.blockSearch)
+	<-done
 }
 
 func TestDownloadPhotos_NormalizesWebPToJPEG(t *testing.T) {
@@ -389,7 +737,8 @@ func TestDownloadPhotos_NormalizesWebPToJPEG(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, zips, &fakeRenderer{}, testLogger())
 	dir := t.TempDir()
 
 	local := s.downloadPhotos(context.Background(), []string{srv.URL + "/photo.webp"}, dir)
@@ -415,7 +764,8 @@ func TestDownloadPhotos_SkipsUndecodableData(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{queue: []string{"33950"}}
+	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, zips, &fakeRenderer{}, testLogger())
 
 	local := s.downloadPhotos(context.Background(), []string{srv.URL + "/broken.jpg"}, t.TempDir())
 	if len(local) != 0 {
@@ -425,11 +775,11 @@ func TestDownloadPhotos_SkipsUndecodableData(t *testing.T) {
 
 func TestRunCycle_EnrichesDetailsUpToCap(t *testing.T) {
 	cfg := baseConfig()
-	cfg.SearchLocations = nil // no search work — isolate enrichment
 	cfg.DetailsPerCycle = 2
 
 	store := &fakeStore{missingDetails: []string{"Z1", "Z2", "Z3"}}
-	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{} // no search work — isolate enrichment
+	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -447,11 +797,11 @@ func TestRunCycle_EnrichesDetailsUpToCap(t *testing.T) {
 
 func TestRunCycle_EnrichmentDisabledWhenCapZero(t *testing.T) {
 	cfg := baseConfig()
-	cfg.SearchLocations = nil
 	cfg.DetailsPerCycle = 0
 
 	store := &fakeStore{missingDetails: []string{"Z1"}}
-	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{}
+	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -463,7 +813,6 @@ func TestRunCycle_EnrichmentDisabledWhenCapZero(t *testing.T) {
 
 func TestRunCycle_EnrichmentErrorHandling(t *testing.T) {
 	cfg := baseConfig()
-	cfg.SearchLocations = nil
 	cfg.DetailsPerCycle = 10
 
 	search := &fakeSearch{detailsErr: map[string]error{
@@ -471,7 +820,8 @@ func TestRunCycle_EnrichmentErrorHandling(t *testing.T) {
 		"FLAKY": errors.New("500 whatever"), // transient: leave for retry
 	}}
 	store := &fakeStore{missingDetails: []string{"DEAD", "FLAKY", "OK1"}}
-	s := New(cfg, search, &fakeUploader{}, store, &fakeRenderer{}, testLogger())
+	zips := &fakeZips{}
+	s := New(cfg, search, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
 
 	if err := s.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)

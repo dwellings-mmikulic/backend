@@ -39,6 +39,12 @@ type Config struct {
 	// enrichment call per cycle (protects API quota). <= 0 disables enrichment.
 	DetailsPerCycle int
 
+	// APIBudgetPerCycle caps the total OpenWebNinja requests (search pages +
+	// details calls) one collection cycle may spend, so a month of cycles
+	// fits the API plan's quota. Search gets APIBudgetPerCycle -
+	// DetailsPerCycle; details keeps its own cap.
+	APIBudgetPerCycle int
+
 	// Bunny CDN storage
 	BunnyStorageZone string
 	BunnyAPIKey      string
@@ -46,13 +52,9 @@ type Config struct {
 	BunnyCDNBaseURL  string // public pull-zone base, e.g. https://dwellings.b-cdn.net
 
 	// Search criteria shared across all searched locations (home status, price,
-	// bedrooms, max results). The per-search Location is filled in from
-	// SearchLocations by the scheduler.
+	// bedrooms, max results). The per-search Location is filled in from the
+	// ZIP rotation by the scheduler.
 	Search SearchCriteria
-
-	// SearchLocations is the set of locations (ZIP codes) searched each cycle,
-	// parsed from the comma-separated SEARCH_LOCATION env var.
-	SearchLocations []string
 
 	// Video rendering
 	Video VideoConfig
@@ -97,24 +99,26 @@ type SearchCriteria struct {
 	MaxPrice    int
 	MinBedrooms int
 	MaxResults  int
+	MaxPages    int // per-search page cap set by the scheduler; 0 = client hard cap
 }
 
 // Load reads configuration from the environment, applying defaults and
 // validating required values.
 func Load() (*Config, error) {
 	c := &Config{
-		DatabaseURL:      getenv("DATABASE_URL", ""),
-		CronSchedule:     getenv("CRON_SCHEDULE", "0 */12 * * *"), // every 12 hours
-		ZillowBaseURL:    getenv("ZILLOW_BASE_URL", "https://api.openwebninja.com/realtime-zillow-data"),
-		ZillowAPIKey:     getenv("ZILLOW_API_KEY", ""),
-		LocationIQAPIKey: getenv("LOCATIONIQ_API_KEY", ""),
-		ImagesEnabled:    getenvBool("IMAGES_ENABLED", true),
-		SkipExisting:     getenvBool("SKIP_EXISTING", true),
-		DetailsPerCycle:  getenvInt("DETAILS_PER_CYCLE", 50),
-		BunnyStorageZone: getenv("BUNNY_STORAGE_ZONE", ""),
-		BunnyAPIKey:      getenv("BUNNY_API_KEY", ""),
-		BunnyStorageHost: getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),
-		BunnyCDNBaseURL:  strings.TrimRight(getenv("BUNNY_CDN_BASE_URL", ""), "/"),
+		DatabaseURL:       getenv("DATABASE_URL", ""),
+		CronSchedule:      getenv("CRON_SCHEDULE", "0 */12 * * *"), // every 12 hours
+		ZillowBaseURL:     getenv("ZILLOW_BASE_URL", "https://api.openwebninja.com/realtime-zillow-data"),
+		ZillowAPIKey:      getenv("ZILLOW_API_KEY", ""),
+		LocationIQAPIKey:  getenv("LOCATIONIQ_API_KEY", ""),
+		ImagesEnabled:     getenvBool("IMAGES_ENABLED", true),
+		SkipExisting:      getenvBool("SKIP_EXISTING", true),
+		DetailsPerCycle:   getenvInt("DETAILS_PER_CYCLE", 50),
+		APIBudgetPerCycle: getenvInt("API_BUDGET_PER_CYCLE", 150),
+		BunnyStorageZone:  getenv("BUNNY_STORAGE_ZONE", ""),
+		BunnyAPIKey:       getenv("BUNNY_API_KEY", ""),
+		BunnyStorageHost:  getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),
+		BunnyCDNBaseURL:   strings.TrimRight(getenv("BUNNY_CDN_BASE_URL", ""), "/"),
 		Search: SearchCriteria{
 			HomeStatus:  getenv("SEARCH_HOME_STATUS", "FOR_SALE"),
 			MinPrice:    getenvInt("SEARCH_MIN_PRICE", 0),
@@ -122,7 +126,6 @@ func Load() (*Config, error) {
 			MinBedrooms: getenvInt("SEARCH_MIN_BEDROOMS", 0),
 			MaxResults:  getenvInt("SEARCH_MAX_RESULTS", 50),
 		},
-		SearchLocations: parseLocations(getenv("SEARCH_LOCATION", "")),
 		Video: VideoConfig{
 			Enabled:         getenvBool("VIDEO_ENABLED", true),
 			SecondsPerPhoto: getenvInt("VIDEO_SECONDS_PER_PHOTO", 4),
@@ -167,26 +170,11 @@ func Load() (*Config, error) {
 			missing = append(missing, "BUNNY_CDN_BASE_URL")
 		}
 	}
-	if len(c.SearchLocations) == 0 {
-		missing = append(missing, "SEARCH_LOCATION")
-	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 
 	return c, nil
-}
-
-// parseLocations splits a comma-separated location list (e.g. "33950,33948")
-// into trimmed, non-empty entries, preserving order.
-func parseLocations(raw string) []string {
-	var out []string
-	for _, part := range strings.Split(raw, ",") {
-		if loc := strings.TrimSpace(part); loc != "" {
-			out = append(out, loc)
-		}
-	}
-	return out
 }
 
 func getenv(key, def string) string {

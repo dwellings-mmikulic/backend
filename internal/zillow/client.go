@@ -69,15 +69,26 @@ type searchResponse struct {
 	Data   []listing `json:"data"`
 }
 
-// Search returns properties matching the configured criteria, paging until
-// MaxResults is reached or the API runs out of results. Price and bedroom
-// criteria are applied client-side.
-func (c *Client) Search(ctx context.Context, s config.SearchCriteria) ([]property.Property, error) {
+// SearchPages returns properties matching the configured criteria, paging
+// until MaxResults is reached, the API runs out of results, or the page cap
+// is hit. The returned int is the number of HTTP search requests actually
+// made — the scheduler charges them against its per-cycle API budget — and
+// is reported even when an error is returned (a failed request still counted
+// against the provider's quota). Price and bedroom criteria are applied
+// client-side. s.MaxPages, when > 0, lowers the hard 20-page safety cap.
+func (c *Client) SearchPages(ctx context.Context, s config.SearchCriteria) ([]property.Property, int, error) {
+	maxPages := 20 // hard safety cap on pagination
+	if s.MaxPages > 0 && s.MaxPages < maxPages {
+		maxPages = s.MaxPages
+	}
+
 	var out []property.Property
-	for page := 1; ; page++ {
+	pages := 0
+	for page := 1; page <= maxPages; page++ {
 		raw, err := c.searchPage(ctx, s, page)
+		pages++
 		if err != nil {
-			return nil, err
+			return nil, pages, err
 		}
 		if len(raw) == 0 {
 			break
@@ -89,14 +100,11 @@ func (c *Client) Search(ctx context.Context, s config.SearchCriteria) ([]propert
 			}
 			out = append(out, p)
 			if s.MaxResults > 0 && len(out) >= s.MaxResults {
-				return out, nil
+				return out, pages, nil
 			}
 		}
-		if page >= 20 { // hard safety cap on pagination
-			break
-		}
 	}
-	return out, nil
+	return out, pages, nil
 }
 
 // Usage reports the account's current quota for this API, queried from the
