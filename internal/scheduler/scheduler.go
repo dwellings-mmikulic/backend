@@ -144,16 +144,32 @@ func (s *Scheduler) RunCycle(ctx context.Context) error {
 
 	var saved, skipped, failed atomic.Int64
 	zipsSearched := 0
+	// tried holds every ZIP already attempted this cycle. A failed ZIP is left
+	// unmarked in the DB (it genuinely retries next cycle) but must not be
+	// re-attempted within this same cycle, or a run of persistently failing
+	// ZIPs at the rotation front would burn the whole budget retrying just
+	// them — or, if there are at least zipBatchSize of them, starve every
+	// other ZIP forever since NextBatch would keep returning only them.
+	tried := map[string]bool{}
 	for searchBudget > 0 && ctx.Err() == nil {
-		batch, err := s.zips.NextBatch(ctx, min(zipBatchSize, searchBudget))
+		// Request enough to both re-cover already-tried ZIPs (still unmarked,
+		// so still at the rotation front) and reach fresh ones behind them.
+		limit := min(zipBatchSize+len(tried), searchBudget+len(tried))
+		batch, err := s.zips.NextBatch(ctx, limit)
 		if err != nil {
 			s.log.Error("next zip batch failed", "error", err)
 			break
 		}
-		if len(batch) == 0 {
-			break
-		}
+		var fresh []string
 		for _, zip := range batch {
+			if !tried[zip] {
+				fresh = append(fresh, zip)
+			}
+		}
+		if len(fresh) == 0 {
+			break // rotation front fully attempted this cycle
+		}
+		for _, zip := range fresh {
 			if searchBudget <= 0 || ctx.Err() != nil {
 				break
 			}
@@ -165,9 +181,11 @@ func (s *Scheduler) RunCycle(ctx context.Context) error {
 				pages = 1 // an attempt was made; charge at least one request
 			}
 			searchBudget -= pages
+			tried[zip] = true
 			if err != nil {
-				// Not marked searched — stays at the rotation front, retries
-				// next cycle.
+				// Not marked searched — stays at the rotation front and
+				// retries next cycle; tried keeps this cycle from
+				// re-attempting it immediately.
 				s.log.Error("search failed", "zip", zip, "error", err)
 				continue
 			}

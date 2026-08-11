@@ -58,6 +58,9 @@ type fakeSearch struct {
 	// location in order. Takes precedence over props.
 	byLocation map[string][]property.Property
 	queried    []string
+	// maxPages records each call's criteria.MaxPages, in call order — lets
+	// tests assert the per-search page cap tracked the remaining budget.
+	maxPages []int
 	// searchErr, when set for a location, is returned by SearchPages for it.
 	searchErr map[string]error
 	// pagesFor, when set for a location, is the page count SearchPages reports
@@ -85,6 +88,7 @@ func (f *fakeSearch) SearchPages(_ context.Context, c config.SearchCriteria) ([]
 	}
 	f.mu.Lock()
 	f.queried = append(f.queried, c.Location)
+	f.maxPages = append(f.maxPages, c.MaxPages)
 	f.mu.Unlock()
 
 	pages := 1
@@ -116,6 +120,12 @@ func (f *fakeSearch) queriedLocations() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.queried...)
+}
+
+func (f *fakeSearch) maxPagesRecorded() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.maxPages...)
 }
 
 func (f *fakeSearch) PropertyDetails(_ context.Context, zpid string) (*property.Details, []byte, error) {
@@ -486,6 +496,122 @@ func TestRunCycle_FailedSearchNotMarkedButBudgetSpent(t *testing.T) {
 	}
 	if _, ok := marked["22222"]; !ok {
 		t.Error("zip 22222 should be searched with the remaining budget")
+	}
+}
+
+// TestRunCycle_FailedZipAttemptedOnceThenSkipped covers the "tried" guard: a
+// failed ZIP stays unmarked (genuinely retries next cycle) but must not be
+// re-attempted within the SAME cycle, or a persistently failing ZIP at the
+// rotation front would burn the whole budget retrying just it.
+func TestRunCycle_FailedZipAttemptedOnceThenSkipped(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 5,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		searchErr:  map[string]error{"11111": errors.New("boom")},
+	}
+	zips := &fakeZips{queue: []string{"11111", "22222"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var attempts int
+	for _, z := range search.queriedLocations() {
+		if z == "11111" {
+			attempts++
+		}
+	}
+	if attempts != 1 {
+		t.Errorf("11111 queried %d times, want exactly 1 (must not retry within the cycle)", attempts)
+	}
+
+	marked := zips.markedZips()
+	if _, ok := marked["11111"]; ok {
+		t.Error("failed zip 11111 must not be marked")
+	}
+	if _, ok := marked["22222"]; !ok {
+		t.Error("zip 22222 should still be marked")
+	}
+}
+
+// TestRunCycle_MultiPageSearchChargesBudget covers multi-page budget
+// accounting: a search reporting more than one page must deduct that many
+// requests, and each search's MaxPages must reflect the budget remaining
+// when it was issued.
+func TestRunCycle_MultiPageSearchChargesBudget(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 3,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		pagesFor:   map[string]int{"11111": 2},
+	}
+	zips := &fakeZips{queue: []string{"11111", "22222", "33333"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	marked := zips.markedZips()
+	if _, ok := marked["11111"]; !ok {
+		t.Error("zip 11111 (2 pages) should be marked")
+	}
+	if _, ok := marked["22222"]; !ok {
+		t.Error("zip 22222 (1 page) should be marked")
+	}
+	if _, ok := marked["33333"]; ok {
+		t.Error("zip 33333 should never be queried — budget exhausted by 11111+22222 (2+1=3)")
+	}
+
+	want := []int{3, 1}
+	got := search.maxPagesRecorded()
+	if len(got) != len(want) {
+		t.Fatalf("maxPages recorded = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("maxPages[%d] = %d, want %d (MaxPages must equal budget remaining at call time)", i, got[i], want[i])
+		}
+	}
+}
+
+// TestRunCycle_BudgetExhaustsMidBatch covers a batch of ZIPs where the first
+// one alone spends the entire budget: the rest of that same batch must be
+// left untouched, not queried.
+func TestRunCycle_BudgetExhaustsMidBatch(t *testing.T) {
+	cfg := &config.Config{
+		APIBudgetPerCycle: 3,
+		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
+	}
+	search := &fakeSearch{
+		byLocation: map[string][]property.Property{},
+		pagesFor:   map[string]int{"11111": 3},
+	}
+	zips := &fakeZips{queue: []string{"11111", "22222", "33333"}}
+	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := search.queriedLocations(); len(got) != 1 || got[0] != "11111" {
+		t.Fatalf("queried = %v, want only [11111]", got)
+	}
+	marked := zips.markedZips()
+	if _, ok := marked["11111"]; !ok {
+		t.Error("zip 11111 should be marked")
+	}
+	if _, ok := marked["22222"]; ok {
+		t.Error("zip 22222 must not be touched — budget exhausted by 11111 alone")
+	}
+	if _, ok := marked["33333"]; ok {
+		t.Error("zip 33333 must not be touched — budget exhausted by 11111 alone")
 	}
 }
 
