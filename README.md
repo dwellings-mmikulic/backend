@@ -179,8 +179,8 @@ All configuration is via environment variables — see `.env.example`. Required:
 `DATABASE_URL`, `ZILLOW_API_KEY`, `BUNNY_STORAGE_ZONE`, `BUNNY_API_KEY`,
 `BUNNY_CDN_BASE_URL`.
 
-`CRON_SCHEDULE` is a standard 5-field cron expression (default `0 * * * *`,
-hourly). A cycle also runs once immediately on startup.
+`CRON_SCHEDULE` is a standard 5-field cron expression (default `0 */12 * * *`,
+every 12 hours). A cycle also runs once immediately on startup.
 
 `DETAILS_PER_CYCLE` caps how many properties get a one-time details-API
 enrichment call per cycle (default `50`; `0` disables enrichment entirely).

@@ -223,12 +223,20 @@ func (s *Scheduler) quotaAllowsCycle(ctx context.Context) bool {
 		s.log.Warn("zillow quota exhausted, skipping cycle", "status", u.Status)
 		return false
 	}
+	found := false
 	for _, q := range u.Quotas {
-		if q.Name == "Requests" && q.Remaining < s.cfg.APIBudgetPerCycle {
+		if q.Name != "Requests" {
+			continue
+		}
+		found = true
+		if q.Remaining < s.cfg.APIBudgetPerCycle {
 			s.log.Warn("zillow quota below one cycle's budget, skipping cycle",
 				"remaining", q.Remaining, "budget", s.cfg.APIBudgetPerCycle)
 			return false
 		}
+	}
+	if !found {
+		s.log.Warn("zillow usage report has no Requests quota, proceeding", "status", u.Status)
 	}
 	return true
 }
