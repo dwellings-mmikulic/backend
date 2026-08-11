@@ -155,7 +155,7 @@ MLS number, listing status, agent contact, and lat/long.
 ## Running locally (Docker)
 
 ```bash
-cp .env.example .env      # fill in ZILLOW_API_KEY, BUNNY_* and SEARCH_LOCATION
+cp .env.example .env      # fill in ZILLOW_API_KEY and BUNNY_*
 make up                   # starts postgres + app
 make logs                 # follow app logs
 make down                 # stop everything
@@ -177,13 +177,22 @@ make run
 
 All configuration is via environment variables — see `.env.example`. Required:
 `DATABASE_URL`, `ZILLOW_API_KEY`, `BUNNY_STORAGE_ZONE`, `BUNNY_API_KEY`,
-`BUNNY_CDN_BASE_URL`, `SEARCH_LOCATION`.
+`BUNNY_CDN_BASE_URL`.
 
 `CRON_SCHEDULE` is a standard 5-field cron expression (default `0 * * * *`,
 hourly). A cycle also runs once immediately on startup.
 
 `DETAILS_PER_CYCLE` caps how many properties get a one-time details-API
 enrichment call per cycle (default `50`; `0` disables enrichment entirely).
+
+`API_BUDGET_PER_CYCLE` (default `150`) caps the total OpenWebNinja requests
+one cycle may spend — search pages plus details calls. ZIP codes are not
+configured: a built-in table of all 29,670 US residential ZIPs is seeded on
+first startup, and each cycle works through it in rotation order
+(never-searched first, most populous first, then stalest), stopping when the
+budget is spent and resuming from the cursor next cycle. A cycle is skipped
+entirely when the provider reports the monthly quota is exhausted, or when a
+previous cycle is still running.
 
 ## OpenWebNinja Zillow API
 
@@ -196,8 +205,9 @@ enrichment call per cycle (default `50`; `0` disables enrichment entirely).
   `internal/zillow/testdata/`.
 - Full image sets are built from each listing's `carouselPhotosComposable`
   (`baseUrl` + `photoData[].photoKey`), falling back to the `imgSrc` thumbnail.
-- `Search` pages until `SEARCH_MAX_RESULTS` is reached (hard cap 20 pages).
-  Price and bedroom criteria are applied client-side.
+- `SearchPages` pages until `SEARCH_MAX_RESULTS` is reached (`0` = uncapped)
+  or the per-cycle API budget runs out (hard cap 20 pages per ZIP). Price and
+  bedroom criteria are applied client-side.
 
 ## Notes
 
