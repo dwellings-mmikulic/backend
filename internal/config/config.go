@@ -39,6 +39,12 @@ type Config struct {
 	// enrichment call per cycle (protects API quota). <= 0 disables enrichment.
 	DetailsPerCycle int
 
+	// APIBudgetPerCycle caps the total OpenWebNinja requests (search pages +
+	// details calls) one collection cycle may spend, so a month of cycles
+	// fits the API plan's quota. Search gets APIBudgetPerCycle -
+	// DetailsPerCycle; details keeps its own cap.
+	APIBudgetPerCycle int
+
 	// Bunny CDN storage
 	BunnyStorageZone string
 	BunnyAPIKey      string
@@ -97,6 +103,7 @@ type SearchCriteria struct {
 	MaxPrice    int
 	MinBedrooms int
 	MaxResults  int
+	MaxPages    int // per-search page cap set by the scheduler; 0 = client hard cap
 }
 
 // Load reads configuration from the environment, applying defaults and
@@ -111,6 +118,7 @@ func Load() (*Config, error) {
 		ImagesEnabled:    getenvBool("IMAGES_ENABLED", true),
 		SkipExisting:     getenvBool("SKIP_EXISTING", true),
 		DetailsPerCycle:  getenvInt("DETAILS_PER_CYCLE", 50),
+		APIBudgetPerCycle: getenvInt("API_BUDGET_PER_CYCLE", 150),
 		BunnyStorageZone: getenv("BUNNY_STORAGE_ZONE", ""),
 		BunnyAPIKey:      getenv("BUNNY_API_KEY", ""),
 		BunnyStorageHost: getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),
@@ -166,9 +174,6 @@ func Load() (*Config, error) {
 		if c.BunnyCDNBaseURL == "" {
 			missing = append(missing, "BUNNY_CDN_BASE_URL")
 		}
-	}
-	if len(c.SearchLocations) == 0 {
-		missing = append(missing, "SEARCH_LOCATION")
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
