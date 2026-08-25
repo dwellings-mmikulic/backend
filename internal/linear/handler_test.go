@@ -68,3 +68,21 @@ func TestHandler_NoContentIs503(t *testing.T) {
 		t.Errorf("status %d, want 503", rec.Code)
 	}
 }
+
+func TestHandler_EPG(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	rec := serve(t, m, t0, "/channels/epg.json?zip=77494")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content type = %q", ct)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=300" {
+		t.Errorf("cache control = %q", cc)
+	}
+	if !strings.Contains(rec.Body.String(), `"programs":[{"start":"`) {
+		t.Errorf("body:\n%s", rec.Body.String())
+	}
+}

@@ -24,6 +24,7 @@ func NewHandler(svc *Service, log *slog.Logger) *Handler {
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /channels/master.m3u8", h.master)
 	mux.HandleFunc("GET /channels/live.m3u8", h.live)
+	mux.HandleFunc("GET /channels/epg.json", h.epg)
 }
 
 func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +53,23 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 	}
 	playlistHeaders(w)
 	_, _ = w.Write(body)
+}
+
+func (h *Handler) epg(w http.ResponseWriter, r *http.Request) {
+	sc, err := ParseScope(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	e, err := h.svc.EPG(r.Context(), sc, h.svc.now())
+	if err != nil {
+		h.fail(w, sc, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	_ = json.NewEncoder(w).Encode(e)
 }
 
 // fail maps service errors to responses.
