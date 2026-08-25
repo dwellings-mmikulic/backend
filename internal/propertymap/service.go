@@ -120,9 +120,12 @@ func (s *Service) Ensure(ctx context.Context, p *property.Property) (property.Ma
 		return have, false
 	}
 	// Stamped with no light URL: the address could not be geocoded. Never
-	// retried. (Stamped with a light URL but no dark one is the pre-dark-maps
-	// state and falls through to generate the missing style.)
-	if p.MapGeneratedAt != nil && have.Light == "" {
+	// retried through the geocoder — but if coordinates have since arrived
+	// from Zillow's details record, the map no longer needs geocoding, so
+	// the row is eligible again. (Stamped with a light URL but no dark one
+	// is the pre-dark-maps state and falls through to generate the missing
+	// style.)
+	if p.MapGeneratedAt != nil && have.Light == "" && (p.Latitude == nil || p.Longitude == nil) {
 		return have, false
 	}
 	if !s.allow(p.ZPID) {

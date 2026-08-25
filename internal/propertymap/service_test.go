@@ -143,6 +143,28 @@ func TestEnsure_PermanentlyUnmappableMakesNoAPICalls(t *testing.T) {
 	}
 }
 
+func TestEnsure_UnmappableRowRetriesOnceZillowCoordsArrive(t *testing.T) {
+	c := &fakeClient{}
+	u, s := &fakeUploader{}, newFakeStore()
+	svc := newTestService(c, u, s)
+
+	now := time.Now()
+	p := sampleProp()
+	p.MapGeneratedAt = &now // stamped unmappable by an earlier geocode miss
+	p.Latitude, p.Longitude = f64p(30.2672), f64p(-97.7431)
+
+	m, pending := svc.Ensure(context.Background(), p)
+	if pending || !m.Complete() {
+		t.Fatalf("Ensure = (%+v, %v), want both maps", m, pending)
+	}
+	if c.geocodeCalls.Load() != 0 {
+		t.Error("must use the stored coordinates, not geocode again")
+	}
+	if c.staticCalls.Load() != 2 {
+		t.Errorf("static map calls = %d, want one per style", c.staticCalls.Load())
+	}
+}
+
 func TestEnsure_GeocodesThenGeneratesBothStylesAndPersists(t *testing.T) {
 	c := &fakeClient{lat: 30.2672, lon: -97.7431}
 	u, s := &fakeUploader{}, newFakeStore()

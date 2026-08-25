@@ -53,6 +53,27 @@ func TestGeocode_BuildsStructuredQueryAndParsesResult(t *testing.T) {
 	}
 }
 
+func TestGeocode_StripsUnitFromStreet(t *testing.T) {
+	var gotStreet string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotStreet = r.URL.Query().Get("street")
+		_, _ = w.Write([]byte(`[{"lat":"41.961","lon":"-87.718","address":{"house_number":"3559","road":"West Montrose Avenue"}}]`))
+	}))
+	defer srv.Close()
+
+	c := New("k", 5*time.Second)
+	c.geocodeURL = srv.URL
+
+	a := testAddress()
+	a.Street = "3559 W Montrose Ave #4E"
+	if _, _, err := c.Geocode(context.Background(), a); err != nil {
+		t.Fatalf("Geocode: %v", err)
+	}
+	if gotStreet != "3559 W Montrose Ave" {
+		t.Errorf("street sent = %q, want the unit stripped", gotStreet)
+	}
+}
+
 // LocationIQ does not report an unresolvable US address as an error or an empty
 // result — it falls back to the country centroid. This fixture is the real
 // response captured live for "99999 Zzqqxx Nonexistent Boulevard, Zzqqxxville,

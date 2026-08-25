@@ -141,6 +141,11 @@ type geocodeResult struct {
 // request addressdetails and require the result to carry a road: a genuine
 // street-level match always has one, and the centroid fallback never does.
 //
+// A trailing unit designator ("#4E", "Apt 5") is stripped first: LocationIQ
+// cannot resolve a street with one and would fall back to the city centroid,
+// while the bare street resolves to the building — which is where the map
+// should be centred anyway.
+//
 // Deliberately NOT validated: that the returned postcode/city match the request.
 // Correct matches routinely differ — 1600 Pennsylvania Ave NW resolves with
 // postcode 20006 when queried as 20500 — so comparing them rejects good results.
@@ -150,7 +155,7 @@ func (c *Client) Geocode(ctx context.Context, a Address) (float64, float64, erro
 	q.Set("format", "json")
 	q.Set("country", "us")
 	q.Set("addressdetails", "1")
-	q.Set("street", a.Street)
+	q.Set("street", stripUnit(a.Street))
 	q.Set("city", a.City)
 	q.Set("state", a.State)
 	q.Set("postalcode", a.PostalCode)

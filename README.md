@@ -86,13 +86,16 @@ UPDATE properties SET map_image_url = NULL, map_image_dark_url = NULL, map_gener
 
 Maps are generated **on demand** — the first request for a listing that has no
 map triggers generation, so listings nobody views cost nothing. If the property
-has no coordinates yet, its address is geocoded first and the coordinates are
-saved back to the row.
+has no coordinates yet, its address is geocoded first (with any trailing unit
+designator such as `#4E` or `Apt 5` stripped — LocationIQ cannot resolve those)
+and the coordinates are saved back to the row.
 
 The request waits up to 1.5s. If generation takes longer it finishes in the
 background, the response carries `map_image_url: null` with a shortened
 `max-age=30`, and the next request serves the finished map. Addresses that
-cannot be geocoded are recorded once and never retried.
+cannot be geocoded are recorded once and not geocoded again — but once the
+scheduler's details enrichment stores Zillow's own coordinates for the row, the
+map is generated from those on the next view.
 
 Generation is also subject to a per-zpid cooldown after a transient failure
 and an hourly, process-wide generation budget. Either can make an otherwise
