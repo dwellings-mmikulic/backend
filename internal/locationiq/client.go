@@ -51,7 +51,9 @@ var ErrNoMatch = errors.New("locationiq: no match for address")
 //	UPDATE properties SET map_image_url = NULL, map_image_dark_url = NULL, map_generated_at = NULL;
 //
 // v1: zoom 16, 600x400. v2: zoom 15, 1200x800 (wider framing, sharper on TV).
-const StyleVersion = "v2"
+// v3: no pin — the map is centred on the property and the client draws its
+// own marker at the image centre.
+const StyleVersion = "v3"
 
 // Static map rendering parameters. Constants rather than configuration —
 // every listing map looks the same.
@@ -67,9 +69,8 @@ const (
 	// mapSize is deliberately larger than the display size: these are shown on
 	// 1080p TV screens via Roku, where a 600x400 image visibly softens when
 	// upscaled. LocationIQ caps size at 1280x1280.
-	mapSize       = "1200x800"
-	mapFormat     = "png"
-	mapMarkerIcon = "large-red-cutout"
+	mapSize   = "1200x800"
+	mapFormat = "png"
 )
 
 // Style selects the LocationIQ base map for a static map. Every property gets
@@ -191,7 +192,7 @@ func (c *Client) Geocode(ctx context.Context, a Address) (float64, float64, erro
 }
 
 // StaticMap returns the PNG bytes of a map in the given style centred on the
-// coordinates with a pin dropped on them.
+// coordinates. No marker is drawn: clients overlay their own at the centre.
 func (c *Client) StaticMap(ctx context.Context, lat, lon float64, style Style) ([]byte, error) {
 	center := formatCoord(lat) + "," + formatCoord(lon)
 
@@ -202,7 +203,6 @@ func (c *Client) StaticMap(ctx context.Context, lat, lon float64, style Style) (
 	q.Set("size", mapSize)
 	q.Set("format", mapFormat)
 	q.Set("maptype", string(style))
-	q.Set("markers", "icon:"+mapMarkerIcon+"|"+center)
 
 	body, status, err := c.get(ctx, c.staticMapURL+"?"+q.Encode())
 	if err != nil {

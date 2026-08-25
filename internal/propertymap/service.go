@@ -1,5 +1,5 @@
 // Package propertymap generates a property's static maps on demand: geocode
-// if needed, fetch the pinned map in every style, store them on the CDN, and
+// if needed, fetch the map in every style, store them on the CDN, and
 // persist the URLs.
 package propertymap
 

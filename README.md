@@ -65,7 +65,7 @@ Bunny → store video_url + status.
 
 The detail endpoint returns `map_image_url` (light, `streets` base map) and
 `map_image_dark_url` (`dark` base map): 1200×800 static maps from
-[LocationIQ](https://locationiq.com) with a pin on the home, stored at
+[LocationIQ](https://locationiq.com) centred on the home (no pin — the client draws its own at the image centre), stored at
 `maps/<version>/<zpid>.png` and `maps/<version>/<zpid>-dark.png` on Bunny CDN.
 Both are generated on first view; a row that predates dark maps gets only its
 dark map fetched, the stored light one is kept.
@@ -136,7 +136,7 @@ Interactive docs: [https://api.dwellings.tv/swagger/index.html](https://api.dwel
   `garage`, `hoa_fee_monthly`, `mls_number`, `listing_status`, `agent`,
   `latitude`, `longitude`, `lot_size_acres`) that are `null` until the
   scheduler's details-enrichment step fills them in, plus `map_image_url` — a
-  static LocationIQ map with a pin on the home, hosted on Bunny CDN. Returns
+  static LocationIQ map centred on the home (no pin), hosted on Bunny CDN. Returns
   `404` with `{"error":"not found"}` for an unknown `zpid`.
 
 **Pagination:** when a page has more results, the response includes

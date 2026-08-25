@@ -190,7 +190,9 @@ func TestStaticMap_BuildsPinnedMapURLAndReturnsBytes(t *testing.T) {
 		"size":    "1200x800",
 		"format":  "png",
 		"maptype": "streets",
-		"markers": "icon:large-red-cutout|30.2672,-97.7431",
+	}
+	if gotQuery.Has("markers") {
+		t.Errorf("markers = %q, want none: clients draw their own pin", gotQuery.Get("markers"))
 	}
 	for k, v := range want {
 		if got := gotQuery.Get(k); got != v {
