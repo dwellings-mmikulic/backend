@@ -1,7 +1,9 @@
 package linear
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -65,4 +67,30 @@ func (s *Service) current(ctx context.Context, key string, t time.Time) (cur, pr
 	s.cache[key] = cached{cur: cur, prev: prev}
 	s.mu.Unlock()
 	return cur, prev, nil
+}
+
+// Playlist renders the live media playlist of sc at now.
+func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte, error) {
+	key := sc.Key()
+	cur, prev, err := s.current(ctx, key, now)
+	if err != nil {
+		return nil, err
+	}
+	ids := windowClipIDs(cur, prev, now, windowSegments)
+	clips, err := s.store.ClipsByID(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if _, ok := clips[id]; !ok {
+			return nil, fmt.Errorf("channel %s v%d references missing clip %d", key, cur.Version, id)
+		}
+	}
+	segs := window(cur, prev, clips, now, windowSegments)
+	if len(segs) == 0 {
+		return nil, ErrNoContent
+	}
+	var buf bytes.Buffer
+	writePlaylist(&buf, segs)
+	return buf.Bytes(), nil
 }
