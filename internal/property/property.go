@@ -59,9 +59,23 @@ type Property struct {
 
 	// Static map state. MapGeneratedAt non-nil with an empty MapImageURL means
 	// the address could not be geocoded and no map will be attempted again.
-	MapImageURL    string
-	MapGeneratedAt *time.Time
+	// MapImageURL is the light map; MapImageDarkURL the dark one. A row may
+	// have the light map only (generated before dark maps existed); the dark
+	// one is then filled in on the next view.
+	MapImageURL     string
+	MapImageDarkURL string
+	MapGeneratedAt  *time.Time
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// MapURLs holds a property's static map URLs, one per style. An empty field
+// means that map does not exist (yet).
+type MapURLs struct {
+	Light string
+	Dark  string
+}
+
+// Complete reports whether every style has a map.
+func (m MapURLs) Complete() bool { return m.Light != "" && m.Dark != "" }

@@ -54,6 +54,9 @@ ALTER TABLE properties ADD COLUMN IF NOT EXISTS details_fetched_at TIMESTAMPTZ;
 -- be geocoded; clearing it makes the row eligible again.
 ALTER TABLE properties ADD COLUMN IF NOT EXISTS map_image_url      TEXT;
 ALTER TABLE properties ADD COLUMN IF NOT EXISTS map_generated_at   TIMESTAMPTZ;
+-- Dark-style counterpart of map_image_url; filled lazily for rows that only
+-- had a light map when it was added.
+ALTER TABLE properties ADD COLUMN IF NOT EXISTS map_image_dark_url TEXT;
 
 -- Public listing API filter/sort indexes.
 CREATE INDEX IF NOT EXISTS idx_properties_zip           ON properties (zip);

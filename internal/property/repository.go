@@ -179,8 +179,8 @@ SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
        property_type, description, year_built, heating, cooling, garage,
        hoa_fee_monthly, mls_number, listing_status,
        agent_name, agent_phone, agent_brokerage, latitude, longitude,
-       details_fetched_at, COALESCE(map_image_url,''), map_generated_at,
-       created_at, updated_at
+       details_fetched_at, COALESCE(map_image_url,''), COALESCE(map_image_dark_url,''),
+       map_generated_at, created_at, updated_at
   FROM properties WHERE zpid = $1`
 
 	var p Property
@@ -192,7 +192,7 @@ SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
 		&p.PropertyType, &p.Description, &p.YearBuilt, &p.Heating, &p.Cooling, &p.Garage,
 		&p.HOAFeeMonthly, &p.MLSNumber, &p.ListingStatus,
 		&p.AgentName, &p.AgentPhone, &p.AgentBrokerage, &p.Latitude, &p.Longitude,
-		&p.DetailsFetchedAt, &p.MapImageURL, &p.MapGeneratedAt,
+		&p.DetailsFetchedAt, &p.MapImageURL, &p.MapImageDarkURL, &p.MapGeneratedAt,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -286,12 +286,13 @@ UPDATE properties SET
 // SetMapImage records the property's static map URL and stamps
 // map_generated_at. An empty url records a permanently unmappable row (the
 // address could not be geocoded) so it is never retried.
-func (r *Repository) SetMapImage(ctx context.Context, zpid, url string) error {
+func (r *Repository) SetMapImage(ctx context.Context, zpid string, m MapURLs) error {
 	const q = `
 UPDATE properties SET
-    map_image_url = NULLIF($2, ''), map_generated_at = now(), updated_at = now()
+    map_image_url = NULLIF($2, ''), map_image_dark_url = NULLIF($3, ''),
+    map_generated_at = now(), updated_at = now()
  WHERE zpid = $1`
-	if _, err := r.pool.Exec(ctx, q, zpid, url); err != nil {
+	if _, err := r.pool.Exec(ctx, q, zpid, m.Light, m.Dark); err != nil {
 		return fmt.Errorf("set map image zpid=%s: %w", zpid, err)
 	}
 	return nil

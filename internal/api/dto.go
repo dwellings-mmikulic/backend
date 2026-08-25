@@ -36,35 +36,36 @@ type agentDTO struct {
 
 // detailResponse is the full detail-screen payload.
 type detailResponse struct {
-	ZPID          string    `json:"zpid"`
-	Price         int64     `json:"price"`
-	Address       string    `json:"address"`
-	City          string    `json:"city"`
-	State         string    `json:"state"`
-	Zip           string    `json:"zip"`
-	Bedrooms      int       `json:"bedrooms"`
-	Bathrooms     float64   `json:"bathrooms"`
-	HomeSizeSqft  int       `json:"home_size_sqft"`
-	LotSizeSqft   int       `json:"lot_size_sqft"`
-	LotSizeAcres  float64   `json:"lot_size_acres"`
-	PropertyType  *string   `json:"property_type"`
-	Description   *string   `json:"description"`
-	YearBuilt     *int      `json:"year_built"`
-	Heating       *string   `json:"heating"`
-	Cooling       *string   `json:"cooling"`
-	Garage        *string   `json:"garage"`
-	HOAFeeMonthly *int      `json:"hoa_fee_monthly"`
-	MLSNumber     *string   `json:"mls_number"`
-	ListingStatus *string   `json:"listing_status"`
-	Agent         *agentDTO `json:"agent"`
-	Latitude      *float64  `json:"latitude"`
-	Longitude     *float64  `json:"longitude"`
-	MapImageURL   *string   `json:"map_image_url"`
-	ImageURLs     []string  `json:"image_urls"`
-	VideoURL      *string   `json:"video_url"`
-	DetailURL     string    `json:"detail_url"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ZPID            string    `json:"zpid"`
+	Price           int64     `json:"price"`
+	Address         string    `json:"address"`
+	City            string    `json:"city"`
+	State           string    `json:"state"`
+	Zip             string    `json:"zip"`
+	Bedrooms        int       `json:"bedrooms"`
+	Bathrooms       float64   `json:"bathrooms"`
+	HomeSizeSqft    int       `json:"home_size_sqft"`
+	LotSizeSqft     int       `json:"lot_size_sqft"`
+	LotSizeAcres    float64   `json:"lot_size_acres"`
+	PropertyType    *string   `json:"property_type"`
+	Description     *string   `json:"description"`
+	YearBuilt       *int      `json:"year_built"`
+	Heating         *string   `json:"heating"`
+	Cooling         *string   `json:"cooling"`
+	Garage          *string   `json:"garage"`
+	HOAFeeMonthly   *int      `json:"hoa_fee_monthly"`
+	MLSNumber       *string   `json:"mls_number"`
+	ListingStatus   *string   `json:"listing_status"`
+	Agent           *agentDTO `json:"agent"`
+	Latitude        *float64  `json:"latitude"`
+	Longitude       *float64  `json:"longitude"`
+	MapImageURL     *string   `json:"map_image_url"`
+	MapImageDarkURL *string   `json:"map_image_dark_url"`
+	ImageURLs       []string  `json:"image_urls"`
+	VideoURL        *string   `json:"video_url"`
+	DetailURL       string    `json:"detail_url"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func toListItem(p *property.Property) listItem {
@@ -78,6 +79,16 @@ func toListItem(p *property.Property) listItem {
 		it.ImageURL = &p.ImageURLs[0]
 	}
 	return it
+}
+
+// setMaps exposes whichever maps exist, leaving the rest null.
+func (d *detailResponse) setMaps(m property.MapURLs) {
+	if m.Light != "" {
+		d.MapImageURL = &m.Light
+	}
+	if m.Dark != "" {
+		d.MapImageDarkURL = &m.Dark
+	}
 }
 
 func toDetailResponse(p *property.Property) detailResponse {
@@ -100,9 +111,7 @@ func toDetailResponse(p *property.Property) detailResponse {
 	if p.VideoURL != "" {
 		d.VideoURL = &p.VideoURL
 	}
-	if p.MapImageURL != "" {
-		d.MapImageURL = &p.MapImageURL
-	}
+	d.setMaps(property.MapURLs{Light: p.MapImageURL, Dark: p.MapImageDarkURL})
 	if p.AgentName != nil || p.AgentPhone != nil || p.AgentBrokerage != nil {
 		d.Agent = &agentDTO{Name: p.AgentName, Phone: p.AgentPhone, Brokerage: p.AgentBrokerage}
 	}

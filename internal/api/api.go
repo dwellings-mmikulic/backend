@@ -16,11 +16,11 @@ type Repo interface {
 	GetByZPID(ctx context.Context, zpid string) (*property.Property, error)
 }
 
-// MapEnsurer returns a property's static map URL, generating it on demand.
-// url is empty when there is no map; pending means one is still being
-// generated in the background. May be nil when maps are disabled.
+// MapEnsurer returns a property's static map URLs, generating missing ones on
+// demand. pending means at least one is still being generated in the
+// background. May be nil when maps are disabled.
 type MapEnsurer interface {
-	Ensure(ctx context.Context, p *property.Property) (url string, pending bool)
+	Ensure(ctx context.Context, p *property.Property) (m property.MapURLs, pending bool)
 }
 
 // API serves the public read-only listings endpoints.
@@ -102,7 +102,7 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 //
 //	@Summary		Get property detail
 //	@Description	Full detail-screen payload for one listing, addressed by its Zillow property ID.
-//	@Description	map_image_url is generated on first view; it may be null on the very first request for a listing and populated shortly after.
+//	@Description	map_image_url (light) and map_image_dark_url (dark) are generated on first view; either may be null on the very first request for a listing and populated shortly after.
 //	@Tags			properties
 //	@Produce		json
 //	@Param			zpid	path		string	true	"Zillow property ID"
@@ -123,16 +123,14 @@ func (a *API) handleDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := toDetailResponse(p)
 
-	// Generate the map on demand. Ensure waits a short while; if it is still
-	// working we return a null map and shorten the cache so the next viewer
-	// picks up the finished one quickly.
+	// Generate missing maps on demand. Ensure waits a short while; if it is
+	// still working we return what we have and shorten the cache so the next
+	// viewer picks up the finished ones quickly.
 	pending := false
 	if a.maps != nil {
-		if url, stillWorking := a.maps.Ensure(r.Context(), p); url != "" {
-			resp.MapImageURL = &url
-		} else {
-			pending = stillWorking
-		}
+		m, stillWorking := a.maps.Ensure(r.Context(), p)
+		resp.setMaps(m)
+		pending = stillWorking && !m.Complete()
 	}
 
 	cacheControl := defaultCacheControl

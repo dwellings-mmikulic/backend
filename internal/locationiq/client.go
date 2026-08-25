@@ -45,10 +45,10 @@ var ErrNoMatch = errors.New("locationiq: no match for address")
 // overwriting the old object — a pull zone would otherwise keep serving the
 // cached previous image and the change would appear not to have worked.
 //
-// Bump this whenever any rendering parameter below changes, and clear
-// map_image_url/map_generated_at so stored maps regenerate:
+// Bump this whenever any rendering parameter below changes, and clear the
+// stored map columns so maps regenerate:
 //
-//	UPDATE properties SET map_image_url = NULL, map_generated_at = NULL;
+//	UPDATE properties SET map_image_url = NULL, map_image_dark_url = NULL, map_generated_at = NULL;
 //
 // v1: zoom 16, 600x400. v2: zoom 15, 1200x800 (wider framing, sharper on TV).
 const StyleVersion = "v2"
@@ -69,9 +69,20 @@ const (
 	// upscaled. LocationIQ caps size at 1280x1280.
 	mapSize       = "1200x800"
 	mapFormat     = "png"
-	mapType       = "streets"
 	mapMarkerIcon = "large-red-cutout"
 )
+
+// Style selects the LocationIQ base map for a static map. Every property gets
+// one map per style so the app can match its own theme.
+type Style string
+
+const (
+	StyleLight Style = "streets"
+	StyleDark  Style = "dark"
+)
+
+// Styles lists every style a property should have a map for.
+var Styles = []Style{StyleLight, StyleDark}
 
 const (
 	defaultGeocodeURL   = "https://us1.locationiq.com/v1/search/structured"
@@ -179,9 +190,9 @@ func (c *Client) Geocode(ctx context.Context, a Address) (float64, float64, erro
 	return lat, lon, nil
 }
 
-// StaticMap returns the PNG bytes of a map centred on the coordinates with a
-// pin dropped on them.
-func (c *Client) StaticMap(ctx context.Context, lat, lon float64) ([]byte, error) {
+// StaticMap returns the PNG bytes of a map in the given style centred on the
+// coordinates with a pin dropped on them.
+func (c *Client) StaticMap(ctx context.Context, lat, lon float64, style Style) ([]byte, error) {
 	center := formatCoord(lat) + "," + formatCoord(lon)
 
 	q := url.Values{}
@@ -190,7 +201,7 @@ func (c *Client) StaticMap(ctx context.Context, lat, lon float64) ([]byte, error
 	q.Set("zoom", mapZoom)
 	q.Set("size", mapSize)
 	q.Set("format", mapFormat)
-	q.Set("maptype", mapType)
+	q.Set("maptype", string(style))
 	q.Set("markers", "icon:"+mapMarkerIcon+"|"+center)
 
 	body, status, err := c.get(ctx, c.staticMapURL+"?"+q.Encode())

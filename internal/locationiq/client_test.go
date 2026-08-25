@@ -175,7 +175,7 @@ func TestStaticMap_BuildsPinnedMapURLAndReturnsBytes(t *testing.T) {
 	c := New("test-key", 5*time.Second)
 	c.staticMapURL = srv.URL
 
-	png, err := c.StaticMap(context.Background(), 30.2672, -97.7431)
+	png, err := c.StaticMap(context.Background(), 30.2672, -97.7431, StyleLight)
 	if err != nil {
 		t.Fatalf("StaticMap: %v", err)
 	}
@@ -197,6 +197,13 @@ func TestStaticMap_BuildsPinnedMapURLAndReturnsBytes(t *testing.T) {
 			t.Errorf("query %q = %q, want %q", k, got, v)
 		}
 	}
+
+	if _, err := c.StaticMap(context.Background(), 30.2672, -97.7431, StyleDark); err != nil {
+		t.Fatalf("StaticMap dark: %v", err)
+	}
+	if got := gotQuery.Get("maptype"); got != "dark" {
+		t.Errorf("dark maptype = %q, want dark", got)
+	}
 }
 
 func TestStaticMap_NonOKIsError(t *testing.T) {
@@ -209,7 +216,7 @@ func TestStaticMap_NonOKIsError(t *testing.T) {
 	c := New("k", 5*time.Second)
 	c.staticMapURL = srv.URL
 
-	if _, err := c.StaticMap(context.Background(), 1, 2); err == nil {
+	if _, err := c.StaticMap(context.Background(), 1, 2, StyleLight); err == nil {
 		t.Fatal("want error, got nil")
 	}
 }
@@ -229,7 +236,7 @@ func TestStaticMap_NonPNGBodyIsRetryableError(t *testing.T) {
 	c := New("k", 5*time.Second)
 	c.staticMapURL = srv.URL
 
-	_, err := c.StaticMap(context.Background(), 1, 2)
+	_, err := c.StaticMap(context.Background(), 1, 2, StyleLight)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -272,7 +279,7 @@ func TestStaticMap_TransportErrorDoesNotLeakAPIKey(t *testing.T) {
 	c := New(fakeAPIKey, 2*time.Second)
 	c.staticMapURL = srv.URL
 
-	_, err := c.StaticMap(context.Background(), 1, 2)
+	_, err := c.StaticMap(context.Background(), 1, 2, StyleLight)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -323,7 +330,7 @@ func TestStaticMap_ErrorBodyEchoingRequestDoesNotLeakAPIKey(t *testing.T) {
 	c := New(fakeAPIKey, 5*time.Second)
 	c.staticMapURL = srv.URL
 
-	_, err := c.StaticMap(context.Background(), 30.2672, -97.7431)
+	_, err := c.StaticMap(context.Background(), 30.2672, -97.7431, StyleLight)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -340,7 +347,7 @@ func TestStaticMap_NonPNGBodyEchoingRequestDoesNotLeakAPIKey(t *testing.T) {
 	c := New(fakeAPIKey, 5*time.Second)
 	c.staticMapURL = srv.URL
 
-	_, err := c.StaticMap(context.Background(), 30.2672, -97.7431)
+	_, err := c.StaticMap(context.Background(), 30.2672, -97.7431, StyleLight)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}

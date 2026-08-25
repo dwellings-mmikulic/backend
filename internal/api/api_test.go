@@ -296,13 +296,14 @@ func TestPublicHeaders_ErrorsNotCached(t *testing.T) {
 // fakeMaps returns a canned Ensure result and records that it was called.
 type fakeMaps struct {
 	url     string
+	dark    string
 	pending bool
 	calls   int
 }
 
-func (f *fakeMaps) Ensure(_ context.Context, _ *property.Property) (string, bool) {
+func (f *fakeMaps) Ensure(_ context.Context, _ *property.Property) (property.MapURLs, bool) {
 	f.calls++
-	return f.url, f.pending
+	return property.MapURLs{Light: f.url, Dark: f.dark}, f.pending
 }
 
 func TestDetail_MapDisabledYieldsNullMapAndNormalCaching(t *testing.T) {
@@ -431,5 +432,45 @@ func TestDetail_NotFoundSkipsMapGeneration(t *testing.T) {
 	}
 	if maps.calls != 0 {
 		t.Error("a 404 must not trigger map generation")
+	}
+}
+
+func TestDetail_DarkMapIsReturnedAlongsideLight(t *testing.T) {
+	p := sampleProp("Z1", 1)
+	maps := &fakeMaps{url: "https://cdn.example/maps/Z1.png", dark: "https://cdn.example/maps/Z1-dark.png"}
+
+	rec := serveWithMaps(t, &fakeRepo{detail: &p}, maps, "/api/v1/properties/Z1")
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["map_image_url"] != "https://cdn.example/maps/Z1.png" {
+		t.Errorf("map_image_url = %v", body["map_image_url"])
+	}
+	if body["map_image_dark_url"] != "https://cdn.example/maps/Z1-dark.png" {
+		t.Errorf("map_image_dark_url = %v", body["map_image_dark_url"])
+	}
+}
+
+func TestDetail_LightOnlyRowStillPendingDarkShortensCache(t *testing.T) {
+	p := sampleProp("Z1", 1)
+	p.MapImageURL = "https://cdn.example/maps/Z1.png"
+	maps := &fakeMaps{url: p.MapImageURL, pending: true}
+
+	rec := serveWithMaps(t, &fakeRepo{detail: &p}, maps, "/api/v1/properties/Z1")
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["map_image_url"] != p.MapImageURL {
+		t.Errorf("map_image_url = %v, want the stored light map", body["map_image_url"])
+	}
+	if body["map_image_dark_url"] != nil {
+		t.Errorf("map_image_dark_url = %v, want null while generating", body["map_image_dark_url"])
+	}
+	if got := rec.Header().Get("Cache-Control"); got == "public, max-age=300" {
+		t.Errorf("Cache-Control = %q, want the shortened pending value", got)
 	}
 }

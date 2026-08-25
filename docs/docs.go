@@ -136,7 +136,7 @@ const docTemplate = `{
         },
         "/api/v1/properties/{zpid}": {
             "get": {
-                "description": "Full detail-screen payload for one listing, addressed by its Zillow property ID.\nmap_image_url is generated on first view; it may be null on the very first request for a listing and populated shortly after.",
+                "description": "Full detail-screen payload for one listing, addressed by its Zillow property ID.\nmap_image_url (light) and map_image_dark_url (dark) are generated on first view; either may be null on the very first request for a listing and populated shortly after.",
                 "produces": [
                     "application/json"
                 ],
@@ -253,6 +253,9 @@ const docTemplate = `{
                 },
                 "lot_size_sqft": {
                     "type": "integer"
+                },
+                "map_image_dark_url": {
+                    "type": "string"
                 },
                 "map_image_url": {
                     "type": "string"

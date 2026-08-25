@@ -73,7 +73,7 @@ func run(log *slog.Logger) error {
 	repo := property.NewRepository(pool)
 
 	// Property maps are optional: without a LocationIQ key the service stays
-	// nil and the detail endpoint simply returns a null map_image_url.
+	// nil and the detail endpoint simply returns null map_image_url/map_image_dark_url.
 	var mapSvc *propertymap.Service
 	if cfg.LocationIQAPIKey != "" {
 		mapSvc = propertymap.New(

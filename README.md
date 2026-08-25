@@ -63,9 +63,12 @@ Bunny → store video_url + status.
 
 ### Property maps
 
-The detail endpoint returns `map_image_url`: a 1200×800 static map from
+The detail endpoint returns `map_image_url` (light, `streets` base map) and
+`map_image_dark_url` (`dark` base map): 1200×800 static maps from
 [LocationIQ](https://locationiq.com) with a pin on the home, stored at
-`maps/<style>/<zpid>.png` on Bunny CDN.
+`maps/<version>/<zpid>.png` and `maps/<version>/<zpid>-dark.png` on Bunny CDN.
+Both are generated on first view; a row that predates dark maps gets only its
+dark map fetched, the stored light one is kept.
 
 The framing is zoom 15 at 1200×800: wide enough to show a named arterial road
 or landmark near the property, not just its own residential block, and sharp
@@ -78,7 +81,7 @@ Restyling means changing the constants in `internal/locationiq`, bumping
 stale object, and clearing the stored maps so they regenerate:
 
 ```sql
-UPDATE properties SET map_image_url = NULL, map_generated_at = NULL;
+UPDATE properties SET map_image_url = NULL, map_image_dark_url = NULL, map_generated_at = NULL;
 ```
 
 Maps are generated **on demand** — the first request for a listing that has no

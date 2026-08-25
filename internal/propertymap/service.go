@@ -1,11 +1,13 @@
-// Package propertymap generates a property's static map on demand: geocode if
-// needed, fetch the pinned map, store it on the CDN, and persist the URL.
+// Package propertymap generates a property's static maps on demand: geocode
+// if needed, fetch the pinned map in every style, store them on the CDN, and
+// persist the URLs.
 package propertymap
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -40,7 +42,7 @@ const (
 // Client is the LocationIQ surface this service needs.
 type Client interface {
 	Geocode(ctx context.Context, a locationiq.Address) (lat, lon float64, err error)
-	StaticMap(ctx context.Context, lat, lon float64) ([]byte, error)
+	StaticMap(ctx context.Context, lat, lon float64, style locationiq.Style) ([]byte, error)
 }
 
 // Uploader stores content and returns its public CDN URL.
@@ -50,7 +52,7 @@ type Uploader interface {
 
 // Store persists what generation produces.
 type Store interface {
-	SetMapImage(ctx context.Context, zpid, url string) error
+	SetMapImage(ctx context.Context, zpid string, m property.MapURLs) error
 	SetCoordinates(ctx context.Context, zpid string, lat, lon float64) error
 }
 
@@ -91,11 +93,15 @@ func New(client Client, up Uploader, store Store, log *slog.Logger) *Service {
 	}
 }
 
-// Ensure returns the property's map URL, generating it when absent.
+// Ensure returns the property's map URLs, generating any that are absent.
 //
-//	url != ""              — the map is ready
-//	url == "", pending      — generation is still running in the background
-//	url == "", !pending     — no map, and none is coming right now
+//	m.Complete()            — every map is ready
+//	!m.Complete(), pending  — generation is still running in the background
+//	!m.Complete(), !pending — some map is missing, and none is coming right now
+//
+// Maps already stored on p are returned as-is; only the missing styles are
+// fetched, so a row generated before dark maps existed costs one extra
+// LocationIQ call, not a full regeneration.
 //
 // It waits at most s.deadline. Generation that outlives the deadline keeps
 // running on a background context and persists its result for the next reader.
@@ -105,49 +111,53 @@ func New(client Client, up Uploader, store Store, log *slog.Logger) *Service {
 // mutate p after calling Ensure, and p must not be a pointer shared across
 // requests (e.g. a cached singleton) — each call must own its own
 // *property.Property. This is what makes the detached goroutine safe.
-func (s *Service) Ensure(ctx context.Context, p *property.Property) (string, bool) {
+func (s *Service) Ensure(ctx context.Context, p *property.Property) (property.MapURLs, bool) {
 	if s == nil || p == nil || p.ZPID == "" {
-		return "", false
+		return property.MapURLs{}, false
 	}
-	if p.MapImageURL != "" {
-		return p.MapImageURL, false
+	have := property.MapURLs{Light: p.MapImageURL, Dark: p.MapImageDarkURL}
+	if have.Complete() {
+		return have, false
 	}
-	// Stamped with no URL: the address could not be geocoded. Never retried.
-	if p.MapGeneratedAt != nil {
-		return "", false
+	// Stamped with no light URL: the address could not be geocoded. Never
+	// retried. (Stamped with a light URL but no dark one is the pre-dark-maps
+	// state and falls through to generate the missing style.)
+	if p.MapGeneratedAt != nil && have.Light == "" {
+		return have, false
 	}
 	if !s.allow(p.ZPID) {
-		return "", false
+		return have, false
 	}
 
 	// Detach from the request: a viewer navigating away must not abort a
 	// half-finished map.
 	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), backgroundTimeout)
 
-	done := make(chan string, 1) // buffered: the goroutine never blocks on a timed-out caller
+	done := make(chan property.MapURLs, 1) // buffered: the goroutine never blocks on a timed-out caller
 	go func() {
 		defer cancel()
-		url, err := s.generate(bg, p)
+		m, err := s.generate(bg, p, have)
 		if err != nil {
 			s.penalize(p.ZPID)
 			s.log.Warn("map generation failed", "zpid", p.ZPID, "error", err)
 		}
-		done <- url
+		done <- m
 	}()
 
 	timer := time.NewTimer(s.deadline)
 	defer timer.Stop()
 	select {
-	case url := <-done:
-		return url, false
+	case m := <-done:
+		return m, false
 	case <-timer.C:
-		return "", true
+		return have, true
 	}
 }
 
 // generate does the work, collapsed per zpid so concurrent viewers of the same
-// listing produce exactly one geocode and one map fetch.
-func (s *Service) generate(ctx context.Context, p *property.Property) (string, error) {
+// listing produce exactly one geocode and one fetch per missing style. have
+// holds the maps already stored; on failure it is returned unchanged.
+func (s *Service) generate(ctx context.Context, p *property.Property, have property.MapURLs) (property.MapURLs, error) {
 	v, err, _ := s.group.Do(p.ZPID, func() (any, error) {
 		lat, lon := p.Latitude, p.Longitude
 
@@ -161,43 +171,68 @@ func (s *Service) generate(ctx context.Context, p *property.Property) (string, e
 			switch {
 			case errors.Is(err, locationiq.ErrNoMatch):
 				// Permanent: record an unmappable row so it is never retried.
-				if err := s.store.SetMapImage(ctx, p.ZPID, ""); err != nil {
-					return "", err
+				if err := s.store.SetMapImage(ctx, p.ZPID, property.MapURLs{}); err != nil {
+					return have, err
 				}
 				s.log.Info("address not geocodable, marked unmappable", "zpid", p.ZPID)
-				return "", nil
+				return property.MapURLs{}, nil
 			case err != nil:
-				return "", err
+				return have, err
 			}
 			if err := s.store.SetCoordinates(ctx, p.ZPID, gotLat, gotLon); err != nil {
-				return "", err
+				return have, err
 			}
 			lat, lon = &gotLat, &gotLon
 		}
 
-		png, err := s.client.StaticMap(ctx, *lat, *lon)
-		if err != nil {
-			return "", err
+		m := have
+		if m.Light == "" {
+			url, err := s.fetchAndUpload(ctx, p.ZPID, *lat, *lon, locationiq.StyleLight)
+			if err != nil {
+				return have, err
+			}
+			m.Light = url
 		}
-
-		// The style version is in the path so a restyle lands on a fresh URL
-		// rather than overwriting an object the CDN may still be serving.
-		dest := "maps/" + locationiq.StyleVersion + "/" + p.ZPID + ".png"
-		url, err := s.uploader.Upload(ctx, dest, bytes.NewReader(png), "image/png")
-		if err != nil {
-			return "", err
+		if m.Dark == "" {
+			url, err := s.fetchAndUpload(ctx, p.ZPID, *lat, *lon, locationiq.StyleDark)
+			if err != nil {
+				return have, err
+			}
+			m.Dark = url
 		}
-		if err := s.store.SetMapImage(ctx, p.ZPID, url); err != nil {
-			return "", err
+		if err := s.store.SetMapImage(ctx, p.ZPID, m); err != nil {
+			return have, err
 		}
-		s.log.Info("map generated", "zpid", p.ZPID, "url", url)
-		return url, nil
+		s.log.Info("maps generated", "zpid", p.ZPID, "light", m.Light, "dark", m.Dark)
+		return m, nil
 	})
 	if err != nil {
-		return "", err
+		return have, err
 	}
-	url, _ := v.(string)
-	return url, nil
+	m, _ := v.(property.MapURLs)
+	return m, nil
+}
+
+// fetchAndUpload renders one style and stores it, returning the CDN URL.
+func (s *Service) fetchAndUpload(ctx context.Context, zpid string, lat, lon float64, style locationiq.Style) (string, error) {
+	png, err := s.client.StaticMap(ctx, lat, lon, style)
+	if err != nil {
+		return "", fmt.Errorf("%s map: %w", style, err)
+	}
+	return s.uploader.Upload(ctx, ObjectPath(zpid, style), bytes.NewReader(png), "image/png")
+}
+
+// ObjectPath is the CDN object path for a property's map in the given style.
+// The style version is in the path so a restyle lands on a fresh URL rather
+// than overwriting an object the CDN may still be serving. The light map
+// keeps the original, suffix-free name so maps generated before dark maps
+// existed stay valid.
+func ObjectPath(zpid string, style locationiq.Style) string {
+	suffix := ""
+	if style != locationiq.StyleLight {
+		suffix = "-" + string(style)
+	}
+	return "maps/" + locationiq.StyleVersion + "/" + zpid + suffix + ".png"
 }
 
 // allow applies the per-zpid cooldown and the hourly budget, counting the
