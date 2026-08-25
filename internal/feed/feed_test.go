@@ -2,6 +2,7 @@ package feed
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,5 +79,35 @@ func TestBuild_ValidJSON(t *testing.T) {
 	}
 	if !json.Valid(b) {
 		t.Error("invalid json")
+	}
+}
+
+func TestAddLive_AppendsRokuLiveFeed(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	f := Build("DwellingTV", nil, now)
+	f.AddLive("https://api.example.com/channels/master.m3u8", "https://cdn/thumb.jpg", now)
+
+	if len(f.LiveFeeds) != 1 {
+		t.Fatalf("liveFeeds = %d, want 1", len(f.LiveFeeds))
+	}
+	lf := f.LiveFeeds[0]
+	if lf.ID != "dwellingtv-live" || lf.Title != "DwellingTV Live" || lf.Thumbnail != "https://cdn/thumb.jpg" {
+		t.Errorf("live feed = %+v", lf)
+	}
+	if lf.Content.DateAdded != "2026-08-25T12:00:00Z" {
+		t.Errorf("dateAdded = %s", lf.Content.DateAdded)
+	}
+	v := lf.Content.Videos[0]
+	if v.URL != "https://api.example.com/channels/master.m3u8" || v.VideoType != "HLS" || v.Quality != "HD" {
+		t.Errorf("video = %+v", v)
+	}
+	out, _ := json.Marshal(f)
+	if !strings.Contains(string(out), `"liveFeeds":[{"id":"dwellingtv-live"`) {
+		t.Errorf("json = %s", out)
+	}
+	// Without AddLive the key is omitted entirely (Roku rejects empty arrays).
+	out, _ = json.Marshal(Build("DwellingTV", nil, now))
+	if strings.Contains(string(out), "liveFeeds") {
+		t.Errorf("json without live feed must omit liveFeeds: %s", out)
 	}
 }

@@ -14,6 +14,8 @@ import (
 	"github.com/dwellingtw/backend/internal/bunny"
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/db"
+	"github.com/dwellingtw/backend/internal/hls"
+	"github.com/dwellingtw/backend/internal/linear"
 	"github.com/dwellingtw/backend/internal/locationiq"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/propertymap"
@@ -95,6 +97,16 @@ func run(log *slog.Logger) error {
 	// nil-safe: pass a typed-nil renderer through as an untyped nil when disabled.
 	zipRepo := zipcode.NewRepository(pool)
 	sched := scheduler.New(cfg, zillowClient, bunnyClient, repo, zipRepo, rendererOrNil(renderer), log)
+
+	// Linear channels: segment new renders and serve the channel endpoints.
+	var linearRepo *linear.Repository
+	if cfg.Linear.Enabled {
+		linearRepo = linear.NewRepository(pool)
+		if cfg.Video.Enabled {
+			sched.EnableHLS(hls.NewSegmenter(), linearRepo)
+		}
+	}
+
 	if err := sched.Start(ctx); err != nil {
 		return err
 	}
@@ -102,6 +114,18 @@ func run(log *slog.Logger) error {
 
 	publicAPI := api.New(repo, mapEnsurerOrNil(mapSvc), log)
 	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
+	if linearRepo != nil {
+		svc := linear.New(linearRepo, linear.Options{
+			LineupHours:     cfg.Linear.LineupHours,
+			MinScopeClips:   cfg.Linear.MinScopeClips,
+			EPGHorizonHours: cfg.Linear.EPGHorizonHours,
+		}, log)
+		httpSrv.Mount(linear.NewHandler(svc, log))
+		if cfg.PublicBaseURL != "" {
+			httpSrv.SetLiveFeedURL(cfg.PublicBaseURL + "/channels/master.m3u8")
+		}
+		log.Info("linear channels enabled", "lineup_hours", cfg.Linear.LineupHours, "min_scope_clips", cfg.Linear.MinScopeClips)
+	}
 	go func() {
 		log.Info("http server started", "port", cfg.HTTPPort)
 		if err := httpSrv.Start(); err != nil {

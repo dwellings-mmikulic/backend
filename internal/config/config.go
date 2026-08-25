@@ -59,6 +59,13 @@ type Config struct {
 	// Video rendering
 	Video VideoConfig
 
+	// Linear channels — 24/7 HLS streams assembled from the listing videos.
+	Linear LinearConfig
+
+	// PublicBaseURL is this server's public origin (e.g. https://api.dwellings.tv)
+	// for absolute URLs in the Roku feed. Empty disables the feed's live entry.
+	PublicBaseURL string
+
 	// HTTPPort is the port for the Roku feed + health HTTP server.
 	HTTPPort string
 
@@ -89,6 +96,14 @@ type VideoConfig struct {
 	SecondsPerPhoto int
 	MusicDir        string
 	FontPath        string
+}
+
+// LinearConfig controls the linear channels.
+type LinearConfig struct {
+	Enabled         bool
+	LineupHours     int // max content per lineup version
+	MinScopeClips   int // a scope with fewer clips falls back to its parent area
+	EPGHorizonHours int // how far ahead the EPG materialises the schedule
 }
 
 // SearchCriteria defines what properties the scheduler discovers each cycle.
@@ -132,7 +147,14 @@ func Load() (*Config, error) {
 			MusicDir:        getenv("MUSIC_DIR", "assets/music"),
 			FontPath:        getenv("VIDEO_FONT_PATH", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
 		},
-		HTTPPort: getenv("HTTP_PORT", "8080"),
+		Linear: LinearConfig{
+			Enabled:         getenvBool("LINEAR_ENABLED", true),
+			LineupHours:     getenvInt("LINEAR_LINEUP_HOURS", 6),
+			MinScopeClips:   getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
+			EPGHorizonHours: getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
+		},
+		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
+		HTTPPort:      getenv("HTTP_PORT", "8080"),
 		Concurrency: ConcurrencyConfig{
 			Listings: getenvInt("LISTING_CONCURRENCY", runtime.NumCPU()),
 			Images:   getenvInt("IMAGE_CONCURRENCY", 8),

@@ -29,6 +29,8 @@ type Server struct {
 	log          *slog.Logger
 	now          func() time.Time
 	srv          *http.Server
+	mux          *http.ServeMux
+	liveURL      string
 }
 
 // New creates a Server bound to addr (e.g. ":8080"). publicAPI may be nil
@@ -41,6 +43,7 @@ func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *sl
 		now:          time.Now,
 	}
 	mux := http.NewServeMux()
+	s.mux = mux
 	mux.HandleFunc("GET /roku/feed.json", s.handleFeed)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
@@ -54,6 +57,17 @@ func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *sl
 	}
 	return s
 }
+
+// Mounter registers routes on a mux (e.g. linear.Handler).
+type Mounter interface {
+	Register(mux *http.ServeMux)
+}
+
+// Mount adds routes. Call before Start.
+func (s *Server) Mount(m Mounter) { m.Register(s.mux) }
+
+// SetLiveFeedURL adds the linear channel to the Roku feed as a live feed.
+func (s *Server) SetLiveFeedURL(u string) { s.liveURL = u }
 
 // Start runs the HTTP server until it errors or is shut down.
 func (s *Server) Start() error {
@@ -76,6 +90,13 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc := feed.Build(s.providerName, props, s.now())
+	if s.liveURL != "" {
+		thumb := ""
+		if len(props) > 0 && len(props[0].ImageURLs) > 0 {
+			thumb = props[0].ImageURLs[0]
+		}
+		doc.AddLive(s.liveURL, thumb, s.now())
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
