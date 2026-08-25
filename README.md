@@ -31,6 +31,8 @@ internal/locationiq     LocationIQ geocoding + static map client
 internal/propertymap    on-demand property map generation
 internal/server         HTTP server: /roku/feed.json, /api/v1/properties*, /healthz
 internal/scheduler      cron ticker; orchestrates the full collection cycle
+internal/hls            ffmpeg remux of a listing video into TS segments
+internal/linear         24/7 linear channels: lineups, live HLS playlist, EPG
 ```
 
 ### Listing videos
@@ -107,11 +109,44 @@ Set `LOCATIONIQ_API_KEY` to enable maps; without it `map_image_url` is always
 `BUNNY_API_KEY`, `BUNNY_CDN_BASE_URL`) — `config.Load` enforces this
 whenever `LOCATIONIQ_API_KEY` is set, even if `IMAGES_ENABLED=false`.
 
+### Linear channels
+
+The listing videos double as 24/7 "TV channels": a live HLS stream plus an
+EPG, with no running encoder. Every rendered MP4 is remuxed once into TS
+segments (`hls/v1/<zpid>/<hash8>/` on Bunny CDN, immutable) and a channel is a
+deterministic lineup materialised in `channel_lineups` in 6-hour versions.
+The playlist a viewer fetches is computed from the wall clock, so two
+instances — or a restart mid-stream — serve byte-identical playlists.
+
+```
+GET /channels/master.m3u8[?zip=77494 | ?city=Katy&state=TX | ?state=TX]
+GET /channels/live.m3u8   (same filters; the master playlist points here)
+GET /channels/epg.json    (same filters; 30-minute programme blocks)
+```
+
+No filter is the national channel. A ZIP with fewer than
+`LINEAR_MIN_SCOPE_CLIPS` (20) videos falls back to its city, then state, then
+national; `epg.json` reports the `scope` actually aired. New listings enter
+the rotation at the next lineup version (at most `LINEAR_LINEUP_HOURS` later).
+
+Segments for new renders are produced by the scheduler. To segment the
+existing library (and retry failures):
+
+```bash
+go run ./cmd/backfill-hls -dry-run
+go run ./cmd/backfill-hls -concurrency 4
+```
+
+With `PUBLIC_BASE_URL` set, `/roku/feed.json` also lists the national channel
+as a Roku `liveFeeds` entry. Set `LINEAR_ENABLED=false` to turn all of this
+off.
+
 ### HTTP endpoints
 
 - `GET /roku/feed.json` — Roku Direct Publisher feed of all `ready` videos.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
+- `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json` — linear channels, see [Linear channels](#linear-channels).
 - `GET /healthz` — liveness.
 
 ## API
