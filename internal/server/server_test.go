@@ -64,7 +64,42 @@ func TestFeed_IncludesLiveFeedWhenConfigured(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), `"liveFeeds"`) || !strings.Contains(rec.Body.String(), "channels/master.m3u8") {
-		t.Errorf("feed lacks live entry:\n%s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, `"liveFeeds"`) || !strings.Contains(body, "channels/master.m3u8") {
+		t.Errorf("feed lacks live entry:\n%s", body)
+	}
+	// The ready set is empty (no listing to borrow a thumbnail from), yet Roku
+	// Direct Publisher requires a non-empty thumbnail on every liveFeeds entry.
+	if strings.Contains(body, `"thumbnail":""`) {
+		t.Errorf("liveFeeds thumbnail must not be empty when the ready set is empty:\n%s", body)
+	}
+	if !strings.Contains(body, liveChannelThumbnail) {
+		t.Errorf("liveFeeds thumbnail must be the fixed channel poster, got:\n%s", body)
 	}
 }
+
+func TestFeed_LiveThumbnailIsFixedRegardlessOfReadySet(t *testing.T) {
+	// Two listings in different orders must not change which image is used
+	// as the live channel's poster: it is fixed, not borrowed from whichever
+	// listing happens to sort first.
+	a := property.Property{ZPID: "1", ImageURLs: []string{"https://cdn/a.jpg"}}
+	b := property.Property{ZPID: "2", ImageURLs: []string{"https://cdn/b.jpg"}}
+
+	s1 := New(":0", "Dwellings", stubFeed{props: []property.Property{a, b}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s1.SetLiveFeedURL("https://api.example.com/channels/master.m3u8")
+	rec1 := httptest.NewRecorder()
+	s1.srv.Handler.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
+
+	s2 := New(":0", "Dwellings", stubFeed{props: []property.Property{b, a}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s2.SetLiveFeedURL("https://api.example.com/channels/master.m3u8")
+	rec2 := httptest.NewRecorder()
+	s2.srv.Handler.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
+
+	if !strings.Contains(rec1.Body.String(), liveChannelThumbnail) || !strings.Contains(rec2.Body.String(), liveChannelThumbnail) {
+		t.Fatalf("both orderings must use the fixed channel poster:\n%s\n---\n%s", rec1.Body.String(), rec2.Body.String())
+	}
+}
+
+type stubFeed struct{ props []property.Property }
+
+func (s stubFeed) ListReadyForFeed(context.Context) ([]property.Property, error) { return s.props, nil }

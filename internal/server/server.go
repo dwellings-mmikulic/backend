@@ -58,6 +58,13 @@ func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *sl
 	return s
 }
 
+// liveChannelThumbnail is the Roku liveFeeds poster for the 24/7 national
+// channel. It must be fixed and non-empty: Roku Direct Publisher requires a
+// thumbnail on every liveFeeds entry, and this channel isn't "about" any one
+// listing, so it must not vary with whichever property currently sorts first
+// in the ready set.
+const liveChannelThumbnail = "https://dwellings.b-cdn.net/branding/dwellingtv-live-poster.jpg"
+
 // Mounter registers routes on a mux (e.g. linear.Handler).
 type Mounter interface {
 	Register(mux *http.ServeMux)
@@ -91,11 +98,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	doc := feed.Build(s.providerName, props, s.now())
 	if s.liveURL != "" {
-		thumb := ""
-		if len(props) > 0 && len(props[0].ImageURLs) > 0 {
-			thumb = props[0].ImageURLs[0]
-		}
-		doc.AddLive(s.liveURL, thumb, s.now())
+		doc.AddLive(s.liveURL, liveChannelThumbnail, s.now())
 	}
 
 	w.Header().Set("Content-Type", "application/json")
