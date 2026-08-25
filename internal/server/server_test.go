@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dwellingtw/backend/internal/feed"
 	"github.com/dwellingtw/backend/internal/property"
 )
 
@@ -70,7 +72,18 @@ func TestFeed_IncludesLiveFeedWhenConfigured(t *testing.T) {
 	}
 	// The ready set is empty (no listing to borrow a thumbnail from), yet Roku
 	// Direct Publisher requires a non-empty thumbnail on every liveFeeds entry.
-	if strings.Contains(body, `"thumbnail":""`) {
+	// Decode the document rather than grepping for a literal byte sequence:
+	// Go's indented encoder always writes `"thumbnail": ""` (with a space),
+	// so a compact `"thumbnail":""` substring check would never match and
+	// would pass even if the fix regressed.
+	var decoded feed.Feed
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("decode feed response: %v\n%s", err, body)
+	}
+	if len(decoded.LiveFeeds) != 1 {
+		t.Fatalf("liveFeeds = %d entries, want 1:\n%s", len(decoded.LiveFeeds), body)
+	}
+	if decoded.LiveFeeds[0].Thumbnail == "" {
 		t.Errorf("liveFeeds thumbnail must not be empty when the ready set is empty:\n%s", body)
 	}
 	if !strings.Contains(body, liveChannelThumbnail) {
