@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dwellingtw/backend/internal/config"
+	"github.com/dwellingtw/backend/internal/hls"
 	"github.com/dwellingtw/backend/internal/imaging"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/video"
@@ -60,6 +61,17 @@ type Renderer interface {
 	Render(ctx context.Context, p *property.Property, imagePaths []string, workDir, outPath string) (int, error)
 }
 
+// Segmenter cuts a rendered MP4 into HLS segments (hls.Segmenter).
+type Segmenter interface {
+	Segment(ctx context.Context, mp4Path, outDir string) (hls.Clip, error)
+}
+
+// HLSRecorder stores a clip's segment layout for the linear channels
+// (linear.Repository).
+type HLSRecorder interface {
+	SetVideoHLS(ctx context.Context, zpid, contentHash, baseURL string, clip hls.Clip) error
+}
+
 // Scheduler wires the collection cycle together and runs it on a cron schedule.
 type Scheduler struct {
 	cfg     *config.Config
@@ -72,6 +84,9 @@ type Scheduler struct {
 	log     *slog.Logger
 	cron    *cron.Cron
 	running atomic.Bool // overlap guard: one cycle at a time
+
+	segmenter Segmenter // nil: channel segmentation disabled
+	hls       HLSRecorder
 }
 
 // New creates a Scheduler. render may be nil when video rendering is disabled.
@@ -112,6 +127,12 @@ func (s *Scheduler) Start(ctx context.Context) error {
 func (s *Scheduler) Stop() {
 	ctx := s.cron.Stop()
 	<-ctx.Done()
+}
+
+// EnableHLS turns on channel segmentation of newly rendered videos. Call
+// before Start.
+func (s *Scheduler) EnableHLS(seg Segmenter, rec HLSRecorder) {
+	s.segmenter, s.hls = seg, rec
 }
 
 // zipBatchSize is how many ZIPs are pulled from the rotation per query.
@@ -384,6 +405,36 @@ func (s *Scheduler) renderVideo(ctx context.Context, p *property.Property, local
 		return
 	}
 	s.log.Info("video ready", "zpid", p.ZPID, "url", cdnURL, "duration_secs", dur)
+
+	if s.segmenter != nil {
+		s.segmentVideo(ctx, p.ZPID, hash, outPath, workDir)
+	}
+}
+
+// segmentVideo cuts the rendered MP4 into HLS segments, uploads them under an
+// immutable prefix and records the layout. Failures are logged only: the MP4
+// is already ready for the VOD feed, and cmd/backfill-hls retries the clip.
+func (s *Scheduler) segmentVideo(ctx context.Context, zpid, hash, mp4Path, workDir string) {
+	dir := filepath.Join(workDir, "hls")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		s.log.Error("hls work dir", "zpid", zpid, "error", err)
+		return
+	}
+	clip, err := s.segmenter.Segment(ctx, mp4Path, dir)
+	if err != nil {
+		s.log.Error("video segment failed", "zpid", zpid, "error", err)
+		return
+	}
+	base, err := hls.Upload(ctx, s.bunny, dir, hls.Prefix(zpid, hash), clip, s.cfg.Concurrency.Images)
+	if err != nil {
+		s.log.Error("segment upload failed", "zpid", zpid, "error", err)
+		return
+	}
+	if err := s.hls.SetVideoHLS(ctx, zpid, hash, base, clip); err != nil {
+		s.log.Error("record segments failed", "zpid", zpid, "error", err)
+		return
+	}
+	s.log.Info("video segmented", "zpid", zpid, "segments", len(clip.SegmentMS), "base_url", base)
 }
 
 // downloadPhotos fetches each source image into workDir concurrently, returning

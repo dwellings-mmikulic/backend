@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/dwellingtw/backend/internal/config"
+	"github.com/dwellingtw/backend/internal/hls"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/zillow"
 )
@@ -837,5 +838,87 @@ func TestRunCycle_EnrichmentErrorHandling(t *testing.T) {
 	}
 	if d := store.detailsGot["DEAD"]; d == nil || d.PropertyType != nil {
 		t.Errorf("DEAD must be recorded with empty details, got %+v", d)
+	}
+}
+
+type fakeSegmenter struct{ calls atomic.Int64 }
+
+func (f *fakeSegmenter) Segment(_ context.Context, _ string, outDir string) (hls.Clip, error) {
+	f.calls.Add(1)
+	for i := 0; i < 2; i++ {
+		if err := os.WriteFile(filepath.Join(outDir, hls.SegmentName(i)), []byte("ts"), 0o644); err != nil {
+			return hls.Clip{}, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(outDir, hls.IndexName), []byte("#EXTM3U\n"), 0o644); err != nil {
+		return hls.Clip{}, err
+	}
+	return hls.Clip{SegmentMS: []int{3000, 2000}, TotalMS: 5000}, nil
+}
+
+type fakeHLSRecorder struct {
+	mu       sync.Mutex
+	recorded map[string]string // zpid → base URL
+}
+
+func (r *fakeHLSRecorder) SetVideoHLS(_ context.Context, zpid, _ string, baseURL string, _ hls.Clip) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.recorded == nil {
+		r.recorded = map[string]string{}
+	}
+	r.recorded[zpid] = baseURL
+	return nil
+}
+
+func TestRunCycle_SegmentsRenderedVideos(t *testing.T) {
+	imgSrv := jpegServer(t)
+	props := []property.Property{{
+		ZPID: "ZP1", Address: "addr",
+		ImageURLs: []string{imgSrv.URL + "/a.jpg"},
+		DetailURL: "https://www.zillow.com/x/",
+	}}
+	up := &fakeUploader{}
+	rec := &fakeHLSRecorder{}
+	seg := &fakeSegmenter{}
+	s := New(baseConfig(), &fakeSearch{props: props}, up, &fakeStore{}, &fakeZips{queue: []string{"33950"}}, &fakeRenderer{}, testLogger())
+	s.EnableHLS(seg, rec)
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if seg.calls.Load() != 1 {
+		t.Errorf("segmenter calls = %d, want 1", seg.calls.Load())
+	}
+	base := rec.recorded["ZP1"]
+	if !strings.HasPrefix(base, "https://cdn.example/hls/v1/ZP1/") {
+		t.Errorf("recorded base url = %q", base)
+	}
+	var segs, idx int
+	for _, p := range up.paths() {
+		switch {
+		case strings.HasPrefix(p, "hls/v1/ZP1/") && strings.HasSuffix(p, ".ts"):
+			segs++
+		case strings.HasPrefix(p, "hls/v1/ZP1/") && strings.HasSuffix(p, "/index.m3u8"):
+			idx++
+		}
+	}
+	if segs != 2 || idx != 1 {
+		t.Errorf("uploaded %d segments and %d index files, want 2 and 1: %v", segs, idx, up.paths())
+	}
+}
+
+func TestRunCycle_WithoutHLSDoesNotSegment(t *testing.T) {
+	imgSrv := jpegServer(t)
+	props := []property.Property{{ZPID: "ZP1", Address: "addr", ImageURLs: []string{imgSrv.URL + "/a.jpg"}}}
+	up := &fakeUploader{}
+	s := New(baseConfig(), &fakeSearch{props: props}, up, &fakeStore{}, &fakeZips{queue: []string{"33950"}}, &fakeRenderer{}, testLogger())
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range up.paths() {
+		if strings.HasPrefix(p, "hls/") {
+			t.Errorf("unexpected hls upload %s", p)
+		}
 	}
 }
