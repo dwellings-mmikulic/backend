@@ -9,6 +9,13 @@ import (
 // programBlock is the EPG granularity.
 const programBlock = 30 * time.Minute
 
+// epgChainBudget bounds how many new lineup versions a single EPG request
+// may materialise (see advanceChain). Kept well under maxChain so a thin
+// scope's request degrades to partial horizon coverage instead of an error,
+// and so a cache-missing GET never triggers more than a handful of
+// synchronous lineup builds + version writes.
+const epgChainBudget = 8
+
 // EPG is the schedule of one channel.
 type EPG struct {
 	Channel  Channel   `json:"channel"`
@@ -31,21 +38,64 @@ type Program struct {
 	Listings    int       `json:"listings"`
 }
 
-// EPG returns programBlock-sized programs from the channel's first version
-// through now + EPGHorizonHours, materialising versions as far as needed.
+// EPG returns programBlock-sized programs from around now through as much of
+// now + EPGHorizonHours as the chain currently reaches, advancing the chain
+// by up to epgChainBudget versions to extend that coverage. A channel with
+// little content per version may not reach the full horizon in one call —
+// the window still starts at now and grows on later polls as the persisted
+// chain is extended further (see advanceChain) — so the response is always
+// bounded regardless of how far the horizon sits or how long the channel has
+// existed, instead of the request materialising the entire history-to-date
+// or every version needed to reach the horizon synchronously.
 func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error) {
 	key := sc.Key()
 	horizon := now.Add(time.Duration(s.opts.EPGHorizonHours) * time.Hour)
-	latest, _, err := s.versionAt(ctx, key, horizon)
+	// First make sure the chain reaches now at all — the same guarantee
+	// Playlist relies on (versionAt, bounded by maxChain), so even a thin
+	// scope that never catches up to the horizon in one call still has a
+	// "now" to build a window from. Only the further reach toward horizon,
+	// which is what can run unboundedly long for a thin scope, is subject to
+	// epgChainBudget below.
+	if _, _, err := s.current(ctx, key, now); err != nil {
+		return EPG{}, err
+	}
+	latest, err := s.advanceChain(ctx, key, horizon, epgChainBudget)
 	if err != nil {
 		return EPG{}, err
+	}
+	if latest == nil {
+		return EPG{}, ErrNoContent
+	}
+	// upper is how far the chain actually reaches this call: horizon itself
+	// once a later poll has caught the chain up to it, latest.EndsAt while
+	// it hasn't.
+	upper := horizon
+	if latest.EndsAt.Before(upper) {
+		upper = latest.EndsAt
 	}
 	versions, err := s.store.ListVersions(ctx, key)
 	if err != nil {
 		return EPG{}, err
 	}
+	if len(versions) == 0 {
+		return EPG{}, ErrNoContent
+	}
 
-	// Every item start within the range, with the scope it airs under.
+	// The window starts around now, not at the channel's very first version:
+	// a channel running for weeks can carry hundreds of past versions, and
+	// walking all of them into the response (and into the ListingsByClipID
+	// query below) would make both grow without bound purely with channel
+	// age. Clamped no earlier than the first version, for a channel younger
+	// than that.
+	start := now.Truncate(programBlock)
+	if start.Before(versions[0].StartsAt) {
+		start = versions[0].StartsAt.Truncate(programBlock)
+	}
+
+	// Every item start within [start, upper), with the scope it airs under.
+	// Versions entirely before start or entirely after upper are skipped, so
+	// neither items nor the listings query scale with the channel's full
+	// history — only with the window actually being reported.
 	type aired struct {
 		id    int64
 		start time.Time
@@ -54,9 +104,15 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	var items []aired
 	var ids []int64
 	for _, v := range versions {
+		if v.EndsAt.Before(start) {
+			continue
+		}
+		if !v.StartsAt.Before(upper) {
+			break
+		}
 		t := v.StartsAt
 		for i, id := range v.ItemIDs {
-			if !t.After(horizon) {
+			if !t.Before(start) && t.Before(upper) {
 				items = append(items, aired{id: id, start: t, scope: v.Scope})
 				ids = append(ids, id)
 			}
@@ -75,7 +131,7 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	effScope, _ := ParseKey(latest.Scope)
 	e := EPG{Channel: Channel{Key: key, Scope: latest.Scope, Name: effScope.Name()}}
 	i := 0
-	for b := versions[0].StartsAt.Truncate(programBlock); b.Before(horizon); b = b.Add(programBlock) {
+	for b := start; b.Before(upper); b = b.Add(programBlock) {
 		end := b.Add(programBlock)
 		var n int
 		var lo, hi int64

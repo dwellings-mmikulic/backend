@@ -163,3 +163,72 @@ func (s *Service) versionAt(ctx context.Context, key string, t time.Time) (cur, 
 	}
 	return nil, nil, fmt.Errorf("channel %s: could not reach %s within %d versions", key, t, maxChain)
 }
+
+// advanceChain grows key's version chain toward horizon, materialising at
+// most budget new versions in this call. Unlike versionAt it never errors
+// merely for not reaching horizon: a scope near MinScopeClips produces short
+// versions (buildItems never repeats clips, so a version lasts only as long
+// as the scope's total clip minutes), and forcing a single request to chain
+// all the way to a horizon many hours out — as EPG's horizon is — can need
+// far more versions than is safe to build synchronously in one HTTP request,
+// or even more than maxChain allows at all. advanceChain instead returns
+// however far the chain reaches within its budget; because versions persist,
+// the next call resumes the chain where this one left off, so the covered
+// horizon grows across successive polls instead of the request failing or
+// blocking on dozens of synchronous lineup builds. Returns nil only if the
+// channel has no content and none could be created.
+func (s *Service) advanceChain(ctx context.Context, key string, horizon time.Time, budget int) (*Version, error) {
+	now := s.now()
+	var tip *Version
+	for i := 0; i < budget; i++ {
+		vs, err := s.store.LatestVersions(ctx, key, 1)
+		if err != nil {
+			return nil, err
+		}
+		if len(vs) > 0 && horizon.Before(vs[0].EndsAt) {
+			return &vs[0], nil // chain already reaches the horizon
+		}
+		var (
+			n        int
+			startsAt time.Time
+			last     *Version
+		)
+		if len(vs) == 0 {
+			n, startsAt = 1, now.Add(-historyLead).Truncate(time.Minute)
+		} else {
+			last = &vs[0]
+			n = last.Version + 1
+			startsAt = last.EndsAt
+			if now.After(last.EndsAt.Add(idleGrace)) {
+				startsAt = now.Add(-historyLead).Truncate(time.Minute)
+				if startsAt.Before(last.EndsAt) {
+					startsAt = last.EndsAt
+				}
+			}
+		}
+		v, err := s.newVersion(ctx, key, n, startsAt, last)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.store.InsertVersion(ctx, v); err != nil {
+			return nil, err
+		}
+		s.log.Info("channel lineup version created", "channel", key, "version", n, "scope", v.Scope,
+			"items", len(v.ItemIDs), "starts_at", v.StartsAt, "ends_at", v.EndsAt)
+		tip = v
+	}
+	if tip != nil {
+		return tip, nil
+	}
+	// budget was exhausted (or zero) without this call creating anything new
+	// (e.g. the chain already reached horizon on the very first check above,
+	// or budget <= 0): report whatever the chain's current tip is.
+	vs, err := s.store.LatestVersions(ctx, key, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(vs) == 0 {
+		return nil, nil
+	}
+	return &vs[0], nil
+}
