@@ -157,6 +157,32 @@ func TestPlaylist_CountersNeverDecrease(t *testing.T) {
 	}
 }
 
+// window legitimately returns empty at channel cold start: no segment has
+// ended yet (prev == nil, now still inside the first item).
+func TestWindow_ColdStartIsEmpty(t *testing.T) {
+	v1, _, clips := fixture()
+	segs := window(v1, nil, clips, t0, 6)
+	if len(segs) != 0 {
+		t.Fatalf("got %d segments at cold start, want 0", len(segs))
+	}
+}
+
+// writePlaylist must not panic on an empty window; it should still emit
+// valid header lines with both counters at 0 and no EXTINF entries.
+func TestWritePlaylist_EmptyWindow(t *testing.T) {
+	var buf bytes.Buffer
+	writePlaylist(&buf, nil)
+	out := buf.String()
+	want := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-INDEPENDENT-SEGMENTS\n" +
+		"#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-DISCONTINUITY-SEQUENCE:0\n"
+	if out != want {
+		t.Errorf("empty window playlist:\n%s\nwant:\n%s", out, want)
+	}
+	if strings.Contains(out, "EXTINF") {
+		t.Error("empty window playlist should have no segments")
+	}
+}
+
 func TestWriteMaster(t *testing.T) {
 	var buf bytes.Buffer
 	writeMaster(&buf, "live.m3u8?zip=77494")

@@ -7,7 +7,15 @@ import (
 	"github.com/dwellingtw/backend/internal/hls"
 )
 
-// writePlaylist renders the live media playlist for a non-empty window.
+// writePlaylist renders the live media playlist for the window segs.
+//
+// segs is legitimately empty at channel cold start (before any segment has
+// ended, prev == nil) and whenever the clips lookup comes back empty; that
+// case writes only the header lines, with MEDIA-SEQUENCE and
+// DISCONTINUITY-SEQUENCE both 0 and no EXTINF entries, rather than panicking.
+// A caller that would rather answer an empty window with an HTTP error (e.g.
+// 503 while the channel warms up) must check len(segs) itself before
+// calling.
 //
 // Every item boundary is an EXT-X-DISCONTINUITY (timestamps restart per
 // clip). EXT-X-DISCONTINUITY-SEQUENCE counts the tags that belong to segments
@@ -15,12 +23,15 @@ import (
 // listed segment, that is g−1 tags for items 1..g−1, plus item g's own tag
 // when the window starts mid-item.
 func writePlaylist(w io.Writer, segs []segment) {
-	first := segs[0]
+	var first segment
 	var removed int64
-	if first.Item > 0 {
-		removed = first.Item - 1
-		if !first.FirstOfItem {
-			removed++
+	if len(segs) > 0 {
+		first = segs[0]
+		if first.Item > 0 {
+			removed = first.Item - 1
+			if !first.FirstOfItem {
+				removed++
+			}
 		}
 	}
 	fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n#EXT-X-INDEPENDENT-SEGMENTS\n", hls.TargetDuration)

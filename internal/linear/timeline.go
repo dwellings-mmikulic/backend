@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/dwellingtw/backend/internal/hls"
@@ -57,7 +58,15 @@ func windowClipIDs(cur, prev *Version, now time.Time, n int) []int64 {
 	return ids
 }
 
-// expandItems yields the segments of items [from, to] of v.
+// expandItems yields the segments of items [from, to] of v. Every item's
+// media sequence number is derived solely from v.ItemSegs, the counter the
+// chain's monotonic MEDIA-SEQUENCE contract (store.go) is built on — never
+// from the clip's actual segment count — so a bad clips entry can never
+// desynchronize the sequence numbers of items that follow it. If clips is
+// missing an item's id, or the clip's segment count disagrees with what the
+// version recorded in ItemSegs, that is a store inconsistency serious enough
+// to corrupt every later segment's sequence number, so expandItems panics
+// rather than emitting a lineup that silently violates the contract.
 func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) []segment {
 	var out []segment
 	var startMS int64
@@ -67,20 +76,26 @@ func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) []segme
 		seq += int64(v.ItemSegs[i])
 	}
 	for i := from; i <= to && i < len(v.ItemIDs); i++ {
-		c := clips[v.ItemIDs[i]]
+		id := v.ItemIDs[i]
+		c, ok := clips[id]
+		if !ok || len(c.SegmentMS) != v.ItemSegs[i] {
+			panic(fmt.Sprintf("linear: clip %d (item %d of %s/%d) has %d segments, version says %d",
+				id, i, v.Key, v.Version, len(c.SegmentMS), v.ItemSegs[i]))
+		}
 		t := v.StartsAt.Add(time.Duration(startMS) * time.Millisecond)
+		itemSeq := seq
 		for j, ms := range c.SegmentMS {
 			out = append(out, segment{
 				URL:         c.BaseURL + "/" + hls.SegmentName(j),
 				DurMS:       ms,
 				Start:       t,
-				Seq:         seq,
+				Seq:         itemSeq + int64(j),
 				Item:        v.StartItem + int64(i),
 				FirstOfItem: j == 0,
 			})
 			t = t.Add(time.Duration(ms) * time.Millisecond)
-			seq++
 		}
+		seq += int64(v.ItemSegs[i])
 		startMS += int64(v.ItemMS[i])
 	}
 	return out
