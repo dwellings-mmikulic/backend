@@ -170,6 +170,22 @@ func scopeQuery(sc Scope) string {
 	return "?" + q.Encode()
 }
 
+// beat is the viewer heartbeat for players that do not reach the origin on
+// every playlist poll (the playlists are cached at the edge). Apps call it
+// about once a minute while playing, with the same filters as the playlist
+// they are on and their device id as sid.
+func (h *Handler) beat(w http.ResponseWriter, r *http.Request) {
+	sc, err := ParseScope(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.track(r, sc, h.svc.now())
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // stats reports a channel's audience.
 func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	sc, err := ParseScope(r.URL.Query())

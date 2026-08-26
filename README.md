@@ -163,17 +163,22 @@ the segmenter), or no segmented clip in the database (run the backfill).
 
 ### Viewer tracking and channel resolve
 
-Every poll of `live.m3u8` is a heartbeat: the viewer (a salted SHA-256 of
-the `sid` query parameter if present — the Roku app will send its RIDA — else
-of the client IP; never the raw value) is recorded once per minute per
+A viewer is a salted SHA-256 of the `sid` query parameter if present — an
+app sends its device/advertising id (Roku RIDA) — else of the client IP;
+the raw value is never stored. Viewers are recorded once per minute per
 channel in `viewer_heartbeats`, batched every 30 s and purged after
-`VIEWER_RETENTION_DAYS`. nginx does not cache `live.m3u8`, so every poll
-reaches the app.
+`VIEWER_RETENTION_DAYS`.
 
 ```
-GET /channels/resolve            → {"scope","name","master","epg","source"}
-GET /channels/stats?state=TX     → {"scope","concurrent","unique_24h","unique_7d"}
+GET /channels/beat?state=TX&sid=… → 204   (heartbeat; call every ~60 s while playing)
+GET /channels/resolve             → {"scope","name","master","epg","source"}
+GET /channels/stats?state=TX      → {"scope","concurrent","unique_24h","unique_7d"}
 ```
+
+Playlists are cached per scope at the edge, so audience size never reaches
+the app; players report themselves with `beat` (same filters as the
+playlist they are on). Polls of `live.m3u8` that do reach the app are
+counted too, so anonymous third-party players still show up as a sample.
 
 `resolve` picks a channel for the caller: the one they last watched (within
 the retention period), else the ZIP/city/state of their IP (MaxMind
