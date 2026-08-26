@@ -5,15 +5,15 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/url"
 )
 
 const playlistContentType = "application/vnd.apple.mpegurl"
 
 // Handler serves the channel endpoints.
 type Handler struct {
-	svc *Service
-	log *slog.Logger
+	svc     *Service
+	log     *slog.Logger
+	viewers *ViewerOptions // nil until EnableViewers
 }
 
 // NewHandler creates a Handler.
@@ -26,6 +26,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /channels/master.m3u8", h.master)
 	mux.HandleFunc("GET /channels/live.m3u8", h.live)
 	mux.HandleFunc("GET /channels/epg.json", h.epg)
+	if h.viewers != nil {
+		mux.HandleFunc("GET /channels/resolve", h.resolve)
+		mux.HandleFunc("GET /channels/stats", h.stats)
+	}
 }
 
 func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
@@ -42,21 +46,7 @@ func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
 // parsed scope rather than echoing the request's raw query, so unknown or
 // duplicated parameters, odd casing and stray whitespace cannot be reflected
 // into the playlist body.
-func mediaURI(sc Scope) string {
-	q := url.Values{}
-	switch {
-	case sc.Zip != "":
-		q.Set("zip", sc.Zip)
-	case sc.City != "":
-		q.Set("city", sc.City)
-		q.Set("state", sc.State)
-	case sc.State != "":
-		q.Set("state", sc.State)
-	default:
-		return "live.m3u8"
-	}
-	return "live.m3u8?" + q.Encode()
-}
+func mediaURI(sc Scope) string { return "live.m3u8" + scopeQuery(sc) }
 
 func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 	sc, err := ParseScope(r.URL.Query())
@@ -64,11 +54,13 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	body, err := h.svc.Playlist(r.Context(), sc, h.svc.now())
+	now := h.svc.now()
+	body, err := h.svc.Playlist(r.Context(), sc, now)
 	if err != nil {
 		h.fail(w, sc, err)
 		return
 	}
+	h.track(r, sc, now)
 	playlistHeaders(w)
 	_, _ = w.Write(body)
 }
