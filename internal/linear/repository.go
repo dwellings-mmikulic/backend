@@ -33,13 +33,16 @@ func scopeWhere(s Scope) (string, []any) {
 	return "", nil
 }
 
-// SetVideoHLS records (or refreshes) the segment layout of a render.
+// SetVideoHLS records the segment layout of a render. Rows are immutable: a
+// given (zpid, content_hash) always segments to the same layout, and stored
+// lineups reference these ids with the segment count they had when the lineup
+// was built, so rewriting segment_ms under a live lineup would desynchronise
+// every later segment's media sequence number. A re-run is a no-op.
 func (r *Repository) SetVideoHLS(ctx context.Context, zpid, contentHash, baseURL string, clip hls.Clip) error {
 	const q = `
 INSERT INTO video_hls (zpid, content_hash, base_url, segment_ms, total_ms)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (zpid, content_hash) DO UPDATE SET
-    base_url = EXCLUDED.base_url, segment_ms = EXCLUDED.segment_ms, total_ms = EXCLUDED.total_ms`
+ON CONFLICT (zpid, content_hash) DO NOTHING`
 	if _, err := r.pool.Exec(ctx, q, zpid, contentHash, baseURL, int32s(clip.SegmentMS), clip.TotalMS); err != nil {
 		return fmt.Errorf("set video hls zpid=%s: %w", zpid, err)
 	}

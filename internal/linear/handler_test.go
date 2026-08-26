@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -84,5 +85,30 @@ func TestHandler_EPG(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"programs":[{"start":"`) {
 		t.Errorf("body:\n%s", rec.Body.String())
+	}
+}
+
+// A stored lineup whose item segment counts disagree with the clips it
+// references is a store inconsistency: the request must fail with a logged
+// 500, never take the process down with a panic.
+func TestHandler_InconsistentLineupIs500(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	v := &Version{
+		Key: "zip:77494", Version: 1, Scope: "zip:77494",
+		StartsAt: t0.Add(-time.Hour), EndsAt: t0.Add(time.Hour),
+		ItemIDs:  []int64{1},
+		ItemMS:   []int{2 * 60 * 60 * 1000},
+		ItemSegs: []int{99}, // clip 1 really has 20 segments
+	}
+	if _, err := m.InsertVersion(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	rec := serve(t, m, t0, "/channels/live.m3u8?zip=77494")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"internal error"`) {
+		t.Errorf("body = %s", rec.Body.String())
 	}
 }

@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -58,6 +59,34 @@ func windowClipIDs(cur, prev *Version, now time.Time, n int) []int64 {
 	return ids
 }
 
+// ErrInconsistentLineup reports a stored lineup that disagrees with the clips
+// it references. It is never a client error: the handler answers 500 and logs
+// the identifying detail.
+var ErrInconsistentLineup = errors.New("inconsistent channel lineup")
+
+// InconsistentLineupError identifies the item that disagrees.
+type InconsistentLineupError struct {
+	Channel string
+	Version int
+	Item    int   // index within the version
+	ClipID  int64 // video_hls id the item references
+	Want    int   // segments the version recorded in ItemSegs
+	Got     int   // segments the clip actually has (0 when the clip is missing)
+	Missing bool  // the clips lookup had no row for ClipID
+}
+
+func (e *InconsistentLineupError) Error() string {
+	if e.Missing {
+		return fmt.Sprintf("%s: clip %d (item %d of %s/%d) is missing, version says %d segments",
+			ErrInconsistentLineup, e.ClipID, e.Item, e.Channel, e.Version, e.Want)
+	}
+	return fmt.Sprintf("%s: clip %d (item %d of %s/%d) has %d segments, version says %d",
+		ErrInconsistentLineup, e.ClipID, e.Item, e.Channel, e.Version, e.Got, e.Want)
+}
+
+// Is makes errors.Is(err, ErrInconsistentLineup) work.
+func (e *InconsistentLineupError) Is(target error) bool { return target == ErrInconsistentLineup }
+
 // expandItems yields the segments of items [from, to] of v. Every item's
 // media sequence number is derived solely from v.ItemSegs, the counter the
 // chain's monotonic MEDIA-SEQUENCE contract (store.go) is built on — never
@@ -65,9 +94,10 @@ func windowClipIDs(cur, prev *Version, now time.Time, n int) []int64 {
 // desynchronize the sequence numbers of items that follow it. If clips is
 // missing an item's id, or the clip's segment count disagrees with what the
 // version recorded in ItemSegs, that is a store inconsistency serious enough
-// to corrupt every later segment's sequence number, so expandItems panics
-// rather than emitting a lineup that silently violates the contract.
-func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) []segment {
+// to corrupt every later segment's sequence number, so expandItems fails with
+// an *InconsistentLineupError rather than emitting a lineup that silently
+// violates the contract.
+func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) ([]segment, error) {
 	var out []segment
 	var startMS int64
 	seq := v.StartSeq
@@ -79,8 +109,10 @@ func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) []segme
 		id := v.ItemIDs[i]
 		c, ok := clips[id]
 		if !ok || len(c.SegmentMS) != v.ItemSegs[i] {
-			panic(fmt.Sprintf("linear: clip %d (item %d of %s/%d) has %d segments, version says %d",
-				id, i, v.Key, v.Version, len(c.SegmentMS), v.ItemSegs[i]))
+			return nil, &InconsistentLineupError{
+				Channel: v.Key, Version: v.Version, Item: i, ClipID: id,
+				Want: v.ItemSegs[i], Got: len(c.SegmentMS), Missing: !ok,
+			}
 		}
 		t := v.StartsAt.Add(time.Duration(startMS) * time.Millisecond)
 		itemSeq := seq
@@ -98,7 +130,7 @@ func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) []segme
 		seq += int64(v.ItemSegs[i])
 		startMS += int64(v.ItemMS[i])
 	}
-	return out
+	return out, nil
 }
 
 // ended keeps the segments that have finished by now.
@@ -114,16 +146,22 @@ func ended(segs []segment, now time.Time) []segment {
 
 // window returns the last n segments that have ended by now, from cur and —
 // when cur has too few yet — the tail of prev.
-func window(cur, prev *Version, clips map[int64]ClipSegments, now time.Time, n int) []segment {
+func window(cur, prev *Version, clips map[int64]ClipSegments, now time.Time, n int) ([]segment, error) {
 	from, to := itemRange(cur, now, n)
-	segs := ended(expandItems(cur, clips, from, to), now)
+	all, err := expandItems(cur, clips, from, to)
+	if err != nil {
+		return nil, err
+	}
+	segs := ended(all, now)
 	if len(segs) < n && prev != nil {
-		pfrom := max(len(prev.ItemIDs)-n, 0)
-		psegs := ended(expandItems(prev, clips, pfrom, len(prev.ItemIDs)-1), now)
-		segs = append(psegs, segs...)
+		pall, err := expandItems(prev, clips, max(len(prev.ItemIDs)-n, 0), len(prev.ItemIDs)-1)
+		if err != nil {
+			return nil, err
+		}
+		segs = append(ended(pall, now), segs...)
 	}
 	if len(segs) > n {
 		segs = segs[len(segs)-n:]
 	}
-	return segs
+	return segs, nil
 }

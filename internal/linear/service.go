@@ -3,7 +3,6 @@ package linear
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -81,16 +80,41 @@ func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	for _, id := range ids {
-		if _, ok := clips[id]; !ok {
-			return nil, fmt.Errorf("channel %s v%d references missing clip %d", key, cur.Version, id)
+	if err := checkClips(cur, clips); err != nil {
+		return nil, err
+	}
+	if prev != nil {
+		if err := checkClips(prev, clips); err != nil {
+			return nil, err
 		}
 	}
-	segs := window(cur, prev, clips, now, windowSegments)
+	segs, err := window(cur, prev, clips, now, windowSegments)
+	if err != nil {
+		return nil, err
+	}
 	if len(segs) == 0 {
 		return nil, ErrNoContent
 	}
 	var buf bytes.Buffer
 	writePlaylist(&buf, segs)
 	return buf.Bytes(), nil
+}
+
+// checkClips verifies that every clip of v that was fetched agrees with the
+// segment layout the version recorded. Items outside the window are not
+// fetched and are not checked here; expandItems catches those.
+func checkClips(v *Version, clips map[int64]ClipSegments) error {
+	for i, id := range v.ItemIDs {
+		c, ok := clips[id]
+		if !ok {
+			continue // outside the window: not fetched
+		}
+		if len(c.SegmentMS) != v.ItemSegs[i] {
+			return &InconsistentLineupError{
+				Channel: v.Key, Version: v.Version, Item: i, ClipID: id,
+				Want: v.ItemSegs[i], Got: len(c.SegmentMS),
+			}
+		}
+	}
+	return nil
 }

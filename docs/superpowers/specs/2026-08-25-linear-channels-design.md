@@ -67,7 +67,8 @@ The scheduler and backfill upload `seg-NNN.ts` and `index.m3u8` to
 `hls/v1/<zpid>/<hash8>/` where `hash8` is the first 8 chars of
 `video_content_hash`. Paths are immutable: a re-rendered listing gets a new
 prefix, and lineups that already reference the old segments keep playing.
-The CDN caches segments indefinitely.
+The CDN caches segments indefinitely. A given (zpid, content_hash) always
+segments to the same layout, so recording it a second time is a no-op.
 
 ### 2. Storage
 
@@ -102,6 +103,12 @@ CREATE TABLE IF NOT EXISTS channel_lineups (
 A clip is **current** when `properties.video_status = 'ready'` and
 `properties.video_content_hash = video_hls.content_hash`. Only current clips
 enter new lineups; old rows are never deleted so old lineups stay resolvable.
+
+`video_hls` rows are **immutable**: the write is
+`ON CONFLICT (zpid, content_hash) DO NOTHING`, never `DO UPDATE`. Stored
+lineups record each item's segment count in `item_segs`, and every later
+segment's media sequence number is derived from it, so rewriting `segment_ms`
+under a live lineup would desynchronise the whole channel.
 
 ### 3. Channels and scope fallback
 
@@ -239,8 +246,13 @@ Constants: `TargetDuration = 10 s`, `WindowSegments = 6`, `HLSVersion = "v1"`.
   clips → 503 `{"error":"no content"}`.
 - Segmentation errors never fail a render; the MP4 is still ready for the VOD
   feed. The clip is simply absent from channels until the backfill succeeds.
-- A missing `video_hls` row referenced by a lineup (impossible unless deleted
-  by hand) → 500 with a logged id.
+- A lineup that disagrees with the clips it references — a missing
+  `video_hls` row, or a row whose segment count differs from the version's
+  `item_segs` (both impossible unless rows were changed by hand) → the
+  request fails with `ErrInconsistentLineup`, which the handler answers as
+  500 `{"error":"internal error"}` and logs with the channel, version, item
+  index and clip id. It is never a panic: one bad row must not take the
+  process down.
 
 ## Testing
 
