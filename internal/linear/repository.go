@@ -133,11 +133,14 @@ func (r *Repository) VersionsAt(ctx context.Context, key string, t time.Time) ([
 	return scanVersions(rows)
 }
 
-// ListVersions implements Store.
-func (r *Repository) ListVersions(ctx context.Context, key string) ([]Version, error) {
-	rows, err := r.pool.Query(ctx, `SELECT `+versionColumns+` FROM channel_lineups WHERE channel_key = $1 ORDER BY version ASC`, key)
+// ListVersionsBetween implements Store.
+func (r *Repository) ListVersionsBetween(ctx context.Context, key string, from, to time.Time) ([]Version, error) {
+	const q = `SELECT ` + versionColumns + ` FROM channel_lineups
+ WHERE channel_key = $1 AND ends_at >= $2 AND starts_at < $3
+ ORDER BY version ASC`
+	rows, err := r.pool.Query(ctx, q, key, from, to)
 	if err != nil {
-		return nil, fmt.Errorf("list lineups %s: %w", key, err)
+		return nil, fmt.Errorf("lineups of %s in [%s, %s): %w", key, from, to, err)
 	}
 	return scanVersions(rows)
 }

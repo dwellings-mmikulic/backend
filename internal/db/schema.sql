@@ -111,3 +111,9 @@ CREATE TABLE IF NOT EXISTS channel_lineups (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (channel_key, version)
 );
+
+-- The EPG asks for the versions overlapping a bounded window
+-- (ends_at >= from AND starts_at < to), so a long-running channel's history
+-- never has to be scanned.
+CREATE INDEX IF NOT EXISTS idx_channel_lineups_key_ends
+    ON channel_lineups (channel_key, ends_at);

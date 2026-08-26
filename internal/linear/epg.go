@@ -38,8 +38,9 @@ type Program struct {
 	Listings    int       `json:"listings"`
 }
 
-// EPG returns programBlock-sized programs from around now through as much of
-// now + EPGHorizonHours as the chain currently reaches, advancing the chain
+// EPG returns programBlock-sized programs covering
+// [now − 1 block, now + EPGHorizonHours), or as much of that as the chain
+// currently reaches, advancing the chain
 // by up to epgChainBudget versions to extend that coverage. A channel with
 // little content per version may not reach the full horizon in one call —
 // the window still starts at now and grows on later polls as the persisted
@@ -73,7 +74,18 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	if latest.EndsAt.Before(upper) {
 		upper = latest.EndsAt
 	}
-	versions, err := s.store.ListVersions(ctx, key)
+	// The window starts one block before now, not at the channel's very first
+	// version: a channel running for weeks can carry hundreds of past
+	// versions, and walking all of them into the response (and into the
+	// ListingsByClipID query below) would make both grow without bound purely
+	// with channel age. The block already airing is included so a guide can
+	// show what is on now.
+	start := now.Truncate(programBlock).Add(-programBlock)
+
+	// Only the versions overlapping [start, upper) are loaded, so neither the
+	// query, the items nor the listings lookup scale with the channel's full
+	// history — only with the window actually being reported.
+	versions, err := s.store.ListVersionsBetween(ctx, key, start, upper)
 	if err != nil {
 		return EPG{}, err
 	}
@@ -81,21 +93,7 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 		return EPG{}, ErrNoContent
 	}
 
-	// The window starts around now, not at the channel's very first version:
-	// a channel running for weeks can carry hundreds of past versions, and
-	// walking all of them into the response (and into the ListingsByClipID
-	// query below) would make both grow without bound purely with channel
-	// age. Clamped no earlier than the first version, for a channel younger
-	// than that.
-	start := now.Truncate(programBlock)
-	if start.Before(versions[0].StartsAt) {
-		start = versions[0].StartsAt.Truncate(programBlock)
-	}
-
 	// Every item start within [start, upper), with the scope it airs under.
-	// Versions entirely before start or entirely after upper are skipped, so
-	// neither items nor the listings query scale with the channel's full
-	// history — only with the window actually being reported.
 	type aired struct {
 		id    int64
 		start time.Time
@@ -104,12 +102,6 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	var items []aired
 	var ids []int64
 	for _, v := range versions {
-		if v.EndsAt.Before(start) {
-			continue
-		}
-		if !v.StartsAt.Before(upper) {
-			break
-		}
 		t := v.StartsAt
 		for i, id := range v.ItemIDs {
 			if !t.Before(start) && t.Before(upper) {

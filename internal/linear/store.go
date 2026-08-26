@@ -77,8 +77,10 @@ type Store interface {
 	// tip can sit far in the future once the EPG has extended it, so the tip
 	// says nothing about which version is on air at t.
 	VersionsAt(ctx context.Context, key string, t time.Time) ([]Version, error)
-	// ListVersions returns every version of key, oldest first.
-	ListVersions(ctx context.Context, key string) ([]Version, error)
+	// ListVersionsBetween returns the versions of key that overlap
+	// [from, to), oldest first. The EPG reports a bounded window, so it must
+	// never have to load a channel's whole version history.
+	ListVersionsBetween(ctx context.Context, key string, from, to time.Time) ([]Version, error)
 	// InsertVersion stores v unless (key, version) already exists; ok reports
 	// whether v was stored.
 	InsertVersion(ctx context.Context, v *Version) (ok bool, err error)

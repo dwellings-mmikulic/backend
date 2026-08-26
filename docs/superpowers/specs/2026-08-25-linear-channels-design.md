@@ -207,10 +207,20 @@ No `EXT-X-ENDLIST`, ever. Wall-clock arithmetic is integer milliseconds.
 }
 ```
 
-Programs are 30-minute wall-clock blocks from the earliest stored version to
-`now + EPGHorizonHours` (default 24), materialising versions as needed. The
-description is computed from the properties of the items that start in that
-block. `Cache-Control: public, max-age=300`.
+Programs are 30-minute wall-clock blocks covering
+`[now − 1 block, now + EPGHorizonHours)` (default horizon 24 h) — the block
+already airing plus the horizon, never the channel's whole history, so the
+response and its queries stay bounded however long the channel has run. Only
+the versions overlapping that window are loaded
+(`ListVersionsBetween`, indexed on `(channel_key, ends_at)`). The description
+is computed from the properties of the items that start in that block.
+`Cache-Control: public, max-age=300`.
+
+A request extends the version chain by at most a fixed budget of versions
+(`epgChainBudget`), so a thin scope — whose versions are only minutes long —
+returns partial coverage that grows across successive polls (the 5-minute
+cache paces them) instead of building dozens of lineups synchronously or
+failing. Blocks with nothing on air are omitted.
 
 ### 7. Roku feed
 

@@ -104,6 +104,21 @@ func (m *memStore) VersionsAt(_ context.Context, key string, t time.Time) ([]Ver
 	return vs, nil
 }
 
+func (m *memStore) ListVersionsBetween(_ context.Context, key string, from, to time.Time) ([]Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var vs []Version
+	for _, v := range m.versions[key] {
+		if !v.EndsAt.Before(from) && v.StartsAt.Before(to) {
+			vs = append(vs, v)
+		}
+	}
+	sort.Slice(vs, func(i, j int) bool { return vs[i].Version < vs[j].Version })
+	return vs, nil
+}
+
+// ListVersions is not part of Store; the tests use it to inspect how much of
+// a chain a call materialised.
 func (m *memStore) ListVersions(_ context.Context, key string) ([]Version, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
