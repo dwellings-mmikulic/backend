@@ -250,6 +250,11 @@ returns partial coverage that grows across successive polls (the 5-minute
 cache paces them) instead of building dozens of lineups synchronously or
 failing. Blocks with nothing on air are omitted.
 
+`channel.scope` and `channel.name` come from the version **on air now**, not
+from the chain's tip (a version up to a day ahead, whose scope may have been
+re-resolved to a different area). A block's `title` comes from the first item
+that starts in it.
+
 ### 7. Roku feed
 
 `/roku/feed.json` gains `liveFeeds: [{id: "dwellingtv-live", title:
