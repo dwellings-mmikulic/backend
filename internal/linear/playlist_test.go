@@ -28,7 +28,7 @@ func fixture() (v1, v2 *Version, clips map[int64]ClipSegments) {
 
 func TestWindow_ListsOnlyEndedSegments(t *testing.T) {
 	v1, _, clips := fixture()
-	segs := mustWindow(t, v1, nil, clips, t0.Add(12*time.Second), 6)
+	segs := mustWindow(t, v1, nil, clips, t0.Add(12*time.Second), windowSpec{MinSegments: 6})
 	// Ended by t0+12: A0 [0,3) A1 [3,6) A2 [6,8) B0 [8,12). B1 ends at 16.
 	if len(segs) != 4 {
 		t.Fatalf("got %d segments, want 4", len(segs))
@@ -55,7 +55,7 @@ func TestWindow_ListsOnlyEndedSegments(t *testing.T) {
 
 func TestWritePlaylist_Golden(t *testing.T) {
 	v1, _, clips := fixture()
-	segs := mustWindow(t, v1, nil, clips, t0.Add(12*time.Second), 6)
+	segs := mustWindow(t, v1, nil, clips, t0.Add(12*time.Second), windowSpec{MinSegments: 6})
 	var buf bytes.Buffer
 	writePlaylist(&buf, segs)
 	want := `#EXTM3U
@@ -88,7 +88,7 @@ func TestWindow_SpansVersionBoundaryAndCountsRemovedDiscontinuities(t *testing.T
 	v1, v2, clips := fixture()
 
 	// t0+21: C0 [16,21) has ended. Window of 3 → B0 B1 C0.
-	segs := mustWindow(t, v2, v1, clips, t0.Add(21*time.Second), 3)
+	segs := mustWindow(t, v2, v1, clips, t0.Add(21*time.Second), windowSpec{MinSegments: 3})
 	if len(segs) != 3 || segs[0].URL != "https://cdn/hls/v1/B/x/seg-000.ts" || segs[2].URL != "https://cdn/hls/v1/C/x/seg-000.ts" {
 		t.Fatalf("window = %+v", segs)
 	}
@@ -105,7 +105,7 @@ func TestWindow_SpansVersionBoundaryAndCountsRemovedDiscontinuities(t *testing.T
 	}
 
 	// t0+26: C1 has ended. Window of 3 → B1 C0 C1: B's tag was removed.
-	segs = mustWindow(t, v2, v1, clips, t0.Add(26*time.Second), 3)
+	segs = mustWindow(t, v2, v1, clips, t0.Add(26*time.Second), windowSpec{MinSegments: 3})
 	buf.Reset()
 	writePlaylist(&buf, segs)
 	out = buf.String()
@@ -116,7 +116,7 @@ func TestWindow_SpansVersionBoundaryAndCountsRemovedDiscontinuities(t *testing.T
 
 func TestWindowClipIDs_CoversWindowAndPrevTail(t *testing.T) {
 	v1, v2, clips := fixture()
-	ids := windowClipIDs(v2, v1, t0.Add(17*time.Second), 6)
+	ids := windowClipIDs(v2, v1, t0.Add(17*time.Second), windowSpec{MinSegments: 6})
 	for _, want := range []int64{1, 2, 3} {
 		found := false
 		for _, id := range ids {
@@ -141,7 +141,7 @@ func TestPlaylist_CountersNeverDecrease(t *testing.T) {
 		if !now.Before(v2.StartsAt) {
 			cur, prev = v2, v1
 		}
-		segs := mustWindow(t, cur, prev, clips, now, 3)
+		segs := mustWindow(t, cur, prev, clips, now, windowSpec{MinSegments: 3})
 		var buf bytes.Buffer
 		writePlaylist(&buf, segs)
 		m := seqRe.FindStringSubmatch(buf.String())
@@ -161,7 +161,7 @@ func TestPlaylist_CountersNeverDecrease(t *testing.T) {
 // ended yet (prev == nil, now still inside the first item).
 func TestWindow_ColdStartIsEmpty(t *testing.T) {
 	v1, _, clips := fixture()
-	segs := mustWindow(t, v1, nil, clips, t0, 6)
+	segs := mustWindow(t, v1, nil, clips, t0, windowSpec{MinSegments: 6})
 	if len(segs) != 0 {
 		t.Fatalf("got %d segments at cold start, want 0", len(segs))
 	}
@@ -196,9 +196,9 @@ func TestWriteMaster(t *testing.T) {
 
 // mustWindow is window() with the store-inconsistency error turned into a
 // test failure.
-func mustWindow(t *testing.T, cur, prev *Version, clips map[int64]ClipSegments, now time.Time, n int) []segment {
+func mustWindow(t *testing.T, cur, prev *Version, clips map[int64]ClipSegments, now time.Time, w windowSpec) []segment {
 	t.Helper()
-	segs, err := window(cur, prev, clips, now, n)
+	segs, err := window(cur, prev, clips, now, w)
 	if err != nil {
 		t.Fatalf("window at %s: %v", now, err)
 	}

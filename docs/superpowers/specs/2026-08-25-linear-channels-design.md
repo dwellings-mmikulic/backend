@@ -193,8 +193,13 @@ AVERAGE-BANDWIDTH 1,100,000, `CODECS="avc1.640028,mp4a.40.2"`,
 `GET /channels/live.m3u8?…` at wall-clock `now`:
 
 - the **live edge** is `now`; a segment is listed only if its end ≤ `now`;
-- window = last `WindowSegments` (6) such segments, which may span a version
-  boundary (the two most recent versions are loaded);
+- window = the newest such segments spanning **at least 40 s** (4 ×
+  `TargetDuration`) of listed duration, and never fewer than **6** segments.
+  RFC 8216 §6.2.2 requires a live playlist to span ≥ 3 × target duration, and
+  segments are 3–8.33 s, so a fixed six-segment window can be as little as
+  18 s. The window may span a version boundary (the two most recent versions
+  are loaded), and the items fetched for it are bounded by the same rule, not
+  by a fixed items-back count;
 - `#EXTM3U`, `#EXT-X-VERSION:3`, `#EXT-X-TARGETDURATION:10`,
   `#EXT-X-INDEPENDENT-SEGMENTS`, `#EXT-X-MEDIA-SEQUENCE`,
   `#EXT-X-DISCONTINUITY-SEQUENCE`, then per segment: `#EXT-X-DISCONTINUITY`
@@ -266,7 +271,8 @@ thumbnail, shortDescription, tags}]` when `PublicBaseURL` is configured.
 | `LINEAR_MIN_SCOPE_CLIPS` | `20` | fallback threshold |
 | `LINEAR_EPG_HORIZON_HOURS` | `24` | how far ahead the EPG materialises |
 
-Constants: `TargetDuration = 10 s`, `WindowSegments = 6`, `HLSVersion = "v1"`.
+Constants: `TargetDuration = 10 s`, live window ≥ 40 s of ended segments with
+a minimum of 6, `HLSVersion = "v1"`.
 
 ## Error handling
 

@@ -32,9 +32,6 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// windowSegments is how many segments a live playlist lists.
-const windowSegments = 6
-
 const (
 	// cacheTTL bounds how long a cached version pair is reused (spec §4).
 	cacheTTL = 30 * time.Second
@@ -181,7 +178,7 @@ func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	ids := windowClipIDs(cur, prev, now, windowSegments)
+	ids := windowClipIDs(cur, prev, now, liveWindow)
 	clips, err := s.store.ClipsByID(ctx, ids)
 	if err != nil {
 		return nil, err
@@ -194,7 +191,7 @@ func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte
 			return nil, err
 		}
 	}
-	segs, err := window(cur, prev, clips, now, windowSegments)
+	segs, err := window(cur, prev, clips, now, liveWindow)
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dwellingtw/backend/internal/hls"
 )
 
 func TestPlaylist_IsDeterministicAcrossInstances(t *testing.T) {
@@ -30,7 +32,7 @@ func TestPlaylist_IsDeterministicAcrossInstances(t *testing.T) {
 	if !bytes.Equal(pa, pb) {
 		t.Errorf("instances disagree:\n%s\n---\n%s", pa, pb)
 	}
-	if !strings.HasPrefix(string(pa), "#EXTM3U\n") || strings.Count(string(pa), "#EXTINF:") != windowSegments {
+	if !strings.HasPrefix(string(pa), "#EXTM3U\n") || strings.Count(string(pa), "#EXTINF:") < liveWindow.MinSegments {
 		t.Errorf("unexpected playlist:\n%s", pa)
 	}
 }
@@ -225,5 +227,43 @@ func TestPlaylist_ConcurrentColdMissesResolveOnce(t *testing.T) {
 	wg.Wait()
 	if got := cs.listClips.Load(); got != 1 {
 		t.Errorf("ListClips called %d times for 16 concurrent cold misses, want 1", got)
+	}
+}
+
+// extinfTotalMS sums the EXTINF durations of a media playlist.
+func extinfTotalMS(t *testing.T, body []byte) int {
+	t.Helper()
+	total := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, "#EXTINF:") {
+			continue
+		}
+		secs, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(line, "#EXTINF:"), ","), 64)
+		if err != nil {
+			t.Fatalf("bad EXTINF line %q: %v", line, err)
+		}
+		total += int(secs * 1000)
+	}
+	return total
+}
+
+// RFC 8216 §6.2.2: a live playlist must span at least three target
+// durations, or a player that joins mid-stream starves. Six 3-second
+// segments are 18 s — well under the 30 s floor for TARGETDURATION 10.
+func TestPlaylist_SpansAtLeastThreeTargetDurations(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 200)
+	now := t0.Add(90 * time.Second)
+	s := testService(m, now)
+	body, err := s.Playlist(context.Background(), Scope{Zip: "77494"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := extinfTotalMS(t, body)
+	if min := 3 * hls.TargetDuration * 1000; got < min {
+		t.Errorf("playlist spans %d ms, want at least %d ms (3 × TARGETDURATION):\n%s", got, min, body)
+	}
+	if n := strings.Count(string(body), "#EXTINF:"); n < liveWindow.MinSegments {
+		t.Errorf("playlist lists %d segments, want at least %d", n, liveWindow.MinSegments)
 	}
 }

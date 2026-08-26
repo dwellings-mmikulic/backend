@@ -35,26 +35,78 @@ func itemAt(v *Version, t time.Time) int {
 	return -1
 }
 
+// windowSpec bounds a live playlist window. RFC 8216 §6.2.2 requires a live
+// playlist to span at least three target durations, so the window is sized by
+// duration, not by a segment count: segments are 3–8.33 s, and six of the
+// short ones are only 18 s against a TARGETDURATION of 10.
+type windowSpec struct {
+	MinSegments int // never list fewer than this many ended segments
+	MinMS       int // nor less than this much listed duration
+}
+
+// liveWindow is what every live playlist uses: 40 s (4 × TargetDuration,
+// comfortably above the RFC's 3 ×) of ended segments, and never fewer than 6.
+var liveWindow = windowSpec{MinSegments: 6, MinMS: 4 * hls.TargetDuration * 1000}
+
+// satisfiedBy reports whether segs already meets both floors.
+func (w windowSpec) satisfiedBy(segs []segment) bool {
+	if len(segs) < w.MinSegments {
+		return false
+	}
+	ms := 0
+	for _, s := range segs {
+		ms += s.DurMS
+	}
+	return ms >= w.MinMS
+}
+
+// trim keeps the newest segments that satisfy w, dropping everything older.
+func (w windowSpec) trim(segs []segment) []segment {
+	keep, ms := 0, 0
+	for i := len(segs) - 1; i >= 0; i-- {
+		keep++
+		ms += segs[i].DurMS
+		if keep >= w.MinSegments && ms >= w.MinMS {
+			break
+		}
+	}
+	return segs[len(segs)-keep:]
+}
+
+// backFrom returns the lowest item index i of v such that items [i, to) alone
+// already carry w's floors, so a window ending inside item to can always be
+// filled without expanding further back. Bounding by item count alone is not
+// enough: an item is only guaranteed to hold one segment, and with 3 s
+// segments a 40 s window can reach across many short items.
+func backFrom(v *Version, to int, w windowSpec) int {
+	i := to
+	ms, segs := 0, 0
+	for i > 0 && (segs < w.MinSegments || ms < w.MinMS) {
+		i--
+		ms += v.ItemMS[i]
+		segs += v.ItemSegs[i]
+	}
+	return i
+}
+
 // itemRange returns the item indexes [from, to] of v whose segments a window
-// of n ending at now could need: the item airing at now (or the last item if
-// now is past the version) and the n before it, since an item has at least
-// one segment.
-func itemRange(v *Version, now time.Time, n int) (from, to int) {
+// w ending at now could need: the item airing at now (or the last item if now
+// is past the version) and enough items before it to fill w.
+func itemRange(v *Version, now time.Time, w windowSpec) (from, to int) {
 	to = itemAt(v, now)
 	if to < 0 {
 		to = len(v.ItemIDs) - 1
 	}
-	return max(to-n, 0), to
+	return backFrom(v, to, w), to
 }
 
 // windowClipIDs lists the clip ids window may need, so the caller can fetch
 // them in one query.
-func windowClipIDs(cur, prev *Version, now time.Time, n int) []int64 {
-	from, to := itemRange(cur, now, n)
+func windowClipIDs(cur, prev *Version, now time.Time, w windowSpec) []int64 {
+	from, to := itemRange(cur, now, w)
 	ids := append([]int64(nil), cur.ItemIDs[from:to+1]...)
 	if prev != nil {
-		pfrom := max(len(prev.ItemIDs)-n, 0)
-		ids = append(ids, prev.ItemIDs[pfrom:]...)
+		ids = append(ids, prev.ItemIDs[backFrom(prev, len(prev.ItemIDs), w):]...)
 	}
 	return ids
 }
@@ -144,24 +196,21 @@ func ended(segs []segment, now time.Time) []segment {
 	return out
 }
 
-// window returns the last n segments that have ended by now, from cur and —
-// when cur has too few yet — the tail of prev.
-func window(cur, prev *Version, clips map[int64]ClipSegments, now time.Time, n int) ([]segment, error) {
-	from, to := itemRange(cur, now, n)
+// window returns the newest segments that have ended by now and satisfy w,
+// from cur and — when cur has too few yet — the tail of prev.
+func window(cur, prev *Version, clips map[int64]ClipSegments, now time.Time, w windowSpec) ([]segment, error) {
+	from, to := itemRange(cur, now, w)
 	all, err := expandItems(cur, clips, from, to)
 	if err != nil {
 		return nil, err
 	}
 	segs := ended(all, now)
-	if len(segs) < n && prev != nil {
-		pall, err := expandItems(prev, clips, max(len(prev.ItemIDs)-n, 0), len(prev.ItemIDs)-1)
+	if !w.satisfiedBy(segs) && prev != nil {
+		pall, err := expandItems(prev, clips, backFrom(prev, len(prev.ItemIDs), w), len(prev.ItemIDs)-1)
 		if err != nil {
 			return nil, err
 		}
 		segs = append(ended(pall, now), segs...)
 	}
-	if len(segs) > n {
-		segs = segs[len(segs)-n:]
-	}
-	return segs, nil
+	return w.trim(segs), nil
 }
