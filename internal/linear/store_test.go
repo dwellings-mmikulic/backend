@@ -101,6 +101,12 @@ func (m *memStore) ListClips(_ context.Context, s Scope) ([]ClipRef, error) {
 	return out, nil
 }
 
+func (m *memStore) CountCurrentClips(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.clips), nil
+}
+
 func (m *memStore) CityOfZip(_ context.Context, zip string) (string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

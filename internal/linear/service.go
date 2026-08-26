@@ -52,7 +52,14 @@ type Service struct {
 
 	mu    sync.Mutex
 	cache map[string]cached // channel key → versions last served
+
+	contentMu  sync.Mutex
+	hasContent bool
+	contentAt  time.Time // when hasContent was last refreshed
 }
+
+// contentTTL is how long HasContent reuses its answer.
+const contentTTL = time.Minute
 
 type cached struct {
 	cur, prev *Version
@@ -220,4 +227,26 @@ func checkClips(v *Version, clips map[int64]ClipSegments) error {
 		}
 	}
 	return nil
+}
+
+// HasContent reports whether the library has any current clip at all, i.e.
+// whether the channels can play anything. The answer is cached for
+// contentTTL: the Roku feed asks on every request, and the count is a scan
+// of the whole video_hls join. The lock is held across the query, which is
+// fine at feed request rates and keeps a cold cache from firing N counts.
+// A failed count keeps the previous answer rather than pulling the channel
+// out of the feed on a transient database error.
+func (s *Service) HasContent(ctx context.Context) bool {
+	s.contentMu.Lock()
+	defer s.contentMu.Unlock()
+	if !s.contentAt.IsZero() && s.now().Sub(s.contentAt) < contentTTL {
+		return s.hasContent
+	}
+	n, err := s.store.CountCurrentClips(ctx)
+	if err != nil {
+		s.log.Error("count current clips failed", "error", err)
+		return s.hasContent
+	}
+	s.hasContent, s.contentAt = n > 0, s.now()
+	return s.hasContent
 }

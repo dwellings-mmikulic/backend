@@ -104,6 +104,10 @@ type LinearConfig struct {
 	LineupHours     int // max content per lineup version
 	MinScopeClips   int // a scope with fewer clips falls back to its parent area
 	EPGHorizonHours int // how far ahead the EPG materialises the schedule
+	// LiveThumbnailURL is the poster of the Roku liveFeeds entry. Empty
+	// borrows the first ready listing's image; with neither, the entry is
+	// omitted (Roku requires a thumbnail).
+	LiveThumbnailURL string
 }
 
 // SearchCriteria defines what properties the scheduler discovers each cycle.
@@ -148,10 +152,11 @@ func Load() (*Config, error) {
 			FontPath:        getenv("VIDEO_FONT_PATH", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
 		},
 		Linear: LinearConfig{
-			Enabled:         getenvBool("LINEAR_ENABLED", true),
-			LineupHours:     getenvInt("LINEAR_LINEUP_HOURS", 6),
-			MinScopeClips:   getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
-			EPGHorizonHours: getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
+			Enabled:          getenvBool("LINEAR_ENABLED", true),
+			LineupHours:      getenvInt("LINEAR_LINEUP_HOURS", 6),
+			MinScopeClips:    getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
+			EPGHorizonHours:  getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
+			LiveThumbnailURL: strings.TrimSpace(getenv("LINEAR_LIVE_THUMBNAIL_URL", "")),
 		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),

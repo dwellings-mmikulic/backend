@@ -75,6 +75,21 @@ SELECT h.id, h.total_ms, cardinality(h.segment_ms)
 	return out, rows.Err()
 }
 
+// CountCurrentClips implements Store: the national scope's clip count, the
+// same predicate ListClips uses.
+func (r *Repository) CountCurrentClips(ctx context.Context) (int, error) {
+	const q = `
+SELECT count(*)
+  FROM video_hls h
+  JOIN properties p ON p.zpid = h.zpid
+ WHERE p.video_status = 'ready' AND p.video_content_hash = h.content_hash`
+	var n int
+	if err := r.pool.QueryRow(ctx, q).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count current clips: %w", err)
+	}
+	return n, nil
+}
+
 // CityOfZip implements Store.
 func (r *Repository) CityOfZip(ctx context.Context, zip string) (string, string, error) {
 	const q = `

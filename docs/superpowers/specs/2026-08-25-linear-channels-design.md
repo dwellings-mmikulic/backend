@@ -253,6 +253,14 @@ failing. Blocks with nothing on air are omitted.
 "<PublicBaseURL>/channels/master.m3u8", quality: "HD", videoType: "HLS"}]},
 thumbnail, shortDescription, tags}]` when `PublicBaseURL` is configured.
 
+The thumbnail is `LINEAR_LIVE_THUMBNAIL_URL`. Roku Direct Publisher requires
+a non-empty thumbnail on every `liveFeeds` entry, so when none is configured
+the first ready listing's first image is borrowed, and when there is no image
+either **the entry is omitted** — an empty thumbnail, or a branding URL that
+was never uploaded, would fail ingestion. The entry is also omitted while the
+channels have nothing to play (`Service.HasContent`, a count of current clips
+cached for 60 s), so the feed never advertises a stream that answers 503.
+
 ### 8. Scheduler and backfill
 
 - `renderVideo` after `SetVideoReady`: segment the local MP4, upload, record
@@ -270,6 +278,13 @@ thumbnail, shortDescription, tags}]` when `PublicBaseURL` is configured.
 | `LINEAR_LINEUP_HOURS` | `6` | max content per lineup version |
 | `LINEAR_MIN_SCOPE_CLIPS` | `20` | fallback threshold |
 | `LINEAR_EPG_HORIZON_HOURS` | `24` | how far ahead the EPG materialises |
+| `LINEAR_LIVE_THUMBNAIL_URL` | `` | poster of the Roku live entry; empty borrows the first ready listing's image, and with neither the entry is omitted |
+
+At startup the server warns when `LINEAR_ENABLED` is on but `VIDEO_ENABLED` is
+off (routes mounted, nothing will ever be segmented), when `PUBLIC_BASE_URL`
+is empty (no Roku live entry), when the renderer found no music tracks (silent
+renders cannot be segmented), and when no clip has been segmented yet (run
+`cmd/backfill-hls`).
 
 Constants: `TargetDuration = 10 s`, live window ≥ 40 s of ended segments with
 a minimum of 6, `HLSVersion = "v1"`.

@@ -196,12 +196,18 @@ func TestServiceCache_IsSizeCapped(t *testing.T) {
 // countingStore counts the expensive lookups a cache miss triggers.
 type countingStore struct {
 	*memStore
-	listClips atomic.Int64
+	listClips  atomic.Int64
+	countClips atomic.Int64
 }
 
 func (c *countingStore) ListClips(ctx context.Context, s Scope) ([]ClipRef, error) {
 	c.listClips.Add(1)
 	return c.memStore.ListClips(ctx, s)
+}
+
+func (c *countingStore) CountCurrentClips(ctx context.Context) (int, error) {
+	c.countClips.Add(1)
+	return c.memStore.CountCurrentClips(ctx)
 }
 
 // A cold cache (startup, or the instant a version rolls over) makes every
@@ -265,5 +271,31 @@ func TestPlaylist_SpansAtLeastThreeTargetDurations(t *testing.T) {
 	}
 	if n := strings.Count(string(body), "#EXTINF:"); n < liveWindow.MinSegments {
 		t.Errorf("playlist lists %d segments, want at least %d", n, liveWindow.MinSegments)
+	}
+}
+
+// The Roku feed asks HasContent on every request; the count is a scan of the
+// whole video_hls join, so the answer is cached.
+func TestHasContent_CachesTheCount(t *testing.T) {
+	m := newMemStore()
+	cs := &countingStore{memStore: m}
+	s := testService(cs, t0)
+
+	if s.HasContent(context.Background()) {
+		t.Error("an empty library has no content")
+	}
+	addClips(m, katy, 1, 5)
+	if s.HasContent(context.Background()) {
+		t.Error("the cached answer should still be in force")
+	}
+	if got := cs.countClips.Load(); got != 1 {
+		t.Errorf("CountCurrentClips called %d times, want 1", got)
+	}
+	s.now = func() time.Time { return t0.Add(contentTTL + time.Second) }
+	if !s.HasContent(context.Background()) {
+		t.Error("after the TTL the count should be refreshed")
+	}
+	if got := cs.countClips.Load(); got != 2 {
+		t.Errorf("CountCurrentClips called %d times, want 2", got)
 	}
 }

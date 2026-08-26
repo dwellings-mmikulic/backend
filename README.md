@@ -138,8 +138,16 @@ go run ./cmd/backfill-hls -concurrency 4
 ```
 
 With `PUBLIC_BASE_URL` set, `/roku/feed.json` also lists the national channel
-as a Roku `liveFeeds` entry. Set `LINEAR_ENABLED=false` to turn all of this
-off.
+as a Roku `liveFeeds` entry. Its poster is `LINEAR_LIVE_THUMBNAIL_URL`; when
+that is empty the first ready listing's image is used, and when there is no
+image either the entry is omitted (Roku requires a thumbnail). The entry is
+also left out while nothing has been segmented yet, so the feed never points
+at an empty stream. Set `LINEAR_ENABLED=false` to turn all of this off.
+
+At startup the server warns when the channels are enabled but cannot work:
+`VIDEO_ENABLED=false` (nothing will be segmented), an empty `PUBLIC_BASE_URL`
+(no Roku live entry), no music tracks found (silent renders are rejected by
+the segmenter), or no segmented clip in the database (run the backfill).
 
 ### HTTP endpoints
 
@@ -234,6 +242,13 @@ first startup, and each cycle works through it in rotation order
 budget is spent and resuming from the cursor next cycle. A cycle is skipped
 entirely when the provider reports the monthly quota is exhausted, or when a
 previous cycle is still running.
+
+`PUBLIC_BASE_URL` (e.g. `https://api.dwellings.tv`) is this server's public
+origin, used for the absolute URLs in the Roku feed; empty leaves the live
+channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
+`LINEAR_LINEUP_HOURS` (`6`), `LINEAR_MIN_SCOPE_CLIPS` (`20`),
+`LINEAR_EPG_HORIZON_HOURS` (`24`) and `LINEAR_LIVE_THUMBNAIL_URL` (empty —
+the poster of the Roku live entry; see [Linear channels](#linear-channels)).
 
 ## OpenWebNinja Zillow API
 

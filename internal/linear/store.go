@@ -93,4 +93,6 @@ type Store interface {
 	ClipsByID(ctx context.Context, ids []int64) (map[int64]ClipSegments, error)
 	// ListingsByClipID returns the listing behind each clip id.
 	ListingsByClipID(ctx context.Context, ids []int64) ([]Listing, error)
+	// CountCurrentClips counts the current clips across the whole library.
+	CountCurrentClips(ctx context.Context) (int, error)
 }

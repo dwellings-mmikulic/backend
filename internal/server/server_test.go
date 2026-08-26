@@ -58,58 +58,84 @@ type emptyFeed struct{}
 
 func (emptyFeed) ListReadyForFeed(context.Context) ([]property.Property, error) { return nil, nil }
 
-func TestFeed_IncludesLiveFeedWhenConfigured(t *testing.T) {
-	s := New(":0", "Dwellings", emptyFeed{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	s.SetLiveFeedURL("https://api.example.com/channels/master.m3u8")
+func liveFeeds(t *testing.T, body string) []feed.LiveFeed {
+	t.Helper()
+	var decoded feed.Feed
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("decode feed response: %v\n%s", err, body)
+	}
+	return decoded.LiveFeeds
+}
+
+func available(context.Context) bool { return true }
+
+func TestFeed_UsesTheConfiguredLiveThumbnail(t *testing.T) {
+	const poster = "https://cdn.example/branding/live-poster.jpg"
+	a := property.Property{ZPID: "1", ImageURLs: []string{"https://cdn/a.jpg"}}
+	s := New(":0", "Dwellings", stubFeed{props: []property.Property{a}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.SetLiveFeed("https://api.example.com/channels/master.m3u8", poster, available)
 	rec := httptest.NewRecorder()
 	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, `"liveFeeds"`) || !strings.Contains(body, "channels/master.m3u8") {
-		t.Errorf("feed lacks live entry:\n%s", body)
+	lf := liveFeeds(t, rec.Body.String())
+	if len(lf) != 1 {
+		t.Fatalf("liveFeeds = %d entries, want 1:\n%s", len(lf), rec.Body.String())
 	}
-	// The ready set is empty (no listing to borrow a thumbnail from), yet Roku
-	// Direct Publisher requires a non-empty thumbnail on every liveFeeds entry.
-	// Decode the document rather than grepping for a literal byte sequence:
-	// Go's indented encoder always writes `"thumbnail": ""` (with a space),
-	// so a compact `"thumbnail":""` substring check would never match and
-	// would pass even if the fix regressed.
-	var decoded feed.Feed
-	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-		t.Fatalf("decode feed response: %v\n%s", err, body)
+	if lf[0].Thumbnail != poster {
+		t.Errorf("thumbnail = %q, want the configured poster %q", lf[0].Thumbnail, poster)
 	}
-	if len(decoded.LiveFeeds) != 1 {
-		t.Fatalf("liveFeeds = %d entries, want 1:\n%s", len(decoded.LiveFeeds), body)
-	}
-	if decoded.LiveFeeds[0].Thumbnail == "" {
-		t.Errorf("liveFeeds thumbnail must not be empty when the ready set is empty:\n%s", body)
-	}
-	if !strings.Contains(body, liveChannelThumbnail) {
-		t.Errorf("liveFeeds thumbnail must be the fixed channel poster, got:\n%s", body)
+	if !strings.Contains(rec.Body.String(), "channels/master.m3u8") {
+		t.Errorf("feed lacks the live stream url:\n%s", rec.Body.String())
 	}
 }
 
-func TestFeed_LiveThumbnailIsFixedRegardlessOfReadySet(t *testing.T) {
-	// Two listings in different orders must not change which image is used
-	// as the live channel's poster: it is fixed, not borrowed from whichever
-	// listing happens to sort first.
+// Roku Direct Publisher requires a non-empty thumbnail on every liveFeeds
+// entry. Without a configured one, borrow the first ready listing's first
+// image rather than pointing at a URL nobody ever uploaded.
+func TestFeed_FallsBackToTheFirstListingImage(t *testing.T) {
 	a := property.Property{ZPID: "1", ImageURLs: []string{"https://cdn/a.jpg"}}
 	b := property.Property{ZPID: "2", ImageURLs: []string{"https://cdn/b.jpg"}}
+	s := New(":0", "Dwellings", stubFeed{props: []property.Property{a, b}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.SetLiveFeed("https://api.example.com/channels/master.m3u8", "", available)
+	rec := httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
+	lf := liveFeeds(t, rec.Body.String())
+	if len(lf) != 1 {
+		t.Fatalf("liveFeeds = %d entries, want 1:\n%s", len(lf), rec.Body.String())
+	}
+	if lf[0].Thumbnail != "https://cdn/a.jpg" {
+		t.Errorf("thumbnail = %q, want the first ready listing's first image", lf[0].Thumbnail)
+	}
+}
 
-	s1 := New(":0", "Dwellings", stubFeed{props: []property.Property{a, b}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	s1.SetLiveFeedURL("https://api.example.com/channels/master.m3u8")
-	rec1 := httptest.NewRecorder()
-	s1.srv.Handler.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
+// No configured thumbnail and no listing image to borrow: the entry must be
+// omitted, not published with an empty thumbnail Roku would reject.
+func TestFeed_OmitsLiveEntryWithoutAnyThumbnail(t *testing.T) {
+	s := New(":0", "Dwellings", emptyFeed{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.SetLiveFeed("https://api.example.com/channels/master.m3u8", "", available)
+	rec := httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
+	if lf := liveFeeds(t, rec.Body.String()); len(lf) != 0 {
+		t.Errorf("liveFeeds = %+v, want none without a thumbnail", lf)
+	}
+	if strings.Contains(rec.Body.String(), "liveFeeds") {
+		t.Errorf("liveFeeds key must be omitted entirely:\n%s", rec.Body.String())
+	}
+}
 
-	s2 := New(":0", "Dwellings", stubFeed{props: []property.Property{b, a}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	s2.SetLiveFeedURL("https://api.example.com/channels/master.m3u8")
-	rec2 := httptest.NewRecorder()
-	s2.srv.Handler.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
-
-	if !strings.Contains(rec1.Body.String(), liveChannelThumbnail) || !strings.Contains(rec2.Body.String(), liveChannelThumbnail) {
-		t.Fatalf("both orderings must use the fixed channel poster:\n%s\n---\n%s", rec1.Body.String(), rec2.Body.String())
+// Before the backfill has segmented anything the channels have nothing to
+// play; advertising them to Roku would ship a stream that 503s.
+func TestFeed_OmitsLiveEntryWhenNoContentIsAvailable(t *testing.T) {
+	a := property.Property{ZPID: "1", ImageURLs: []string{"https://cdn/a.jpg"}}
+	s := New(":0", "Dwellings", stubFeed{props: []property.Property{a}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.SetLiveFeed("https://api.example.com/channels/master.m3u8", "https://cdn/poster.jpg",
+		func(context.Context) bool { return false })
+	rec := httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/roku/feed.json", nil))
+	if lf := liveFeeds(t, rec.Body.String()); len(lf) != 0 {
+		t.Errorf("liveFeeds = %+v, want none while the channel has no content", lf)
 	}
 }
 
