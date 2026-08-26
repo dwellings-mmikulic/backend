@@ -29,6 +29,11 @@ type Server struct {
 	log          *slog.Logger
 	now          func() time.Time
 	srv          *http.Server
+	mux          *http.ServeMux
+
+	liveURL       string
+	liveThumbnail string
+	liveAvailable func(context.Context) bool
 }
 
 // New creates a Server bound to addr (e.g. ":8080"). publicAPI may be nil
@@ -41,6 +46,7 @@ func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *sl
 		now:          time.Now,
 	}
 	mux := http.NewServeMux()
+	s.mux = mux
 	mux.HandleFunc("GET /roku/feed.json", s.handleFeed)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
@@ -53,6 +59,29 @@ func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *sl
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s
+}
+
+// Mounter registers routes on a mux (e.g. linear.Handler).
+type Mounter interface {
+	Register(mux *http.ServeMux)
+}
+
+// Mount adds routes. Call before Start.
+func (s *Server) Mount(m Mounter) { m.Register(s.mux) }
+
+// SetLiveFeed adds the linear channel to the Roku feed as a live feed.
+//
+// thumbnail is the channel poster (LINEAR_LIVE_THUMBNAIL_URL). Roku Direct
+// Publisher requires a non-empty thumbnail on every liveFeeds entry; when
+// none is configured the first ready listing's first image is borrowed, and
+// when there is no image either the entry is omitted rather than published
+// with a thumbnail Roku rejects — or with a branding URL nobody uploaded.
+//
+// available reports whether the channels have anything to play; nil means
+// always. A feed that advertises a stream before any clip has been segmented
+// sends viewers to a 503.
+func (s *Server) SetLiveFeed(u, thumbnail string, available func(context.Context) bool) {
+	s.liveURL, s.liveThumbnail, s.liveAvailable = u, thumbnail, available
 }
 
 // Start runs the HTTP server until it errors or is shut down.
@@ -76,6 +105,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc := feed.Build(s.providerName, props, s.now())
+	s.addLiveFeed(r.Context(), &doc, props)
 
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
@@ -83,6 +113,37 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	if err := enc.Encode(doc); err != nil {
 		s.log.Error("feed encode failed", "error", err)
 	}
+}
+
+// addLiveFeed appends the linear channel to doc when it is configured, has
+// content, and has a thumbnail to show.
+func (s *Server) addLiveFeed(ctx context.Context, doc *feed.Feed, props []property.Property) {
+	if s.liveURL == "" {
+		return
+	}
+	if s.liveAvailable != nil && !s.liveAvailable(ctx) {
+		s.log.Warn("roku live feed omitted: the channels have no content yet", "url", s.liveURL)
+		return
+	}
+	thumb := s.liveThumbnail
+	if thumb == "" {
+		thumb = firstImage(props)
+	}
+	if thumb == "" {
+		s.log.Warn("roku live feed omitted: no LINEAR_LIVE_THUMBNAIL_URL and no listing image to borrow", "url", s.liveURL)
+		return
+	}
+	doc.AddLive(s.liveURL, thumb, s.now())
+}
+
+// firstImage returns the first image of the first listing that has one.
+func firstImage(props []property.Property) string {
+	for _, p := range props {
+		if len(p.ImageURLs) > 0 && p.ImageURLs[0] != "" {
+			return p.ImageURLs[0]
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

@@ -95,3 +95,20 @@ func TestLoad_SearchLocationNotRequired(t *testing.T) {
 		t.Fatalf("Load without SEARCH_LOCATION: %v", err)
 	}
 }
+
+func TestLoad_LinearDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("ZILLOW_API_KEY", "k")
+	t.Setenv("IMAGES_ENABLED", "false")
+	t.Setenv("PUBLIC_BASE_URL", "https://api.example.com/")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Linear.Enabled || cfg.Linear.LineupHours != 6 || cfg.Linear.MinScopeClips != 20 || cfg.Linear.EPGHorizonHours != 24 {
+		t.Errorf("linear defaults = %+v", cfg.Linear)
+	}
+	if cfg.PublicBaseURL != "https://api.example.com" {
+		t.Errorf("PublicBaseURL = %q (trailing slash must be trimmed)", cfg.PublicBaseURL)
+	}
+}

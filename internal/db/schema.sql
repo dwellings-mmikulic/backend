@@ -79,3 +79,41 @@ CREATE TABLE IF NOT EXISTS zip_codes (
 
 CREATE INDEX IF NOT EXISTS idx_zip_codes_rotation
     ON zip_codes (last_searched_at ASC NULLS FIRST, population DESC);
+
+-- Linear channels (see docs/superpowers/specs/2026-08-25-linear-channels-design.md).
+-- video_hls: one row per (listing, render); segments live at base_url on the
+-- CDN. Rows are never deleted so lineups that reference an old render keep
+-- resolving. A row is "current" when properties.video_content_hash matches.
+CREATE TABLE IF NOT EXISTS video_hls (
+    id           BIGSERIAL PRIMARY KEY,
+    zpid         TEXT NOT NULL REFERENCES properties(zpid),
+    content_hash TEXT NOT NULL,
+    base_url     TEXT NOT NULL,
+    segment_ms   INTEGER[] NOT NULL,
+    total_ms     INTEGER NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (zpid, content_hash)
+);
+
+-- channel_lineups: the deterministic air schedule of a channel, as a chain of
+-- versions. Version N starts where N-1 ended and continues its counters.
+CREATE TABLE IF NOT EXISTS channel_lineups (
+    channel_key TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    scope       TEXT NOT NULL,
+    starts_at   TIMESTAMPTZ NOT NULL,
+    ends_at     TIMESTAMPTZ NOT NULL,
+    start_seq   BIGINT NOT NULL,
+    start_item  BIGINT NOT NULL,
+    item_ids    BIGINT[] NOT NULL,
+    item_ms     INTEGER[] NOT NULL,
+    item_segs   INTEGER[] NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (channel_key, version)
+);
+
+-- The EPG asks for the versions overlapping a bounded window
+-- (ends_at >= from AND starts_at < to), so a long-running channel's history
+-- never has to be scanned.
+CREATE INDEX IF NOT EXISTS idx_channel_lineups_key_ends
+    ON channel_lineups (channel_key, ends_at);

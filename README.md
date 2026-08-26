@@ -31,6 +31,8 @@ internal/locationiq     LocationIQ geocoding + static map client
 internal/propertymap    on-demand property map generation
 internal/server         HTTP server: /roku/feed.json, /api/v1/properties*, /healthz
 internal/scheduler      cron ticker; orchestrates the full collection cycle
+internal/hls            ffmpeg remux of a listing video into TS segments
+internal/linear         24/7 linear channels: lineups, live HLS playlist, EPG
 ```
 
 ### Listing videos
@@ -107,11 +109,64 @@ Set `LOCATIONIQ_API_KEY` to enable maps; without it `map_image_url` is always
 `BUNNY_API_KEY`, `BUNNY_CDN_BASE_URL`) — `config.Load` enforces this
 whenever `LOCATIONIQ_API_KEY` is set, even if `IMAGES_ENABLED=false`.
 
+### Linear channels
+
+The listing videos double as 24/7 "TV channels": a live HLS stream plus an
+EPG, with no running encoder. Every rendered MP4 is remuxed once into TS
+segments (`hls/v1/<zpid>/<hash8>/` on Bunny CDN, immutable) and a channel is a
+deterministic lineup materialised in `channel_lineups` in 6-hour versions.
+The playlist a viewer fetches is computed from the wall clock, so two
+instances — or a restart mid-stream — serve byte-identical playlists.
+
+```
+GET /channels/master.m3u8[?zip=77494 | ?city=Katy&state=TX | ?state=TX]
+GET /channels/live.m3u8   (same filters; the master playlist points here)
+GET /channels/epg.json    (same filters; 30-minute programme blocks)
+```
+
+No filter is the national channel. A ZIP with fewer than
+`LINEAR_MIN_SCOPE_CLIPS` (20) videos falls back to its city, then state, then
+national; `epg.json` reports the `scope` actually aired. New listings enter
+the rotation at the next lineup version (at most `LINEAR_LINEUP_HOURS` later).
+
+Segments for new renders are produced by the scheduler. To segment the
+existing library (and retry failures):
+
+```bash
+go run ./cmd/backfill-hls -dry-run
+go run ./cmd/backfill-hls -concurrency 4 -upload-concurrency 8
+```
+
+In production it ships inside the same image as the server (it needs the same
+`DATABASE_URL` and `BUNNY_*` environment, and the same ffmpeg), so run it
+through compose rather than installing Go on the box:
+
+```bash
+docker compose -f compose.prod.yml run --rm --entrypoint /app/backfill-hls app -dry-run
+docker compose -f compose.prod.yml run --rm --entrypoint /app/backfill-hls app -concurrency 4
+```
+
+It logs progress every 100 videos and exits non-zero if any video failed, so
+a wrapped run does not look successful while part of the library is unairable.
+
+With `PUBLIC_BASE_URL` set, `/roku/feed.json` also lists the national channel
+as a Roku `liveFeeds` entry. Its poster is `LINEAR_LIVE_THUMBNAIL_URL`; when
+that is empty the first ready listing's image is used, and when there is no
+image either the entry is omitted (Roku requires a thumbnail). The entry is
+also left out while nothing has been segmented yet, so the feed never points
+at an empty stream. Set `LINEAR_ENABLED=false` to turn all of this off.
+
+At startup the server warns when the channels are enabled but cannot work:
+`VIDEO_ENABLED=false` (nothing will be segmented), an empty `PUBLIC_BASE_URL`
+(no Roku live entry), no music tracks found (silent renders are rejected by
+the segmenter), or no segmented clip in the database (run the backfill).
+
 ### HTTP endpoints
 
 - `GET /roku/feed.json` — Roku Direct Publisher feed of all `ready` videos.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
+- `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json` — linear channels, see [Linear channels](#linear-channels).
 - `GET /healthz` — liveness.
 
 ## API
@@ -199,6 +254,13 @@ first startup, and each cycle works through it in rotation order
 budget is spent and resuming from the cursor next cycle. A cycle is skipped
 entirely when the provider reports the monthly quota is exhausted, or when a
 previous cycle is still running.
+
+`PUBLIC_BASE_URL` (e.g. `https://api.dwellings.tv`) is this server's public
+origin, used for the absolute URLs in the Roku feed; empty leaves the live
+channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
+`LINEAR_LINEUP_HOURS` (`6`), `LINEAR_MIN_SCOPE_CLIPS` (`20`),
+`LINEAR_EPG_HORIZON_HOURS` (`24`) and `LINEAR_LIVE_THUMBNAIL_URL` (empty —
+the poster of the Roku live entry; see [Linear channels](#linear-channels)).
 
 ## OpenWebNinja Zillow API
 

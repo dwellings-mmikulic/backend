@@ -16,6 +16,7 @@ type Feed struct {
 	Language        string           `json:"language"`
 	LastUpdated     string           `json:"lastUpdated"`
 	ShortFormVideos []ShortFormVideo `json:"shortFormVideos"`
+	LiveFeeds       []LiveFeed       `json:"liveFeeds,omitempty"`
 }
 
 // ShortFormVideo is one playable listing entry.
@@ -86,6 +87,37 @@ func Build(providerName string, props []property.Property, now time.Time) Feed {
 		})
 	}
 	return f
+}
+
+// LiveFeed is a Roku Direct Publisher liveFeeds entry: a linear stream.
+type LiveFeed struct {
+	ID               string      `json:"id"`
+	Title            string      `json:"title"`
+	ShortDescription string      `json:"shortDescription"`
+	Thumbnail        string      `json:"thumbnail"`
+	Content          LiveContent `json:"content"`
+	Tags             []string    `json:"tags,omitempty"`
+}
+
+// LiveContent holds the live stream URL.
+type LiveContent struct {
+	DateAdded string  `json:"dateAdded"`
+	Videos    []Video `json:"videos"`
+}
+
+// AddLive appends the national linear channel as a live feed.
+func (f *Feed) AddLive(streamURL, thumbnail string, now time.Time) {
+	f.LiveFeeds = append(f.LiveFeeds, LiveFeed{
+		ID:               "dwellingtv-live",
+		Title:            "DwellingTV Live",
+		ShortDescription: "Homes for sale, around the clock",
+		Thumbnail:        thumbnail,
+		Content: LiveContent{
+			DateAdded: now.UTC().Format(time.RFC3339),
+			Videos:    []Video{{URL: streamURL, Quality: "HD", VideoType: "HLS"}},
+		},
+		Tags: []string{"real estate"},
+	})
 }
 
 func title(p *property.Property) string {

@@ -14,6 +14,8 @@ import (
 	"github.com/dwellingtw/backend/internal/bunny"
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/db"
+	"github.com/dwellingtw/backend/internal/hls"
+	"github.com/dwellingtw/backend/internal/linear"
 	"github.com/dwellingtw/backend/internal/locationiq"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/propertymap"
@@ -95,6 +97,16 @@ func run(log *slog.Logger) error {
 	// nil-safe: pass a typed-nil renderer through as an untyped nil when disabled.
 	zipRepo := zipcode.NewRepository(pool)
 	sched := scheduler.New(cfg, zillowClient, bunnyClient, repo, zipRepo, rendererOrNil(renderer), log)
+
+	// Linear channels: segment new renders and serve the channel endpoints.
+	var linearRepo *linear.Repository
+	if cfg.Linear.Enabled {
+		linearRepo = linear.NewRepository(pool)
+		if cfg.Video.Enabled {
+			sched.EnableHLS(hls.NewSegmenter(), linearRepo)
+		}
+	}
+
 	if err := sched.Start(ctx); err != nil {
 		return err
 	}
@@ -102,6 +114,19 @@ func run(log *slog.Logger) error {
 
 	publicAPI := api.New(repo, mapEnsurerOrNil(mapSvc), log)
 	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
+	if linearRepo != nil {
+		svc := linear.New(linearRepo, linear.Options{
+			LineupHours:     cfg.Linear.LineupHours,
+			MinScopeClips:   cfg.Linear.MinScopeClips,
+			EPGHorizonHours: cfg.Linear.EPGHorizonHours,
+		}, log)
+		httpSrv.Mount(linear.NewHandler(svc, log))
+		if cfg.PublicBaseURL != "" {
+			httpSrv.SetLiveFeed(cfg.PublicBaseURL+"/channels/master.m3u8", cfg.Linear.LiveThumbnailURL, svc.HasContent)
+		}
+		log.Info("linear channels enabled", "lineup_hours", cfg.Linear.LineupHours, "min_scope_clips", cfg.Linear.MinScopeClips)
+		warnLinearSetup(ctx, cfg, linearRepo, renderer, log)
+	}
 	go func() {
 		log.Info("http server started", "port", cfg.HTTPPort)
 		if err := httpSrv.Start(); err != nil {
@@ -116,6 +141,32 @@ func run(log *slog.Logger) error {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
 	return nil
+}
+
+// warnLinearSetup surfaces the configurations in which the linear channels
+// are mounted but cannot actually serve anything, at startup rather than as a
+// silent empty stream.
+func warnLinearSetup(ctx context.Context, cfg *config.Config, repo *linear.Repository, renderer *video.Renderer, log *slog.Logger) {
+	if !cfg.Video.Enabled {
+		log.Warn("linear channels are enabled but VIDEO_ENABLED=false: the channel routes are mounted, but no new render will ever be segmented")
+	}
+	if cfg.PublicBaseURL == "" {
+		log.Warn("linear channels are enabled but PUBLIC_BASE_URL is empty: the Roku feed will not advertise the live channel")
+	}
+	if cfg.Video.Enabled && renderer != nil && renderer.TrackCount() == 0 {
+		log.Warn("linear channels are enabled but no music tracks were found: renders have no audio track and segmentation rejects them", "music_dir", cfg.Video.MusicDir)
+	}
+	countCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	n, err := repo.CountCurrentClips(countCtx)
+	switch {
+	case err != nil:
+		log.Warn("could not count segmented clips", "error", err)
+	case n == 0:
+		log.Warn("linear channels are enabled but no listing video has been segmented yet; run cmd/backfill-hls to fill the library")
+	default:
+		log.Info("linear channel library", "current_clips", n)
+	}
 }
 
 // logZillowQuota queries the provider's usage endpoint and logs the remaining
