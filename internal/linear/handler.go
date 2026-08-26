@@ -29,6 +29,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	if h.viewers != nil {
 		mux.HandleFunc("GET /channels/resolve", h.resolve)
 		mux.HandleFunc("GET /channels/stats", h.stats)
+		mux.HandleFunc("GET /channels/beat", h.beat)
 	}
 }
 

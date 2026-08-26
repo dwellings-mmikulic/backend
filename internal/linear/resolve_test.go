@@ -197,3 +197,27 @@ func TestViewersNotEnabled(t *testing.T) {
 		t.Errorf("resolve without EnableViewers: %d", rec.Code)
 	}
 }
+
+func TestBeat(t *testing.T) {
+	m := newMemStore()
+	tr := &fakeTracker{}
+	o := baseOpts(&fakeAudience{}, nil)
+	o.Tracker = tr
+	rec := serveViewers(t, m, o, "/channels/beat?state=TX&sid=roku-1", "203.0.113.5")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Errorf("headers: %v", rec.Header())
+	}
+	if len(tr.beats) != 1 || tr.beats[0].Channel != "state:tx" || tr.beats[0].Viewer != viewer.NewHasher("s", false).IDAt("roku-1", "", t0) {
+		t.Errorf("beats = %+v", tr.beats)
+	}
+	// National needs no filter; a bad filter is rejected and not recorded.
+	if rec = serveViewers(t, m, o, "/channels/beat", "203.0.113.5"); rec.Code != http.StatusNoContent || tr.beats[1].Channel != "us" {
+		t.Errorf("national beat: %d %+v", rec.Code, tr.beats)
+	}
+	if rec = serveViewers(t, m, o, "/channels/beat?zip=abc", "203.0.113.5"); rec.Code != http.StatusBadRequest || len(tr.beats) != 2 {
+		t.Errorf("bad beat: %d, beats %d", rec.Code, len(tr.beats))
+	}
+}
