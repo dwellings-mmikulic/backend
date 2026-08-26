@@ -50,7 +50,7 @@ func TestPhotoURLs_FallbackToImgSrc(t *testing.T) {
 }
 
 func TestLotToSqft_Acres(t *testing.T) {
-	if got := lotToSqft(json.Number("0.5"), "acres"); got != 21780 {
+	if got := lotToSqft(number("0.5"), "acres"); got != 21780 {
 		t.Errorf("acres conversion = %d, want 21780", got)
 	}
 }
@@ -64,5 +64,22 @@ func TestSearchResponseDecode(t *testing.T) {
 	}
 	if r.Status != "OK" || len(r.Data) != 1 || r.Data[0].ZPID != "1" {
 		t.Errorf("decoded wrong: %+v", r)
+	}
+}
+
+func TestSearchResponseDecode_EmptyStringNumbers(t *testing.T) {
+	// The provider sometimes sends "" (or null) where a number is expected;
+	// that must not fail the whole ZIP search.
+	const body = `{"status":"OK","data":[{"zpid":"1","price":"","livingArea":null,"lotAreaValue":"","bedrooms":"3","bathrooms":2.5}]}`
+	var r searchResponse
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	l := r.Data[0]
+	if toFloat(l.Price) != 0 || toFloat(l.LivingArea) != 0 || toFloat(l.LotAreaValue) != 0 {
+		t.Errorf("empty/null should read as 0: %+v", l)
+	}
+	if toInt(l.Bedrooms) != 3 || toFloat(l.Bathrooms) != 2.5 {
+		t.Errorf("quoted/plain numbers should decode: beds=%v baths=%v", l.Bedrooms, l.Bathrooms)
 	}
 }

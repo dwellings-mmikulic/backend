@@ -38,21 +38,21 @@ func New(baseURL, apiKey string, timeout time.Duration) *Client {
 // listing is one entry from the search response "data" array. Only the fields
 // we persist are mapped.
 type listing struct {
-	ZPID          string      `json:"zpid"`
-	Price         json.Number `json:"price"`
-	DetailURL     string      `json:"detailUrl"`
-	Address       string      `json:"address"`
-	StreetAddress string      `json:"streetAddress"`
-	City          string      `json:"city"`
-	State         string      `json:"state"`
-	Zipcode       string      `json:"zipcode"`
-	LivingArea    json.Number `json:"livingArea"`
-	LotAreaValue  json.Number `json:"lotAreaValue"`
-	LotAreaUnit   string      `json:"lotAreaUnit"`
-	Bedrooms      json.Number `json:"bedrooms"`
-	Bathrooms     json.Number `json:"bathrooms"`
-	ImgSrc        string      `json:"imgSrc"`
-	Carousel      carousel    `json:"carouselPhotosComposable"`
+	ZPID          string   `json:"zpid"`
+	Price         number   `json:"price"`
+	DetailURL     string   `json:"detailUrl"`
+	Address       string   `json:"address"`
+	StreetAddress string   `json:"streetAddress"`
+	City          string   `json:"city"`
+	State         string   `json:"state"`
+	Zipcode       string   `json:"zipcode"`
+	LivingArea    number   `json:"livingArea"`
+	LotAreaValue  number   `json:"lotAreaValue"`
+	LotAreaUnit   string   `json:"lotAreaUnit"`
+	Bedrooms      number   `json:"bedrooms"`
+	Bathrooms     number   `json:"bathrooms"`
+	ImgSrc        string   `json:"imgSrc"`
+	Carousel      carousel `json:"carouselPhotosComposable"`
 }
 
 // carousel holds the full photo set; URLs are built from baseUrl + photoKey.
@@ -276,7 +276,7 @@ func normalizeDetailURL(u string) string {
 	return u
 }
 
-func lotToSqft(v json.Number, unit string) int {
+func lotToSqft(v number, unit string) int {
 	f := toFloat(v)
 	if strings.EqualFold(strings.TrimSpace(unit), "acres") {
 		f *= 43560 // 1 acre = 43,560 sq ft
@@ -291,18 +291,4 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-func toInt(n json.Number) int     { return int(toFloat(n)) }
-func toInt64(n json.Number) int64 { return int64(toFloat(n)) }
-
-func toFloat(n json.Number) float64 {
-	if n == "" {
-		return 0
-	}
-	f, err := n.Float64()
-	if err != nil {
-		return 0
-	}
-	return f
 }

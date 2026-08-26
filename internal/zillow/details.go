@@ -25,18 +25,18 @@ const detailsPath = "/property-details"
 // detailsRecord maps the fields we persist from the details response "data"
 // object. Unknown/absent fields simply stay zero and map to nil pointers.
 type detailsRecord struct {
-	ZPID          json.Number `json:"zpid"`
-	HomeType      string      `json:"homeType"`
-	HomeStatus    string      `json:"homeStatus"`
-	Description   string      `json:"description"`
-	YearBuilt     json.Number `json:"yearBuilt"`
-	MonthlyHOAFee json.Number `json:"monthlyHoaFee"`
-	Latitude      json.Number `json:"latitude"`
-	Longitude     json.Number `json:"longitude"`
+	ZPID          number `json:"zpid"`
+	HomeType      string `json:"homeType"`
+	HomeStatus    string `json:"homeStatus"`
+	Description   string `json:"description"`
+	YearBuilt     number `json:"yearBuilt"`
+	MonthlyHOAFee number `json:"monthlyHoaFee"`
+	Latitude      number `json:"latitude"`
+	Longitude     number `json:"longitude"`
 	ResoFacts     struct {
-		Heating               []string    `json:"heating"`
-		Cooling               []string    `json:"cooling"`
-		GarageParkingCapacity json.Number `json:"garageParkingCapacity"`
+		Heating               []string `json:"heating"`
+		Cooling               []string `json:"cooling"`
+		GarageParkingCapacity number   `json:"garageParkingCapacity"`
 	} `json:"resoFacts"`
 	AttributionInfo struct {
 		AgentName        string `json:"agentName"`
@@ -124,7 +124,7 @@ func strPtr(s string) *string {
 	return &s
 }
 
-func intPtr(n json.Number) *int {
+func intPtr(n number) *int {
 	f := toFloat(n)
 	if f == 0 {
 		return nil
@@ -133,7 +133,7 @@ func intPtr(n json.Number) *int {
 	return &v
 }
 
-func floatPtr(n json.Number) *float64 {
+func floatPtr(n number) *float64 {
 	f := toFloat(n)
 	if f == 0 {
 		return nil
@@ -141,7 +141,7 @@ func floatPtr(n json.Number) *float64 {
 	return &f
 }
 
-func garagePtr(n json.Number) *string {
+func garagePtr(n number) *string {
 	cap := toFloat(n)
 	if cap <= 0 {
 		return nil
