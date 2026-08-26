@@ -145,6 +145,15 @@ Creating version N (lazily, on the first request that needs it):
 - `INSERT … ON CONFLICT (channel_key, version) DO NOTHING`, then re-read: a
   concurrent instance may have won, and its row is canonical.
 
+Serving a request at `t` means finding the version with the greatest
+`starts_at ≤ t` (`VersionsAt`, which also returns its predecessor) — never the
+chain's tip. The EPG extends the tip up to a day into the future, so the tip
+is routinely not the version on air. A new version is appended only when the
+whole chain ends at or before `t`, so extending the chain can never collide
+with a version number that already exists; a `t` before version 1 is an error,
+and a `t` inside the hole an idle restart leaves behind is served from the
+version that ended most recently.
+
 The service caches versions in memory (per channel, TTL 30 s) so a request
 costs at most one small query for the items in the window.
 
@@ -243,6 +252,8 @@ Constants: `TargetDuration = 10 s`, `WindowSegments = 6`, `HLSVersion = "v1"`.
   store produce identical bytes for the same `now`); window arithmetic across
   a version boundary; media/discontinuity sequence monotonicity as `now`
   advances; scope fallback; lineup creation race (`ON CONFLICT` path); EPG
-  block boundaries; playlist golden files.
+  block boundaries; playlist golden files; a live playlist served by a second
+  Service after an EPG request on the first pushed the chain tip past `now`
+  (regression: the current version is not the chain tip).
 - `internal/feed`: liveFeeds golden.
 - `internal/server`: routes mounted, headers, 400 paths.

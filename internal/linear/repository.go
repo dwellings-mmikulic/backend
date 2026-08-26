@@ -3,6 +3,7 @@ package linear
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -113,6 +114,18 @@ func (r *Repository) LatestVersions(ctx context.Context, key string, n int) ([]V
 	rows, err := r.pool.Query(ctx, `SELECT `+versionColumns+` FROM channel_lineups WHERE channel_key = $1 ORDER BY version DESC LIMIT $2`, key, n)
 	if err != nil {
 		return nil, fmt.Errorf("latest lineups %s: %w", key, err)
+	}
+	return scanVersions(rows)
+}
+
+// VersionsAt implements Store.
+func (r *Repository) VersionsAt(ctx context.Context, key string, t time.Time) ([]Version, error) {
+	const q = `SELECT ` + versionColumns + ` FROM channel_lineups
+ WHERE channel_key = $1 AND starts_at <= $2
+ ORDER BY version DESC LIMIT 2`
+	rows, err := r.pool.Query(ctx, q, key, t)
+	if err != nil {
+		return nil, fmt.Errorf("lineups at %s for %s: %w", t, key, err)
 	}
 	return scanVersions(rows)
 }

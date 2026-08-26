@@ -71,6 +71,12 @@ type Store interface {
 	CityOfZip(ctx context.Context, zip string) (city, state string, err error)
 	// LatestVersions returns up to n versions of key, newest first.
 	LatestVersions(ctx context.Context, key string, n int) ([]Version, error)
+	// VersionsAt returns the newest version of key that started at or before
+	// t and its predecessor, newest first (empty when every version of key
+	// starts after t). It is how "the version covering t" is found: the chain
+	// tip can sit far in the future once the EPG has extended it, so the tip
+	// says nothing about which version is on air at t.
+	VersionsAt(ctx context.Context, key string, t time.Time) ([]Version, error)
 	// ListVersions returns every version of key, oldest first.
 	ListVersions(ctx context.Context, key string) ([]Version, error)
 	// InsertVersion stores v unless (key, version) already exists; ok reports

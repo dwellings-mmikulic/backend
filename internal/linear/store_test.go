@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // memStore is an in-memory Store for tests.
@@ -83,6 +84,22 @@ func (m *memStore) LatestVersions(_ context.Context, key string, n int) ([]Versi
 	sort.Slice(vs, func(i, j int) bool { return vs[i].Version > vs[j].Version })
 	if len(vs) > n {
 		vs = vs[:n]
+	}
+	return vs, nil
+}
+
+func (m *memStore) VersionsAt(_ context.Context, key string, t time.Time) ([]Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var vs []Version
+	for _, v := range m.versions[key] {
+		if !v.StartsAt.After(t) {
+			vs = append(vs, v)
+		}
+	}
+	sort.Slice(vs, func(i, j int) bool { return vs[i].Version > vs[j].Version })
+	if len(vs) > 2 {
+		vs = vs[:2]
 	}
 	return vs, nil
 }

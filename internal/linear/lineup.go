@@ -117,10 +117,32 @@ func (s *Service) newVersion(ctx context.Context, key string, n int, startsAt ti
 // version 1), creating versions as needed. Creation races between instances
 // are settled by the primary key: after every insert the chain is re-read, so
 // the stored row — whoever wrote it — is the one served.
+//
+// "The version covering t" is looked up with VersionsAt, i.e. among the
+// versions that have already started at t, never from the chain's tip: an EPG
+// request extends the chain up to a day into the future (advanceChain), and
+// deriving the current version from the tip would make every request for now
+// on a channel whose chain reaches beyond now fail. A new version is created
+// only when the whole chain ends at or before t, so extending it can never
+// collide with a version number that already exists.
 func (s *Service) versionAt(ctx context.Context, key string, t time.Time) (cur, prev *Version, err error) {
 	now := s.now()
 	for i := 0; i < maxChain; i++ {
-		vs, err := s.store.LatestVersions(ctx, key, 2)
+		vs, err := s.store.VersionsAt(ctx, key, t)
+		if err != nil {
+			return nil, nil, err
+		}
+		serve := func() (*Version, *Version) {
+			if len(vs) > 1 {
+				return &vs[0], &vs[1]
+			}
+			return &vs[0], nil
+		}
+		if len(vs) > 0 && t.Before(vs[0].EndsAt) {
+			cur, prev = serve()
+			return cur, prev, nil
+		}
+		tips, err := s.store.LatestVersions(ctx, key, 1)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -130,18 +152,20 @@ func (s *Service) versionAt(ctx context.Context, key string, t time.Time) (cur, 
 			last     *Version
 		)
 		switch {
-		case len(vs) == 0:
+		case len(tips) == 0:
 			n, startsAt = 1, now.Add(-historyLead).Truncate(time.Minute)
-		case t.Before(vs[0].StartsAt):
-			return nil, nil, fmt.Errorf("time %s precedes channel %s version %d start %s", t, key, vs[0].Version, vs[0].StartsAt)
-		case t.Before(vs[0].EndsAt):
-			cur = &vs[0]
-			if len(vs) > 1 {
-				prev = &vs[1]
-			}
+		case len(vs) == 0:
+			// Every stored version starts after t: t predates the channel.
+			return nil, nil, fmt.Errorf("time %s precedes channel %s version %d start %s", t, key, tips[0].Version, tips[0].StartsAt)
+		case tips[0].EndsAt.After(t):
+			// t falls in dead air the chain jumped over (an idle restart
+			// leaves a hole between the old tip's end and the restart). The
+			// version numbers past t already exist, so nothing can be created
+			// here; serve the version that ended most recently instead.
+			cur, prev = serve()
 			return cur, prev, nil
 		default:
-			last = &vs[0]
+			last = &tips[0]
 			n = last.Version + 1
 			startsAt = last.EndsAt
 			if now.After(last.EndsAt.Add(idleGrace)) {
