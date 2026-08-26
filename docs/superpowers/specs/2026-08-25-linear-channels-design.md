@@ -326,5 +326,12 @@ a minimum of 6, `HLSVersion = "v1"`.
   block boundaries; playlist golden files; a live playlist served by a second
   Service after an EPG request on the first pushed the chain tip past `now`
   (regression: the current version is not the chain tip).
+- `internal/linear` against a real PostgreSQL
+  (`repository_integration_test.go`, skipped unless `TEST_DATABASE_URL` is
+  set): every Store method, the `INTEGER[]`/`BIGINT[]` round-trips, the
+  `video_hls` and `channel_lineups` conflict behaviour, and the window
+  queries — the in-memory store reimplements those rather than running them.
+- `internal/scheduler`: a segmenter failure still leaves the render ready
+  (no `SetVideoFailed`, no `hls/` upload).
 - `internal/feed`: liveFeeds golden.
 - `internal/server`: routes mounted, headers, 400 paths.

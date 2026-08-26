@@ -922,3 +922,52 @@ func TestRunCycle_WithoutHLSDoesNotSegment(t *testing.T) {
 		}
 	}
 }
+
+// failingSegmenter stands in for a clip ffmpeg refuses to remux (e.g. a
+// render with no audio track).
+type failingSegmenter struct{ calls atomic.Int64 }
+
+func (f *failingSegmenter) Segment(context.Context, string, string) (hls.Clip, error) {
+	f.calls.Add(1)
+	return hls.Clip{}, errors.New("segmenter exploded")
+}
+
+// A clip that cannot be segmented is still a perfectly good VOD render: the
+// MP4 is uploaded and the listing goes ready. Only the channels miss it, and
+// cmd/backfill-hls retries later. Marking the video failed here would drop it
+// from the Roku feed over a channels-only problem.
+func TestRunCycle_SegmentFailureLeavesTheRenderReady(t *testing.T) {
+	imgSrv := jpegServer(t)
+	props := []property.Property{{
+		ZPID: "ZP1", Address: "addr",
+		ImageURLs: []string{imgSrv.URL + "/a.jpg"},
+		DetailURL: "https://www.zillow.com/x/",
+	}}
+	up := &fakeUploader{}
+	store := &fakeStore{}
+	rec := &fakeHLSRecorder{}
+	seg := &failingSegmenter{}
+	s := New(baseConfig(), &fakeSearch{props: props}, up, store, &fakeZips{queue: []string{"33950"}}, &fakeRenderer{}, testLogger())
+	s.EnableHLS(seg, rec)
+
+	if err := s.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if seg.calls.Load() != 1 {
+		t.Errorf("segmenter calls = %d, want 1", seg.calls.Load())
+	}
+	if store.ready.Load() != 1 {
+		t.Errorf("SetVideoReady calls = %d, want 1 despite the segmentation failure", store.ready.Load())
+	}
+	if store.failed.Load() != 0 {
+		t.Errorf("SetVideoFailed calls = %d, want 0: the MP4 rendered fine", store.failed.Load())
+	}
+	if len(rec.recorded) != 0 {
+		t.Errorf("recorded %v; nothing should be recorded when segmentation failed", rec.recorded)
+	}
+	for _, p := range up.paths() {
+		if strings.HasPrefix(p, "hls/") {
+			t.Errorf("unexpected hls upload %s after a segmentation failure", p)
+		}
+	}
+}
