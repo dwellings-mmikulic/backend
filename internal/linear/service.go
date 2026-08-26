@@ -3,9 +3,13 @@ package linear
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // Options tune channel assembly. Zero values take the defaults below.
@@ -31,6 +35,15 @@ func (o Options) withDefaults() Options {
 // windowSegments is how many segments a live playlist lists.
 const windowSegments = 6
 
+const (
+	// cacheTTL bounds how long a cached version pair is reused (spec §4).
+	cacheTTL = 30 * time.Second
+	// cacheMaxEntries caps the cache. The endpoints are unauthenticated and
+	// every distinct filter is a key, so the map must not be allowed to grow
+	// with the number of filters anyone cares to invent.
+	cacheMaxEntries = 4096
+)
+
 // Service assembles channels from the store.
 type Service struct {
 	store Store
@@ -38,38 +51,131 @@ type Service struct {
 	now   func() time.Time
 	log   *slog.Logger
 
+	group singleflight.Group
+
 	mu    sync.Mutex
 	cache map[string]cached // channel key → versions last served
 }
 
-type cached struct{ cur, prev *Version }
+type cached struct {
+	cur, prev *Version
+	at        time.Time // when the entry was stored
+}
 
 // New creates a Service.
 func New(store Store, opts Options, log *slog.Logger) *Service {
 	return &Service{store: store, opts: opts.withDefaults(), now: time.Now, log: log, cache: map[string]cached{}}
 }
 
+// cacheGet returns the cached versions of key when the entry is younger than
+// cacheTTL and its cur still covers t.
+func (s *Service) cacheGet(key string, t time.Time) (cur, prev *Version, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.cache[key]
+	if !ok {
+		return nil, nil, false
+	}
+	if s.now().Sub(c.at) >= cacheTTL {
+		delete(s.cache, key)
+		return nil, nil, false
+	}
+	if t.Before(c.cur.StartsAt) || !t.Before(c.cur.EndsAt) {
+		return nil, nil, false
+	}
+	return c.cur, c.prev, true
+}
+
+// cachePut stores the versions of key, evicting first when the cache is full.
+func (s *Service) cachePut(key string, cur, prev *Version) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.cache[key]; !exists && len(s.cache) >= cacheMaxEntries {
+		s.evictLocked()
+	}
+	s.cache[key] = cached{cur: cur, prev: prev, at: s.now()}
+}
+
+// evictLocked makes room: expired entries first, then the oldest.
+func (s *Service) evictLocked() {
+	now := s.now()
+	for k, c := range s.cache {
+		if now.Sub(c.at) >= cacheTTL {
+			delete(s.cache, k)
+		}
+	}
+	for len(s.cache) >= cacheMaxEntries {
+		var (
+			oldestKey string
+			oldest    time.Time
+			found     bool
+		)
+		for k, c := range s.cache {
+			if !found || c.at.Before(oldest) {
+				oldestKey, oldest, found = k, c.at, true
+			}
+		}
+		if !found {
+			return
+		}
+		delete(s.cache, oldestKey)
+	}
+}
+
 // current returns the versions serving key at t. Versions are immutable once
 // stored, so a cached version that still covers t is served without a query.
+// Concurrent misses on one key share a single resolution: a miss can cost a
+// full scope resolution (up to four ListClips over the whole library) plus a
+// version insert, and a version rollover makes every in-flight request for
+// that channel miss at once.
 func (s *Service) current(ctx context.Context, key string, t time.Time) (cur, prev *Version, err error) {
-	s.mu.Lock()
-	c, ok := s.cache[key]
-	s.mu.Unlock()
-	if ok && !t.Before(c.cur.StartsAt) && t.Before(c.cur.EndsAt) {
-		return c.cur, c.prev, nil
+	if cur, prev, ok := s.cacheGet(key, t); ok {
+		return cur, prev, nil
 	}
-	cur, prev, err = s.versionAt(ctx, key, t)
+	type pair struct{ cur, prev *Version }
+	v, err, _ := s.group.Do(key, func() (any, error) {
+		if cur, prev, ok := s.cacheGet(key, t); ok {
+			return pair{cur, prev}, nil
+		}
+		cur, prev, err := s.versionAt(ctx, key, t)
+		if err != nil {
+			return nil, err
+		}
+		s.cachePut(key, cur, prev)
+		return pair{cur, prev}, nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	s.mu.Lock()
-	s.cache[key] = cached{cur: cur, prev: prev}
-	s.mu.Unlock()
-	return cur, prev, nil
+	p := v.(pair)
+	return p.cur, p.prev, nil
+}
+
+// ErrUnknownArea reports a filter that names a place the library has never
+// heard of, as opposed to a real place with no content yet.
+var ErrUnknownArea = errors.New("unknown area")
+
+// checkArea rejects a scope naming a place that does not exist, before any
+// lineup version or cache entry is created for it.
+func (s *Service) checkArea(ctx context.Context, sc Scope) error {
+	if !sc.knownState() {
+		return fmt.Errorf("%w: %s", ErrUnknownArea, sc.Key())
+	}
+	ok, err := s.store.AreaExists(ctx, sc)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownArea, sc.Key())
+	}
+	return nil
 }
 
 // Playlist renders the live media playlist of sc at now.
 func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte, error) {
+	if err := s.checkArea(ctx, sc); err != nil {
+		return nil, err
+	}
 	key := sc.Key()
 	cur, prev, err := s.current(ctx, key, now)
 	if err != nil {

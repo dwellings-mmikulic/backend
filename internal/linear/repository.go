@@ -95,6 +95,28 @@ SELECT lower(city), lower(state)
 	return city, state, nil
 }
 
+// AreaExists implements Store.
+func (r *Repository) AreaExists(ctx context.Context, s Scope) (bool, error) {
+	var (
+		q    string
+		args []any
+	)
+	switch {
+	case s.Zip != "":
+		q, args = `SELECT EXISTS(SELECT 1 FROM zip_codes WHERE zip = $1)`, []any{s.Zip}
+	case s.City != "":
+		q, args = `SELECT EXISTS(SELECT 1 FROM properties WHERE lower(city) = $1 AND lower(state) = $2)`, []any{s.City, s.State}
+	default:
+		// National, or a state that already passed the state-code check.
+		return true, nil
+	}
+	var ok bool
+	if err := r.pool.QueryRow(ctx, q, args...).Scan(&ok); err != nil {
+		return false, fmt.Errorf("area exists %s: %w", s.Key(), err)
+	}
+	return ok, nil
+}
+
 const versionColumns = `channel_key, version, scope, starts_at, ends_at, start_seq, start_item, item_ids, item_ms, item_segs`
 
 func scanVersions(rows pgx.Rows) ([]Version, error) {

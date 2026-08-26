@@ -14,6 +14,8 @@ type memStore struct {
 	clips    map[int64]memClip
 	versions map[string][]Version
 	zipCity  map[string][2]string
+	zips     map[string]bool // ZIPs that exist, with or without listings
+	cities   map[string]bool // "city|state" pairs that exist
 }
 
 type memClip struct {
@@ -23,7 +25,17 @@ type memClip struct {
 }
 
 func newMemStore() *memStore {
-	return &memStore{clips: map[int64]memClip{}, versions: map[string][]Version{}, zipCity: map[string][2]string{}}
+	return &memStore{
+		clips: map[int64]memClip{}, versions: map[string][]Version{},
+		zipCity: map[string][2]string{}, zips: map[string]bool{}, cities: map[string]bool{},
+	}
+}
+
+// addZip registers a ZIP that exists but has no listings of its own.
+func (m *memStore) addZip(zip string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.zips[zip] = true
 }
 
 // addClip registers clip id in scope sc (Zip, City and State should all be
@@ -37,7 +49,26 @@ func (m *memStore) addClip(id int64, sc Scope, price int64, segMS ...int) {
 	}
 	if sc.Zip != "" {
 		m.zipCity[sc.Zip] = [2]string{sc.City, sc.State}
+		m.zips[sc.Zip] = true
 	}
+	if sc.City != "" {
+		m.cities[sc.City+"|"+sc.State] = true
+	}
+}
+
+// AreaExists mirrors the repository: a ZIP exists when it is in zip_codes, a
+// city+state when some property is in it; national and (already validated)
+// state scopes always exist.
+func (m *memStore) AreaExists(_ context.Context, sc Scope) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch {
+	case sc.Zip != "":
+		return m.zips[sc.Zip], nil
+	case sc.City != "":
+		return m.cities[sc.City+"|"+sc.State], nil
+	}
+	return true, nil
 }
 
 func matches(want, have Scope) bool {

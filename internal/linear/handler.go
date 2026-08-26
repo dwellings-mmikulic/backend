@@ -79,6 +79,8 @@ func (h *Handler) fail(w http.ResponseWriter, sc Scope, err error) {
 		writeError(w, http.StatusServiceUnavailable, "no content")
 	case errors.Is(err, ErrBadScope):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrUnknownArea):
+		writeError(w, http.StatusNotFound, "unknown area")
 	default:
 		h.log.Error("channel request failed", "channel", sc.Key(), "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

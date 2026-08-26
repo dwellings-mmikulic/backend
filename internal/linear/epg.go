@@ -49,6 +49,9 @@ type Program struct {
 // existed, instead of the request materialising the entire history-to-date
 // or every version needed to reach the horizon synchronously.
 func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error) {
+	if err := s.checkArea(ctx, sc); err != nil {
+		return EPG{}, err
+	}
 	key := sc.Key()
 	horizon := now.Add(time.Duration(s.opts.EPGHorizonHours) * time.Hour)
 	// First make sure the chain reaches now at all — the same guarantee

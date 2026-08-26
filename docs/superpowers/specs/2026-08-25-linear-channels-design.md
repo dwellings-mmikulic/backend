@@ -114,7 +114,20 @@ under a live lineup would desynchronise the whole channel.
 
 Channel key from query params (`zip`, or `city`+`state`, or `state`, or none):
 normalised lowercase, e.g. `zip:77494`, `city:katy|tx`, `state:tx`, `us`.
-Invalid combinations (city without state, zip plus state) → 400.
+Invalid combinations (city without state, zip plus state) → 400, as is any raw
+parameter longer than 64 characters.
+
+The endpoints are unauthenticated, and every distinct key is a cache entry and
+potentially a stored lineup chain, so a filter is validated against real
+geography **before** anything is created for it:
+
+- `state` must be a real two-letter US state code (the `stateNames` table);
+- `zip` must exist in `zip_codes`;
+- `city`+`state` must be a pair some property is in.
+
+An area that fails → 404 `{"error":"unknown area"}` and no version row. A real
+but empty area (a ZIP with no listings yet) is not an unknown area: it falls
+back up the hierarchy like any thin scope.
 
 When a lineup version is created the key's scope is resolved against the
 eligible clip count with fallback up the hierarchy until a scope has at least
@@ -161,8 +174,14 @@ with a version number that already exists; a `t` before version 1 is an error,
 and a `t` inside the hole an idle restart leaves behind is served from the
 version that ended most recently.
 
-The service caches versions in memory (per channel, TTL 30 s) so a request
-costs at most one small query for the items in the window.
+The service caches versions in memory (per channel) so a request costs at most
+one small query for the items in the window. A cached entry is served only
+while it is younger than 30 s **and** its `cur` still covers the requested
+time; the map is capped at 4096 entries, evicting expired entries first and
+then the oldest, so unauthenticated traffic cannot grow it without bound.
+Concurrent misses on one key are collapsed with `singleflight`: a miss costs a
+full scope resolution plus an insert, and a version rollover makes every
+in-flight request for that channel miss at once.
 
 ### 5. Live playlist
 

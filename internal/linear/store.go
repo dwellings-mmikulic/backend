@@ -69,6 +69,11 @@ type Store interface {
 	// CityOfZip returns the lowercase city and state most listings in zip
 	// belong to; both empty when the ZIP is unknown.
 	CityOfZip(ctx context.Context, zip string) (city, state string, err error)
+	// AreaExists reports whether s names a real place: a ZIP in zip_codes, a
+	// city+state some property is in. The national scope always exists, and
+	// so does a state that passed the state-code check — both are bounded
+	// sets, unlike the ZIP and city spaces a caller can invent.
+	AreaExists(ctx context.Context, s Scope) (bool, error)
 	// LatestVersions returns up to n versions of key, newest first.
 	LatestVersions(ctx context.Context, key string, n int) ([]Version, error)
 	// VersionsAt returns the newest version of key that started at or before

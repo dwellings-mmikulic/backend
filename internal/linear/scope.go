@@ -22,9 +22,20 @@ type Scope struct {
 // ErrBadScope reports an invalid channel filter.
 var ErrBadScope = errors.New("invalid channel filter")
 
+// maxParamLen caps a raw filter parameter. The endpoints are
+// unauthenticated and every distinct value becomes a channel key (a cache
+// entry, and potentially a stored lineup chain), so absurd values are
+// rejected before they are normalised.
+const maxParamLen = 64
+
 // ParseScope reads zip, city+state or state from query parameters. It is
 // strict about combinations so that every distinct URL maps to one key.
 func ParseScope(q url.Values) (Scope, error) {
+	for _, p := range []string{"zip", "city", "state"} {
+		if len(q.Get(p)) > maxParamLen {
+			return Scope{}, fmt.Errorf("%w: %s is longer than %d characters", ErrBadScope, p, maxParamLen)
+		}
+	}
 	s := Scope{
 		Zip:   strings.TrimSpace(q.Get("zip")),
 		City:  strings.ToLower(strings.Join(strings.Fields(q.Get("city")), " ")),
@@ -86,6 +97,16 @@ func ParseKey(k string) (Scope, error) {
 		return Scope{City: city, State: state}, nil
 	}
 	return Scope{}, fmt.Errorf("%w: %q", ErrBadScope, k)
+}
+
+// knownState reports whether the scope's state is a real US state code. A
+// national or ZIP-only scope has no state and is trivially fine.
+func (s Scope) knownState() bool {
+	if s.State == "" {
+		return true
+	}
+	_, ok := stateNames[s.State]
+	return ok
 }
 
 // Name is the viewer-facing channel title.

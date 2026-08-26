@@ -112,3 +112,43 @@ func TestHandler_InconsistentLineupIs500(t *testing.T) {
 		t.Errorf("body = %s", rec.Body.String())
 	}
 }
+
+// The channel endpoints are unauthenticated: a filter naming a place that
+// does not exist must 404 before anything is created for it, so a crawler
+// cannot mint an unbounded number of lineup chains and cache entries.
+func TestHandler_UnknownAreaIs404AndCreatesNothing(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	paths := []string{
+		"/channels/live.m3u8?zip=00000",
+		"/channels/epg.json?zip=00000",
+		"/channels/live.m3u8?city=Nowhere&state=tx",
+		"/channels/live.m3u8?state=zz",
+	}
+	for _, p := range paths {
+		rec := serve(t, m, t0, p)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404: %s", p, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"unknown area"`) {
+			t.Errorf("GET %s body = %s", p, rec.Body.String())
+		}
+	}
+	for _, key := range []string{"zip:00000", "city:nowhere|tx", "state:zz"} {
+		if vs, _ := m.ListVersions(context.Background(), key); len(vs) != 0 {
+			t.Errorf("channel %s got %d lineup versions; nothing should be created for an unknown area", key, len(vs))
+		}
+	}
+}
+
+// A real but empty ZIP is not an unknown area: it falls back up the
+// hierarchy like any thin scope.
+func TestHandler_RealButEmptyZipFallsBack(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	m.addZip("77493") // exists in zip_codes, no listings of its own
+	rec := serve(t, m, t0, "/channels/live.m3u8?zip=77493")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}

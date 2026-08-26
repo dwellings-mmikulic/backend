@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -148,5 +150,80 @@ func TestPlaylist_CountersMonotonicAcrossChainAdvance(t *testing.T) {
 			t.Errorf("at %s counters went backwards: seq %d→%d disc %d→%d", now, lastSeq, seq, lastDisc, disc)
 		}
 		lastSeq, lastDisc = seq, disc
+	}
+}
+
+// The version cache must not grow without bound (one entry per distinct
+// filter an unauthenticated caller can invent) and must not serve entries
+// older than cacheTTL.
+func TestServiceCache_ExpiresEntries(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	s := testService(m, t0)
+	if _, _, err := s.current(context.Background(), "zip:77494", t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := s.cacheGet("zip:77494", t0); !ok {
+		t.Fatal("entry should be cached right after a lookup")
+	}
+	s.now = func() time.Time { return t0.Add(cacheTTL + time.Second) }
+	if _, _, ok := s.cacheGet("zip:77494", t0); ok {
+		t.Error("entry older than cacheTTL must not be served")
+	}
+	if len(s.cache) != 0 {
+		t.Errorf("expired entry left in the cache: %d entries", len(s.cache))
+	}
+}
+
+func TestServiceCache_IsSizeCapped(t *testing.T) {
+	s := testService(newMemStore(), t0)
+	for i := 0; i < cacheMaxEntries+500; i++ {
+		v := &Version{Key: strconv.Itoa(i), Version: 1, StartsAt: t0, EndsAt: t0.Add(time.Hour)}
+		s.now = func() time.Time { return t0.Add(time.Duration(i) * time.Millisecond) }
+		s.cachePut(v.Key, v, nil)
+	}
+	if len(s.cache) > cacheMaxEntries {
+		t.Errorf("cache holds %d entries, want at most %d", len(s.cache), cacheMaxEntries)
+	}
+	// The oldest entries are the ones dropped.
+	if _, _, ok := s.cacheGet("0", t0); ok {
+		t.Error("the oldest entry should have been evicted first")
+	}
+}
+
+// countingStore counts the expensive lookups a cache miss triggers.
+type countingStore struct {
+	*memStore
+	listClips atomic.Int64
+}
+
+func (c *countingStore) ListClips(ctx context.Context, s Scope) ([]ClipRef, error) {
+	c.listClips.Add(1)
+	return c.memStore.ListClips(ctx, s)
+}
+
+// A cold cache (startup, or the instant a version rolls over) makes every
+// in-flight request for a channel miss at once. Each miss would otherwise
+// re-run scope resolution over the whole library and race an insert, so the
+// misses must share one resolution.
+func TestPlaylist_ConcurrentColdMissesResolveOnce(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 200) // one version already covers t0
+	cs := &countingStore{memStore: m}
+	s := testService(cs, t0)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.Playlist(context.Background(), Scope{Zip: "77494"}, t0); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := cs.listClips.Load(); got != 1 {
+		t.Errorf("ListClips called %d times for 16 concurrent cold misses, want 1", got)
 	}
 }
