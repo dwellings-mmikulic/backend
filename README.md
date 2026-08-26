@@ -134,8 +134,20 @@ existing library (and retry failures):
 
 ```bash
 go run ./cmd/backfill-hls -dry-run
-go run ./cmd/backfill-hls -concurrency 4
+go run ./cmd/backfill-hls -concurrency 4 -upload-concurrency 8
 ```
+
+In production it ships inside the same image as the server (it needs the same
+`DATABASE_URL` and `BUNNY_*` environment, and the same ffmpeg), so run it
+through compose rather than installing Go on the box:
+
+```bash
+docker compose -f compose.prod.yml run --rm --entrypoint /app/backfill-hls app -dry-run
+docker compose -f compose.prod.yml run --rm --entrypoint /app/backfill-hls app -concurrency 4
+```
+
+It logs progress every 100 videos and exits non-zero if any video failed, so
+a wrapped run does not look successful while part of the library is unairable.
 
 With `PUBLIC_BASE_URL` set, `/roku/feed.json` also lists the national channel
 as a Roku `liveFeeds` entry. Its poster is `LINEAR_LIVE_THUMBNAIL_URL`; when

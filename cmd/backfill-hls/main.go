@@ -19,9 +19,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,7 +46,10 @@ func main() {
 	uploadConcurrency := flag.Int("upload-concurrency", 8, "segment uploads in parallel within one video")
 	flag.Parse()
 
-	if err := run(context.Background(), *dryRun, *limit, *concurrency, *uploadConcurrency); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, *dryRun, *limit, *concurrency, *uploadConcurrency); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -79,7 +84,8 @@ func run(ctx context.Context, dryRun bool, limit, concurrency, uploadConcurrency
 		return nil
 	}
 
-	var done, failed atomic.Int64
+	var done, failed, processed atomic.Int64
+	total := len(todo)
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(concurrency, 1))
 	for _, p := range todo {
@@ -87,25 +93,42 @@ func run(ctx context.Context, dryRun bool, limit, concurrency, uploadConcurrency
 			if err := segmentOne(gctx, httpc, seg, up, repo, p, uploadConcurrency); err != nil {
 				log.Printf("zpid=%s failed: %v", p.zpid, err)
 				failed.Add(1)
-				return nil // keep going; the next run retries it
+			} else {
+				done.Add(1)
 			}
-			done.Add(1)
-			return nil
+			if n := processed.Add(1); n%progressEvery == 0 {
+				log.Printf("progress: %d/%d (%d segmented, %d failed)", n, total, done.Load(), failed.Load())
+			}
+			return nil // keep going; the next run retries the failures
 		})
 	}
 	_ = g.Wait()
 	log.Printf("done: %d segmented, %d failed", done.Load(), failed.Load())
-	return nil
+	if n := failed.Load(); n > 0 {
+		// A non-zero exit so a cron or compose run does not look successful
+		// while part of the library is still unairable.
+		return fmt.Errorf("%d of %d videos failed to segment", n, total)
+	}
+	return ctx.Err()
 }
+
+// progressEvery is how often the run reports how far it has got.
+const progressEvery = 100
 
 // listPending returns ready videos whose current render has no video_hls
 // row, oldest first so the backlog drains deterministically.
 func listPending(ctx context.Context, pool *pgxpool.Pool, limit int) ([]pending, error) {
+	// A property without a content hash has no identity to segment under:
+	// COALESCE'ing it to '' would join every such row to the same bogus key
+	// and upload segments to hls/v1/<zpid>//.
 	q := `
-SELECT p.zpid, p.video_url, COALESCE(p.video_content_hash, '')
+SELECT p.zpid, p.video_url, p.video_content_hash
   FROM properties p
-  LEFT JOIN video_hls h ON h.zpid = p.zpid AND h.content_hash = COALESCE(p.video_content_hash, '')
- WHERE p.video_status = 'ready' AND p.video_url IS NOT NULL AND p.video_url <> '' AND h.id IS NULL
+  LEFT JOIN video_hls h ON h.zpid = p.zpid AND h.content_hash = p.video_content_hash
+ WHERE p.video_status = 'ready'
+   AND p.video_url IS NOT NULL AND p.video_url <> ''
+   AND p.video_content_hash IS NOT NULL AND p.video_content_hash <> ''
+   AND h.id IS NULL
  ORDER BY p.created_at ASC`
 	if limit > 0 {
 		q += " LIMIT " + strconv.Itoa(limit)

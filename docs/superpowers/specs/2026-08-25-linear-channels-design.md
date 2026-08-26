@@ -272,7 +272,11 @@ cached for 60 s), so the feed never advertises a stream that answers 503.
 - `cmd/backfill-hls`: lists ready videos with no `video_hls` row for their
   current hash (oldest first), downloads `video_url`, segments, uploads
   (`-concurrency`, default 4; `-upload-concurrency`, default 8; `-limit`;
-  `-dry-run`). Costs no Zillow quota.
+  `-dry-run`). Costs no Zillow quota. It only considers properties that
+  actually have a `video_content_hash`, reports progress every 100 videos,
+  stops on SIGINT/SIGTERM and exits non-zero if any video failed. It ships in
+  the server image and is run with
+  `docker compose -f compose.prod.yml run --rm --entrypoint /app/backfill-hls app …`.
 
 ### 9. Configuration
 
