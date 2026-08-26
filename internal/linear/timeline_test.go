@@ -64,3 +64,19 @@ func TestExpandItems_SeqAdvancesByItemSegs(t *testing.T) {
 		t.Errorf("seqs = [%d %d], want [%d %d]", segs[0].Seq, segs[1].Seq, wantSeq, wantSeq+1)
 	}
 }
+
+// An itemless version cannot be produced by newVersion (a lineup always has
+// at least one clip), but a hand-written row must not index out of range.
+func TestWindow_ItemlessVersionIsEmptyNotAPanic(t *testing.T) {
+	v := &Version{Key: "us", Version: 1, StartsAt: t0, EndsAt: t0}
+	if ids := windowClipIDs(v, nil, t0, liveWindow); len(ids) != 0 {
+		t.Errorf("windowClipIDs = %v, want none", ids)
+	}
+	segs, err := window(v, nil, map[int64]ClipSegments{}, t0, liveWindow)
+	if err != nil {
+		t.Fatalf("window: %v", err)
+	}
+	if len(segs) != 0 {
+		t.Errorf("window = %+v, want none", segs)
+	}
+}

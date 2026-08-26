@@ -79,6 +79,12 @@ func (w windowSpec) trim(segs []segment) []segment {
 // enough: an item is only guaranteed to hold one segment, and with 3 s
 // segments a 40 s window can reach across many short items.
 func backFrom(v *Version, to int, w windowSpec) int {
+	if to <= 0 {
+		return 0
+	}
+	if to > len(v.ItemMS) {
+		to = len(v.ItemMS)
+	}
 	i := to
 	ms, segs := 0, 0
 	for i > 0 && (segs < w.MinSegments || ms < w.MinMS) {
@@ -96,6 +102,9 @@ func itemRange(v *Version, now time.Time, w windowSpec) (from, to int) {
 	to = itemAt(v, now)
 	if to < 0 {
 		to = len(v.ItemIDs) - 1
+	}
+	if to < 0 {
+		return 0, -1 // an itemless version (only possible if written by hand)
 	}
 	return backFrom(v, to, w), to
 }
@@ -194,6 +203,11 @@ func ended(segs []segment, now time.Time) []segment {
 		}
 	}
 	return out
+}
+
+// covers reports whether v is the version airing at t.
+func covers(v *Version, t time.Time) bool {
+	return v != nil && !t.Before(v.StartsAt) && t.Before(v.EndsAt)
 }
 
 // window returns the newest segments that have ended by now and satisfy w,

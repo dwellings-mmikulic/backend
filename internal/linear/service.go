@@ -84,7 +84,7 @@ func (s *Service) cacheGet(key string, t time.Time) (cur, prev *Version, ok bool
 		delete(s.cache, key)
 		return nil, nil, false
 	}
-	if t.Before(c.cur.StartsAt) || !t.Before(c.cur.EndsAt) {
+	if !covers(c.cur, t) {
 		return nil, nil, false
 	}
 	return c.cur, c.prev, true
@@ -152,7 +152,19 @@ func (s *Service) current(ctx context.Context, key string, t time.Time, src *lin
 		return nil, nil, err
 	}
 	p := v.(pair)
-	return p.cur, p.prev, nil
+	if covers(p.cur, t) {
+		return p.cur, p.prev, nil
+	}
+	// Two requests a few milliseconds apart can straddle a version boundary
+	// and share one leader, whose answer then does not cover this t. The
+	// version this one needs was stored by that leader, so this is a read,
+	// not a second resolution.
+	cur, prev, err = s.versionAt(ctx, key, t, src)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.cachePut(key, cur, prev)
+	return cur, prev, nil
 }
 
 // ErrUnknownArea reports a filter that names a place the library has never
