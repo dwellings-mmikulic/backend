@@ -120,7 +120,7 @@ func TestEPG_WindowStartsNearNowNotChannelGenesis(t *testing.T) {
 
 	genesis := t0.Add(-30 * 24 * time.Hour)
 	old := testService(m, genesis)
-	v1, err := old.newVersion(context.Background(), "zip:77494", 1, genesis, nil)
+	v1, err := old.newVersion(context.Background(), "zip:77494", 1, genesis, nil, old.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,5 +151,29 @@ func TestEPG_DescriptionFormat(t *testing.T) {
 	}
 	if got := describe(2, 0, 0); got != "2 listings" {
 		t.Errorf("describe = %q", got)
+	}
+}
+
+// Building a version resolves the channel's scope — up to one ListClips scan
+// of the library per fallback level, plus a CityOfZip. A cold EPG on a thin
+// scope materialises a dozen versions in one call, so the resolution must
+// happen once per request, not once per version.
+func TestEPG_ResolvesTheScopeOncePerRequest(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 2)     // zip 77494 / Katy: 2 clips, under MinScopeClips
+	addClips(m, austin, 100, 5) // Texas therefore has 7
+	cs := &countingStore{memStore: m}
+	s := testService(cs, t0)
+
+	if _, err := s.EPG(context.Background(), Scope{Zip: "77494"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	built, _ := m.ListVersions(context.Background(), "zip:77494")
+	if len(built) < 3 {
+		t.Fatalf("test precondition: expected a cold EPG to build several versions, got %d", len(built))
+	}
+	// zip → city → state is three levels; one ListClips each, once.
+	if got := cs.listClips.Load(); got > 3 {
+		t.Errorf("ListClips called %d times while building %d versions, want at most 3 (one per fallback level)", got, len(built))
 	}
 }

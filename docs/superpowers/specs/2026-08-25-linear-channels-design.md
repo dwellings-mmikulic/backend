@@ -138,8 +138,10 @@ zip → city|state (looked up from the properties in that ZIP) → state → us
 ```
 
 The effective scope is recorded on the version and reported in the EPG. It is
-re-evaluated at every new version, so a ZIP that gains content gets its own
-lineup next time.
+re-evaluated once per request that has to build versions — not once per
+version, since one cold EPG request can materialise a dozen of them and each
+resolution costs a `ListClips` scan per fallback level — so a ZIP that gains
+content gets its own lineup from the next version onwards.
 
 ### 4. Lineup chain
 

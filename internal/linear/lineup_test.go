@@ -106,7 +106,7 @@ func TestVersionAt_FirstVersionStartsAnHourBack(t *testing.T) {
 	addClips(m, katy, 1, 200) // 200 min of content > 1 h, so v1 covers now
 	s := testService(m, t0.Add(37*time.Second))
 
-	cur, prev, err := s.versionAt(context.Background(), "zip:77494", t0.Add(37*time.Second))
+	cur, prev, err := s.versionAt(context.Background(), "zip:77494", t0.Add(37*time.Second), s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestVersionAt_ChainsVersionsUntilCovered(t *testing.T) {
 	addClips(m, katy, 1, 3) // 3 min per version; an hour of history needs ~20 versions
 	s := testService(m, t0)
 
-	cur, prev, err := s.versionAt(context.Background(), "zip:77494", t0)
+	cur, prev, err := s.versionAt(context.Background(), "zip:77494", t0, s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestVersionAt_ChainsVersionsUntilCovered(t *testing.T) {
 	}
 	// Calling again is a no-op: same version served, nothing new stored.
 	all, _ := m.ListVersions(context.Background(), "zip:77494")
-	again, _, _ := s.versionAt(context.Background(), "zip:77494", t0)
+	again, _, _ := s.versionAt(context.Background(), "zip:77494", t0, s.newSource("zip:77494"))
 	all2, _ := m.ListVersions(context.Background(), "zip:77494")
 	if again.Version != cur.Version || len(all) != len(all2) {
 		t.Errorf("second call changed state: v%d→v%d, %d→%d versions", cur.Version, again.Version, len(all), len(all2))
@@ -167,14 +167,14 @@ func TestVersionAt_IdleChannelRestartsNearNow(t *testing.T) {
 	m := newMemStore()
 	addClips(m, katy, 1, 3)
 	s := testService(m, t0)
-	first, _, err := s.versionAt(context.Background(), "zip:77494", t0)
+	first, _, err := s.versionAt(context.Background(), "zip:77494", t0, s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	later := t0.Add(72 * time.Hour)
 	s.now = func() time.Time { return later }
-	cur, prev, err := s.versionAt(context.Background(), "zip:77494", later)
+	cur, prev, err := s.versionAt(context.Background(), "zip:77494", later, s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestVersionAt_ServesTheRowThatWonTheRace(t *testing.T) {
 	addClips(m, katy, 1, 200)
 	rs := &racingStore{memStore: m}
 	s := testService(rs, t0)
-	cur, _, err := s.versionAt(context.Background(), "zip:77494", t0)
+	cur, _, err := s.versionAt(context.Background(), "zip:77494", t0, s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestVersionAt_ServesTheRowThatWonTheRace(t *testing.T) {
 
 func TestVersionAt_NoContent(t *testing.T) {
 	s := testService(newMemStore(), t0)
-	if _, _, err := s.versionAt(context.Background(), "us", t0); !errors.Is(err, ErrNoContent) {
+	if _, _, err := s.versionAt(context.Background(), "us", t0, s.newSource("us")); !errors.Is(err, ErrNoContent) {
 		t.Errorf("err = %v, want ErrNoContent", err)
 	}
 }

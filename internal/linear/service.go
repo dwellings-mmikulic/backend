@@ -132,7 +132,7 @@ func (s *Service) evictLocked() {
 // full scope resolution (up to four ListClips over the whole library) plus a
 // version insert, and a version rollover makes every in-flight request for
 // that channel miss at once.
-func (s *Service) current(ctx context.Context, key string, t time.Time) (cur, prev *Version, err error) {
+func (s *Service) current(ctx context.Context, key string, t time.Time, src *lineupSource) (cur, prev *Version, err error) {
 	if cur, prev, ok := s.cacheGet(key, t); ok {
 		return cur, prev, nil
 	}
@@ -141,7 +141,7 @@ func (s *Service) current(ctx context.Context, key string, t time.Time) (cur, pr
 		if cur, prev, ok := s.cacheGet(key, t); ok {
 			return pair{cur, prev}, nil
 		}
-		cur, prev, err := s.versionAt(ctx, key, t)
+		cur, prev, err := s.versionAt(ctx, key, t, src)
 		if err != nil {
 			return nil, err
 		}
@@ -181,7 +181,7 @@ func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte
 		return nil, err
 	}
 	key := sc.Key()
-	cur, prev, err := s.current(ctx, key, now)
+	cur, prev, err := s.current(ctx, key, now, s.newSource(key))
 	if err != nil {
 		return nil, err
 	}

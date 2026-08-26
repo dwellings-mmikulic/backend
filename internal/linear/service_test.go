@@ -99,14 +99,14 @@ func TestPlaylist_FollowsTheChainPastTheCachedVersion(t *testing.T) {
 	if _, err := s.EPG(context.Background(), Scope{Zip: "77494"}, t0); err != nil {
 		t.Fatal(err)
 	}
-	cur, _, err := s.current(context.Background(), "zip:77494", t0)
+	cur, _, err := s.current(context.Background(), "zip:77494", t0, s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	later := cur.EndsAt.Add(time.Minute)
 	s.now = func() time.Time { return later }
-	next, _, err := s.current(context.Background(), "zip:77494", later)
+	next, _, err := s.current(context.Background(), "zip:77494", later, s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatalf("after the cached version ended: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestPlaylist_CountersMonotonicAcrossChainAdvance(t *testing.T) {
 	if _, err := s.EPG(context.Background(), Scope{Zip: "77494"}, t0); err != nil {
 		t.Fatal(err)
 	}
-	cur, _, err := s.current(context.Background(), "zip:77494", t0)
+	cur, _, err := s.current(context.Background(), "zip:77494", t0, s.newSource("zip:77494"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestServiceCache_ExpiresEntries(t *testing.T) {
 	m := newMemStore()
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
-	if _, _, err := s.current(context.Background(), "zip:77494", t0); err != nil {
+	if _, _, err := s.current(context.Background(), "zip:77494", t0, s.newSource("zip:77494")); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, ok := s.cacheGet("zip:77494", t0); !ok {

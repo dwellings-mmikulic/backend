@@ -92,19 +92,50 @@ func (s *Service) resolveScope(ctx context.Context, sc Scope) (Scope, []ClipRef,
 	}
 }
 
+// lineupSource is a channel's effective scope and eligible clips, resolved at
+// most once and then reused by every version built from it. Resolving costs
+// one ListClips scan of the library per fallback level plus a CityOfZip, and
+// a single cold EPG request can materialise dozens of versions, so the
+// resolution is shared across all of them rather than repeated per version.
+// One source is created per request; it is not safe for concurrent use, and
+// does not need to be (concurrent misses on a key share one leader through
+// singleflight).
+type lineupSource struct {
+	svc      *Service
+	key      string
+	scope    Scope
+	clips    []ClipRef
+	resolved bool
+}
+
+// newSource creates an unresolved lineupSource for key. Nothing is queried
+// until a version actually has to be built.
+func (s *Service) newSource(key string) *lineupSource { return &lineupSource{svc: s, key: key} }
+
+func (src *lineupSource) resolve(ctx context.Context) error {
+	if src.resolved {
+		return nil
+	}
+	sc, err := ParseKey(src.key)
+	if err != nil {
+		return err
+	}
+	eff, clips, err := src.svc.resolveScope(ctx, sc)
+	if err != nil {
+		return err
+	}
+	src.scope, src.clips, src.resolved = eff, clips, true
+	return nil
+}
+
 // newVersion materialises version n of key starting at startsAt, continuing
-// the counters of prev (nil for version 1).
-func (s *Service) newVersion(ctx context.Context, key string, n int, startsAt time.Time, prev *Version) (*Version, error) {
-	sc, err := ParseKey(key)
-	if err != nil {
+// the counters of prev (nil for version 1), from src's resolved scope.
+func (s *Service) newVersion(ctx context.Context, key string, n int, startsAt time.Time, prev *Version, src *lineupSource) (*Version, error) {
+	if err := src.resolve(ctx); err != nil {
 		return nil, err
 	}
-	eff, clips, err := s.resolveScope(ctx, sc)
-	if err != nil {
-		return nil, err
-	}
-	ids, ms, segs := buildItems(clips, seedFor(key, n), s.opts.LineupHours*3600*1000)
-	v := &Version{Key: key, Version: n, Scope: eff.Key(), StartsAt: startsAt, ItemIDs: ids, ItemMS: ms, ItemSegs: segs}
+	ids, ms, segs := buildItems(src.clips, seedFor(key, n), s.opts.LineupHours*3600*1000)
+	v := &Version{Key: key, Version: n, Scope: src.scope.Key(), StartsAt: startsAt, ItemIDs: ids, ItemMS: ms, ItemSegs: segs}
 	v.EndsAt = startsAt.Add(time.Duration(v.TotalMS()) * time.Millisecond)
 	if prev != nil {
 		v.StartSeq = prev.StartSeq + prev.Segments()
@@ -125,7 +156,7 @@ func (s *Service) newVersion(ctx context.Context, key string, n int, startsAt ti
 // on a channel whose chain reaches beyond now fail. A new version is created
 // only when the whole chain ends at or before t, so extending it can never
 // collide with a version number that already exists.
-func (s *Service) versionAt(ctx context.Context, key string, t time.Time) (cur, prev *Version, err error) {
+func (s *Service) versionAt(ctx context.Context, key string, t time.Time, src *lineupSource) (cur, prev *Version, err error) {
 	now := s.now()
 	for i := 0; i < maxChain; i++ {
 		vs, err := s.store.VersionsAt(ctx, key, t)
@@ -175,7 +206,7 @@ func (s *Service) versionAt(ctx context.Context, key string, t time.Time) (cur, 
 				}
 			}
 		}
-		v, err := s.newVersion(ctx, key, n, startsAt, last)
+		v, err := s.newVersion(ctx, key, n, startsAt, last, src)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -201,7 +232,7 @@ func (s *Service) versionAt(ctx context.Context, key string, t time.Time) (cur, 
 // horizon grows across successive polls instead of the request failing or
 // blocking on dozens of synchronous lineup builds. Returns nil only if the
 // channel has no content and none could be created.
-func (s *Service) advanceChain(ctx context.Context, key string, horizon time.Time, budget int) (*Version, error) {
+func (s *Service) advanceChain(ctx context.Context, key string, horizon time.Time, budget int, src *lineupSource) (*Version, error) {
 	now := s.now()
 	for i := 0; i < budget; i++ {
 		vs, err := s.store.LatestVersions(ctx, key, 1)
@@ -229,7 +260,7 @@ func (s *Service) advanceChain(ctx context.Context, key string, horizon time.Tim
 				}
 			}
 		}
-		v, err := s.newVersion(ctx, key, n, startsAt, last)
+		v, err := s.newVersion(ctx, key, n, startsAt, last, src)
 		if err != nil {
 			return nil, err
 		}

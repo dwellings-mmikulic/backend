@@ -60,11 +60,15 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	// "now" to build a window from. Only the further reach toward horizon,
 	// which is what can run unboundedly long for a thin scope, is subject to
 	// epgChainBudget below.
-	cur, _, err := s.current(ctx, key, now)
+	// One source for the whole request: s.current and advanceChain both build
+	// versions, and resolving the scope for each of them would double the
+	// library scans a cold request costs.
+	src := s.newSource(key)
+	cur, _, err := s.current(ctx, key, now, src)
 	if err != nil {
 		return EPG{}, err
 	}
-	latest, err := s.advanceChain(ctx, key, horizon, epgChainBudget)
+	latest, err := s.advanceChain(ctx, key, horizon, epgChainBudget, src)
 	if err != nil {
 		return EPG{}, err
 	}
