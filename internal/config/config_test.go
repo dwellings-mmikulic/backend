@@ -13,6 +13,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://example")
 	t.Setenv("ZILLOW_API_KEY", "zillow-key")
 	t.Setenv("SEARCH_LOCATION", "33950")
+	t.Setenv("VIEWER_SALT", "test-salt")
 }
 
 // TestLoad_LocationIQWithoutImagesRequiresBunny covers finding 2: enabling
@@ -64,6 +65,7 @@ func minimalEnv(t *testing.T) {
 	t.Setenv("LOCATIONIQ_API_KEY", "")
 	t.Setenv("SEARCH_LOCATION", "")
 	t.Setenv("API_BUDGET_PER_CYCLE", "")
+	t.Setenv("VIEWER_SALT", "test-salt")
 }
 
 func TestLoad_APIBudgetDefault(t *testing.T) {
@@ -101,6 +103,7 @@ func TestLoad_LinearDefaults(t *testing.T) {
 	t.Setenv("ZILLOW_API_KEY", "k")
 	t.Setenv("IMAGES_ENABLED", "false")
 	t.Setenv("PUBLIC_BASE_URL", "https://api.example.com/")
+	t.Setenv("VIEWER_SALT", "s")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -110,5 +113,41 @@ func TestLoad_LinearDefaults(t *testing.T) {
 	}
 	if cfg.PublicBaseURL != "https://api.example.com" {
 		t.Errorf("PublicBaseURL = %q (trailing slash must be trimmed)", cfg.PublicBaseURL)
+	}
+}
+
+func TestLoad_ViewerSaltRequiredWithTracking(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("VIEWER_SALT", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "VIEWER_SALT") {
+		t.Errorf("tracking on without a salt must fail at startup, got %v", err)
+	}
+	t.Setenv("VIEWER_TRACKING_ENABLED", "false")
+	if _, err := Load(); err != nil {
+		t.Errorf("tracking off needs no salt: %v", err)
+	}
+	t.Setenv("VIEWER_TRACKING_ENABLED", "")
+	t.Setenv("LINEAR_ENABLED", "false")
+	if _, err := Load(); err != nil {
+		t.Errorf("no linear channels, no tracking, no salt needed: %v", err)
+	}
+}
+
+func TestLoad_ViewerDefaults(t *testing.T) {
+	minimalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := cfg.Viewer
+	if !v.Enabled || v.Salt != "test-salt" || v.RotateDaily || v.RetentionDays != 30 || v.GeoIPDBPath != "" {
+		t.Errorf("viewer defaults = %+v", v)
+	}
+	t.Setenv("VIEWER_SALT_ROTATE_DAILY", "true")
+	t.Setenv("VIEWER_RETENTION_DAYS", "0")
+	t.Setenv("GEOIP_DB_PATH", " /geoip/x.mmdb ")
+	cfg, _ = Load()
+	if !cfg.Viewer.RotateDaily || cfg.Viewer.RetentionDays != 1 || cfg.Viewer.GeoIPDBPath != "/geoip/x.mmdb" {
+		t.Errorf("viewer env = %+v", cfg.Viewer)
 	}
 }

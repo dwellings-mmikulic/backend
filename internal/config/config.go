@@ -62,6 +62,9 @@ type Config struct {
 	// Linear channels — 24/7 HLS streams assembled from the listing videos.
 	Linear LinearConfig
 
+	// Viewer tracking and the channel resolver.
+	Viewer ViewerConfig
+
 	// PublicBaseURL is this server's public origin (e.g. https://api.dwellings.tv)
 	// for absolute URLs in the Roku feed. Empty disables the feed's live entry.
 	PublicBaseURL string
@@ -108,6 +111,22 @@ type LinearConfig struct {
 	// borrows the first ready listing's image; with neither, the entry is
 	// omitted (Roku requires a thumbnail).
 	LiveThumbnailURL string
+}
+
+// ViewerConfig controls pseudonymous viewer tracking on the linear channels
+// (see docs/superpowers/specs/2026-08-26-viewer-tracking-design.md).
+type ViewerConfig struct {
+	Enabled bool
+	// Salt is mixed into every viewer hash. Required when tracking is on;
+	// changing it re-identifies everyone.
+	Salt string
+	// RotateDaily also mixes in the UTC date, so ids cannot be linked
+	// across days (and "last watched" only survives the day).
+	RotateDaily   bool
+	RetentionDays int
+	// GeoIPDBPath is a MaxMind GeoLite2-City .mmdb; empty disables the IP
+	// geo default in /channels/resolve.
+	GeoIPDBPath string
 }
 
 // SearchCriteria defines what properties the scheduler discovers each cycle.
@@ -158,6 +177,13 @@ func Load() (*Config, error) {
 			EPGHorizonHours:  getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
 			LiveThumbnailURL: strings.TrimSpace(getenv("LINEAR_LIVE_THUMBNAIL_URL", "")),
 		},
+		Viewer: ViewerConfig{
+			Enabled:       getenvBool("VIEWER_TRACKING_ENABLED", true),
+			Salt:          strings.TrimSpace(getenv("VIEWER_SALT", "")),
+			RotateDaily:   getenvBool("VIEWER_SALT_ROTATE_DAILY", false),
+			RetentionDays: getenvInt("VIEWER_RETENTION_DAYS", 30),
+			GeoIPDBPath:   strings.TrimSpace(getenv("GEOIP_DB_PATH", "")),
+		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),
 		Concurrency: ConcurrencyConfig{
@@ -197,8 +223,14 @@ func Load() (*Config, error) {
 			missing = append(missing, "BUNNY_CDN_BASE_URL")
 		}
 	}
+	if c.Linear.Enabled && c.Viewer.Enabled && c.Viewer.Salt == "" {
+		missing = append(missing, "VIEWER_SALT (or VIEWER_TRACKING_ENABLED=false)")
+	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
+	}
+	if c.Viewer.RetentionDays < 1 {
+		c.Viewer.RetentionDays = 1
 	}
 
 	return c, nil

@@ -10,6 +10,12 @@ Push to `main` → GitHub Actions (`.github/workflows/publish-deploy.yml`):
 
 ## Server layout
 - `/opt/dwellings/compose.prod.yml` — app-only compose (concrete image owner).
+  Mounts `/opt/dwellings/geoip` read-only at `/geoip` for the MaxMind
+  GeoLite2-City database (`GEOIP_DB_PATH=/geoip/GeoLite2-City.mmdb`).
+  Refresh it weekly with `geoipupdate` (apt package; `/etc/GeoIP.conf` holds
+  the MaxMind AccountID/LicenseKey and `EditionIDs GeoLite2-City`,
+  `DatabaseDirectory /opt/dwellings/geoip`). Without the file the app logs
+  a warning and `/channels/resolve` skips the geo step.
 - `/opt/dwellings/.env` — runtime secrets, `chmod 600`, NOT in git.
 - nginx: `/etc/nginx/sites-available/dwellings` → proxies `:80` to `127.0.0.1:8080`.
 

@@ -161,12 +161,34 @@ At startup the server warns when the channels are enabled but cannot work:
 (no Roku live entry), no music tracks found (silent renders are rejected by
 the segmenter), or no segmented clip in the database (run the backfill).
 
+### Viewer tracking and channel resolve
+
+Every poll of `live.m3u8` is a heartbeat: the viewer (a salted SHA-256 of
+the `sid` query parameter if present — the Roku app will send its RIDA — else
+of the client IP; never the raw value) is recorded once per minute per
+channel in `viewer_heartbeats`, batched every 30 s and purged after
+`VIEWER_RETENTION_DAYS`. nginx does not cache `live.m3u8`, so every poll
+reaches the app.
+
+```
+GET /channels/resolve            → {"scope","name","master","epg","source"}
+GET /channels/stats?state=TX     → {"scope","concurrent","unique_24h","unique_7d"}
+```
+
+`resolve` picks a channel for the caller: the one they last watched (within
+the retention period), else the ZIP/city/state of their IP (MaxMind
+GeoLite2-City at `GEOIP_DB_PATH`), else national — each candidate goes
+through the usual thin-area fallback, so the answer always has content.
+`source` says which rule won. Pass `?sid=` to identify a device instead of
+an IP. `concurrent` is distinct viewers in the last two minutes.
+
 ### HTTP endpoints
 
 - `GET /roku/feed.json` — Roku Direct Publisher feed of all `ready` videos.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
 - `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json` — linear channels, see [Linear channels](#linear-channels).
+- `GET /channels/resolve`, `GET /channels/stats` — see [Viewer tracking and channel resolve](#viewer-tracking-and-channel-resolve).
 - `GET /healthz` — liveness.
 
 ## API
@@ -261,6 +283,9 @@ channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 `LINEAR_LINEUP_HOURS` (`6`), `LINEAR_MIN_SCOPE_CLIPS` (`20`),
 `LINEAR_EPG_HORIZON_HOURS` (`24`) and `LINEAR_LIVE_THUMBNAIL_URL` (empty —
 the poster of the Roku live entry; see [Linear channels](#linear-channels)).
+Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
+(required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
+`VIEWER_RETENTION_DAYS` (`30`) and `GEOIP_DB_PATH` (empty = no geo).
 
 ## OpenWebNinja Zillow API
 

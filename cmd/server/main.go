@@ -10,10 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/dwellingtw/backend/internal/api"
 	"github.com/dwellingtw/backend/internal/bunny"
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/db"
+	"github.com/dwellingtw/backend/internal/geo"
 	"github.com/dwellingtw/backend/internal/hls"
 	"github.com/dwellingtw/backend/internal/linear"
 	"github.com/dwellingtw/backend/internal/locationiq"
@@ -22,6 +25,7 @@ import (
 	"github.com/dwellingtw/backend/internal/scheduler"
 	"github.com/dwellingtw/backend/internal/server"
 	"github.com/dwellingtw/backend/internal/video"
+	"github.com/dwellingtw/backend/internal/viewer"
 	"github.com/dwellingtw/backend/internal/zillow"
 	"github.com/dwellingtw/backend/internal/zipcode"
 	"github.com/dwellingtw/backend/internal/zipseed"
@@ -120,7 +124,11 @@ func run(log *slog.Logger) error {
 			MinScopeClips:   cfg.Linear.MinScopeClips,
 			EPGHorizonHours: cfg.Linear.EPGHorizonHours,
 		}, log)
-		httpSrv.Mount(linear.NewHandler(svc, log))
+		h := linear.NewHandler(svc, log)
+		if cfg.Viewer.Enabled {
+			h.EnableViewers(viewerOptions(ctx, cfg, pool, log))
+		}
+		httpSrv.Mount(h)
 		if cfg.PublicBaseURL != "" {
 			httpSrv.SetLiveFeed(cfg.PublicBaseURL+"/channels/master.m3u8", cfg.Linear.LiveThumbnailURL, svc.HasContent)
 		}
@@ -141,6 +149,34 @@ func run(log *slog.Logger) error {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
 	return nil
+}
+
+// viewerOptions wires viewer tracking: the heartbeat recorder (flushed in
+// the background until ctx ends), the geo database when configured, and the
+// resolve/stats endpoints.
+func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) linear.ViewerOptions {
+	repo := viewer.NewRepository(pool)
+	rec := viewer.NewRecorder(repo, viewer.Options{
+		Retention: time.Duration(cfg.Viewer.RetentionDays) * 24 * time.Hour,
+	}, log)
+	go rec.Run(ctx)
+	o := linear.ViewerOptions{
+		Hasher:         viewer.NewHasher(cfg.Viewer.Salt, cfg.Viewer.RotateDaily),
+		Tracker:        rec,
+		Audience:       repo,
+		PublicBaseURL:  cfg.PublicBaseURL,
+		LastWatchedTTL: time.Duration(cfg.Viewer.RetentionDays) * 24 * time.Hour,
+	}
+	if cfg.Viewer.GeoIPDBPath != "" {
+		g, err := geo.Open(cfg.Viewer.GeoIPDBPath)
+		if err != nil {
+			log.Warn("geoip disabled: database unreadable; /channels/resolve will not use IP location", "path", cfg.Viewer.GeoIPDBPath, "error", err)
+		} else {
+			o.Geo = g
+		}
+	}
+	log.Info("viewer tracking enabled", "rotate_daily", cfg.Viewer.RotateDaily, "retention_days", cfg.Viewer.RetentionDays, "geoip", o.Geo != nil)
+	return o
 }
 
 // warnLinearSetup surfaces the configurations in which the linear channels

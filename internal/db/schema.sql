@@ -117,3 +117,26 @@ CREATE TABLE IF NOT EXISTS channel_lineups (
 -- never has to be scanned.
 CREATE INDEX IF NOT EXISTS idx_channel_lineups_key_ends
     ON channel_lineups (channel_key, ends_at);
+
+-- Viewer tracking (see docs/superpowers/specs/2026-08-26-viewer-tracking-design.md).
+-- viewer_heartbeats: one row per (pseudonymous viewer, channel, minute) in
+-- which the viewer polled the live playlist. viewer_hash is a salted hash;
+-- no raw address is ever stored. Rows are purged after the retention period.
+CREATE TABLE IF NOT EXISTS viewer_heartbeats (
+    viewer_hash BYTEA NOT NULL,
+    channel_key TEXT NOT NULL,
+    minute      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (viewer_hash, channel_key, minute)
+);
+CREATE INDEX IF NOT EXISTS idx_viewer_heartbeats_channel_minute
+    ON viewer_heartbeats (channel_key, minute);
+CREATE INDEX IF NOT EXISTS idx_viewer_heartbeats_minute
+    ON viewer_heartbeats (minute);
+
+-- viewer_last_channel: what each viewer tuned to most recently, for the
+-- /channels/resolve default.
+CREATE TABLE IF NOT EXISTS viewer_last_channel (
+    viewer_hash BYTEA PRIMARY KEY,
+    channel_key TEXT NOT NULL,
+    seen_at     TIMESTAMPTZ NOT NULL
+);
