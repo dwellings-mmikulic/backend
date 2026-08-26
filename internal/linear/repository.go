@@ -2,6 +2,7 @@ package linear
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -101,7 +102,7 @@ SELECT lower(city), lower(state)
  LIMIT 1`
 	var city, state string
 	err := r.pool.QueryRow(ctx, q, zip).Scan(&city, &state)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", nil
 	}
 	if err != nil {

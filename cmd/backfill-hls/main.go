@@ -8,7 +8,7 @@
 // segmentation failed. It costs no Zillow API quota.
 //
 // Reads DATABASE_URL and BUNNY_* from the environment. Flags: -dry-run,
-// -limit N, -concurrency N (default 4).
+// -limit N, -concurrency N (default 4), -upload-concurrency N (default 8).
 package main
 
 import (
@@ -41,14 +41,15 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "report without downloading, segmenting, uploading, or updating")
 	limit := flag.Int("limit", 0, "process at most this many videos (0 = all)")
 	concurrency := flag.Int("concurrency", 4, "videos processed in parallel")
+	uploadConcurrency := flag.Int("upload-concurrency", 8, "segment uploads in parallel within one video")
 	flag.Parse()
 
-	if err := run(context.Background(), *dryRun, *limit, *concurrency); err != nil {
+	if err := run(context.Background(), *dryRun, *limit, *concurrency, *uploadConcurrency); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, dryRun bool, limit, concurrency int) error {
+func run(ctx context.Context, dryRun bool, limit, concurrency, uploadConcurrency int) error {
 	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		return err
@@ -83,7 +84,7 @@ func run(ctx context.Context, dryRun bool, limit, concurrency int) error {
 	g.SetLimit(max(concurrency, 1))
 	for _, p := range todo {
 		g.Go(func() error {
-			if err := segmentOne(gctx, httpc, seg, up, repo, p); err != nil {
+			if err := segmentOne(gctx, httpc, seg, up, repo, p, uploadConcurrency); err != nil {
 				log.Printf("zpid=%s failed: %v", p.zpid, err)
 				failed.Add(1)
 				return nil // keep going; the next run retries it
@@ -125,7 +126,7 @@ SELECT p.zpid, p.video_url, COALESCE(p.video_content_hash, '')
 	return out, rows.Err()
 }
 
-func segmentOne(ctx context.Context, httpc *http.Client, seg *hls.Segmenter, up *bunny.Client, repo *linear.Repository, p pending) error {
+func segmentOne(ctx context.Context, httpc *http.Client, seg *hls.Segmenter, up *bunny.Client, repo *linear.Repository, p pending, uploadConcurrency int) error {
 	workDir, err := os.MkdirTemp("", "backfill-hls-"+p.zpid+"-")
 	if err != nil {
 		return fmt.Errorf("work dir: %w", err)
@@ -144,7 +145,7 @@ func segmentOne(ctx context.Context, httpc *http.Client, seg *hls.Segmenter, up 
 	if err != nil {
 		return err
 	}
-	base, err := hls.Upload(ctx, up, dir, hls.Prefix(p.zpid, p.hash), clip, 8)
+	base, err := hls.Upload(ctx, up, dir, hls.Prefix(p.zpid, p.hash), clip, max(uploadConcurrency, 1))
 	if err != nil {
 		return err
 	}

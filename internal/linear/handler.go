@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 )
 
 const playlistContentType = "application/vnd.apple.mpegurl"
@@ -28,16 +29,33 @@ func (h *Handler) Register(mux *http.ServeMux) {
 }
 
 func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
-	if _, err := ParseScope(r.URL.Query()); err != nil {
+	sc, err := ParseScope(r.URL.Query())
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	uri := "live.m3u8"
-	if r.URL.RawQuery != "" {
-		uri += "?" + r.URL.RawQuery
-	}
 	playlistHeaders(w)
-	writeMaster(w, uri)
+	writeMaster(w, mediaURI(sc))
+}
+
+// mediaURI is the media playlist reference of sc. It is rebuilt from the
+// parsed scope rather than echoing the request's raw query, so unknown or
+// duplicated parameters, odd casing and stray whitespace cannot be reflected
+// into the playlist body.
+func mediaURI(sc Scope) string {
+	q := url.Values{}
+	switch {
+	case sc.Zip != "":
+		q.Set("zip", sc.Zip)
+	case sc.City != "":
+		q.Set("city", sc.City)
+		q.Set("state", sc.State)
+	case sc.State != "":
+		q.Set("state", sc.State)
+	default:
+		return "live.m3u8"
+	}
+	return "live.m3u8?" + q.Encode()
 }
 
 func (h *Handler) live(w http.ResponseWriter, r *http.Request) {

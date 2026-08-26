@@ -48,7 +48,11 @@ func TestParseScope_Rejects(t *testing.T) {
 }
 
 func TestParseKey_Rejects(t *testing.T) {
-	for _, k := range []string{"", "city:katy", "planet:earth"} {
+	for _, k := range []string{
+		"", "city:katy", "planet:earth",
+		"zip:123", "zip:abcde", "state:", "state:zz", "state:texas",
+		"city:|tx", "city:katy|zz", "city:katy|",
+	} {
 		if _, err := ParseKey(k); !errors.Is(err, ErrBadScope) {
 			t.Errorf("%q: err = %v, want ErrBadScope", k, err)
 		}

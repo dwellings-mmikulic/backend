@@ -59,7 +59,7 @@ func TestWritePlaylist_Golden(t *testing.T) {
 	var buf bytes.Buffer
 	writePlaylist(&buf, segs)
 	want := `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:6
 #EXT-X-TARGETDURATION:10
 #EXT-X-INDEPENDENT-SEGMENTS
 #EXT-X-MEDIA-SEQUENCE:0
@@ -173,7 +173,7 @@ func TestWritePlaylist_EmptyWindow(t *testing.T) {
 	var buf bytes.Buffer
 	writePlaylist(&buf, nil)
 	out := buf.String()
-	want := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-INDEPENDENT-SEGMENTS\n" +
+	want := "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:10\n#EXT-X-INDEPENDENT-SEGMENTS\n" +
 		"#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-DISCONTINUITY-SEQUENCE:0\n"
 	if out != want {
 		t.Errorf("empty window playlist:\n%s\nwant:\n%s", out, want)
@@ -186,7 +186,7 @@ func TestWritePlaylist_EmptyWindow(t *testing.T) {
 func TestWriteMaster(t *testing.T) {
 	var buf bytes.Buffer
 	writeMaster(&buf, "live.m3u8?zip=77494")
-	want := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-INDEPENDENT-SEGMENTS\n" +
+	want := "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=1400000,AVERAGE-BANDWIDTH=1100000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=1920x1080,FRAME-RATE=30.000\n" +
 		"live.m3u8?zip=77494\n"
 	if buf.String() != want {

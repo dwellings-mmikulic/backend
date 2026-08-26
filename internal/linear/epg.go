@@ -60,7 +60,8 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	// "now" to build a window from. Only the further reach toward horizon,
 	// which is what can run unboundedly long for a thin scope, is subject to
 	// epgChainBudget below.
-	if _, _, err := s.current(ctx, key, now); err != nil {
+	cur, _, err := s.current(ctx, key, now)
+	if err != nil {
 		return EPG{}, err
 	}
 	latest, err := s.advanceChain(ctx, key, horizon, epgChainBudget)
@@ -123,8 +124,12 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 		price[l.ClipID] = l.Price
 	}
 
-	effScope, _ := ParseKey(latest.Scope)
-	e := EPG{Channel: Channel{Key: key, Scope: latest.Scope, Name: effScope.Name()}}
+	// The channel's reported scope is the one on air now, not the chain
+	// tip's: the tip is a version up to a day in the future, and its scope
+	// may have been re-resolved to a different area than the viewer is
+	// currently watching.
+	effScope, _ := ParseKey(cur.Scope)
+	e := EPG{Channel: Channel{Key: key, Scope: cur.Scope, Name: effScope.Name()}}
 	i := 0
 	for b := start; b.Before(upper); b = b.Add(programBlock) {
 		end := b.Add(programBlock)
@@ -136,7 +141,9 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 				continue
 			}
 			n++
-			scope = items[i].scope
+			if n == 1 {
+				scope = items[i].scope // the block is titled by what starts it
+			}
 			if p := price[items[i].id]; p > 0 {
 				if lo == 0 || p < lo {
 					lo = p

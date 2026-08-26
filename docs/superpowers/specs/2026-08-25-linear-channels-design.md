@@ -187,8 +187,8 @@ in-flight request for that channel miss at once.
 
 `GET /channels/master.m3u8?…` → one `EXT-X-STREAM-INF` (BANDWIDTH 1,400,000,
 AVERAGE-BANDWIDTH 1,100,000, `CODECS="avc1.640028,mp4a.40.2"`,
-`RESOLUTION=1920x1080`, `FRAME-RATE=30.000`) pointing at
-`live.m3u8?<same query>`.
+`RESOLUTION=1920x1080`, `FRAME-RATE=30.000`) pointing at `live.m3u8` with the
+scope re-encoded from the parsed filter (never the request's raw query).
 
 `GET /channels/live.m3u8?…` at wall-clock `now`:
 
@@ -200,7 +200,9 @@ AVERAGE-BANDWIDTH 1,100,000, `CODECS="avc1.640028,mp4a.40.2"`,
   18 s. The window may span a version boundary (the two most recent versions
   are loaded), and the items fetched for it are bounded by the same rule, not
   by a fixed items-back count;
-- `#EXTM3U`, `#EXT-X-VERSION:3`, `#EXT-X-TARGETDURATION:10`,
+- `#EXTM3U`, `#EXT-X-VERSION:6` (INDEPENDENT-SEGMENTS,
+  DISCONTINUITY-SEQUENCE, AVERAGE-BANDWIDTH and FRAME-RATE are all past
+  version 3), `#EXT-X-TARGETDURATION:10`,
   `#EXT-X-INDEPENDENT-SEGMENTS`, `#EXT-X-MEDIA-SEQUENCE`,
   `#EXT-X-DISCONTINUITY-SEQUENCE`, then per segment: `#EXT-X-DISCONTINUITY`
   before the first segment of every item except the channel's very first
@@ -267,7 +269,8 @@ cached for 60 s), so the feed never advertises a stream that answers 503.
   `video_hls`. Failures are logged and non-fatal; the backfill picks them up.
 - `cmd/backfill-hls`: lists ready videos with no `video_hls` row for their
   current hash (oldest first), downloads `video_url`, segments, uploads
-  (`-concurrency`, default 4; `-limit`; `-dry-run`). Costs no Zillow quota.
+  (`-concurrency`, default 4; `-upload-concurrency`, default 8; `-limit`;
+  `-dry-run`). Costs no Zillow quota.
 
 ### 9. Configuration
 

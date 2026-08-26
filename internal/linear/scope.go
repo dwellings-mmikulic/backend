@@ -80,23 +80,38 @@ func (s Scope) Key() string {
 	return "us"
 }
 
-// ParseKey inverts Key. It accepts only what Key produces.
+// ParseKey inverts Key. It accepts only what Key produces: the decoded fields
+// are re-validated, so a key read back from the database (or reached any
+// other way) cannot smuggle a scope ParseScope would have rejected.
 func ParseKey(k string) (Scope, error) {
+	bad := func() (Scope, error) { return Scope{}, fmt.Errorf("%w: %q", ErrBadScope, k) }
 	switch {
 	case k == "us":
 		return Scope{}, nil
 	case strings.HasPrefix(k, "zip:"):
-		return Scope{Zip: k[len("zip:"):]}, nil
+		zip := k[len("zip:"):]
+		if !isZip(zip) {
+			return bad()
+		}
+		return Scope{Zip: zip}, nil
 	case strings.HasPrefix(k, "state:"):
-		return Scope{State: k[len("state:"):]}, nil
+		s := Scope{State: k[len("state:"):]}
+		if !s.knownState() || s.State == "" {
+			return bad()
+		}
+		return s, nil
 	case strings.HasPrefix(k, "city:"):
 		city, state, ok := strings.Cut(k[len("city:"):], "|")
-		if !ok {
-			return Scope{}, fmt.Errorf("%w: %q", ErrBadScope, k)
+		if !ok || city == "" {
+			return bad()
 		}
-		return Scope{City: city, State: state}, nil
+		s := Scope{City: city, State: state}
+		if !s.knownState() || s.State == "" {
+			return bad()
+		}
+		return s, nil
 	}
-	return Scope{}, fmt.Errorf("%w: %q", ErrBadScope, k)
+	return bad()
 }
 
 // knownState reports whether the scope's state is a real US state code. A

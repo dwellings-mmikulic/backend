@@ -54,6 +54,12 @@ func TestHandler_Master(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "\nlive.m3u8\n") {
 		t.Errorf("national master:\n%s", rec.Body.String())
 	}
+	// The media URI is rebuilt from the parsed scope, never echoed from the
+	// raw query: unknown parameters and odd casing must not be reflected.
+	rec = serve(t, newMemStore(), t0, "/channels/master.m3u8?city=KATY&state=TX&junk=%3Cx%3E")
+	if !strings.Contains(rec.Body.String(), "\nlive.m3u8?city=katy&state=tx\n") {
+		t.Errorf("master must re-encode the scope:\n%s", rec.Body.String())
+	}
 }
 
 func TestHandler_BadFilterIs400(t *testing.T) {

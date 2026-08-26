@@ -34,7 +34,7 @@ func writePlaylist(w io.Writer, segs []segment) {
 			}
 		}
 	}
-	fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n#EXT-X-INDEPENDENT-SEGMENTS\n", hls.TargetDuration)
+	fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:%d\n#EXT-X-INDEPENDENT-SEGMENTS\n", hls.TargetDuration)
 	fmt.Fprintf(w, "#EXT-X-MEDIA-SEQUENCE:%d\n#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", first.Seq, removed)
 	for i, s := range segs {
 		disc := s.FirstOfItem && s.Item > 0
@@ -51,8 +51,11 @@ func writePlaylist(w io.Writer, segs []segment) {
 // writeMaster renders the master playlist. All clips share one rendition, so
 // there is a single variant; the attributes describe the listing encode
 // (H.264 High 4.0 1080p30, AAC-LC).
+//
+// EXT-X-VERSION is 6: INDEPENDENT-SEGMENTS, DISCONTINUITY-SEQUENCE,
+// AVERAGE-BANDWIDTH and FRAME-RATE are all past version 3.
 func writeMaster(w io.Writer, mediaURI string) {
-	io.WriteString(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-INDEPENDENT-SEGMENTS\n")
+	io.WriteString(w, "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n")
 	io.WriteString(w, "#EXT-X-STREAM-INF:BANDWIDTH=1400000,AVERAGE-BANDWIDTH=1100000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=1920x1080,FRAME-RATE=30.000\n")
 	fmt.Fprintf(w, "%s\n", mediaURI)
 }

@@ -203,7 +203,6 @@ func (s *Service) versionAt(ctx context.Context, key string, t time.Time) (cur, 
 // channel has no content and none could be created.
 func (s *Service) advanceChain(ctx context.Context, key string, horizon time.Time, budget int) (*Version, error) {
 	now := s.now()
-	var tip *Version
 	for i := 0; i < budget; i++ {
 		vs, err := s.store.LatestVersions(ctx, key, 1)
 		if err != nil {
@@ -234,19 +233,19 @@ func (s *Service) advanceChain(ctx context.Context, key string, horizon time.Tim
 		if err != nil {
 			return nil, err
 		}
-		if _, err := s.store.InsertVersion(ctx, v); err != nil {
+		ok, err := s.store.InsertVersion(ctx, v)
+		if err != nil {
 			return nil, err
 		}
-		s.log.Info("channel lineup version created", "channel", key, "version", n, "scope", v.Scope,
-			"items", len(v.ItemIDs), "starts_at", v.StartsAt, "ends_at", v.EndsAt)
-		tip = v
+		if ok {
+			s.log.Info("channel lineup version created", "channel", key, "version", n, "scope", v.Scope,
+				"items", len(v.ItemIDs), "starts_at", v.StartsAt, "ends_at", v.EndsAt)
+		}
 	}
-	if tip != nil {
-		return tip, nil
-	}
-	// budget was exhausted (or zero) without this call creating anything new
-	// (e.g. the chain already reached horizon on the very first check above,
-	// or budget <= 0): report whatever the chain's current tip is.
+	// Report the chain's stored tip, never the version this call happened to
+	// build: a concurrent instance may have won any of the inserts above, and
+	// its row is the canonical one. This is also the answer when the budget
+	// was exhausted (or zero) without creating anything.
 	vs, err := s.store.LatestVersions(ctx, key, 1)
 	if err != nil {
 		return nil, err
