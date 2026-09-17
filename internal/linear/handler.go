@@ -14,11 +14,26 @@ type Handler struct {
 	svc     *Service
 	log     *slog.Logger
 	viewers *ViewerOptions // nil until EnableViewers
+
+	preRollAd, midRollAd *string // VAST tags for /channels/resolve; nil = none
 }
 
 // NewHandler creates a Handler.
 func NewHandler(svc *Service, log *slog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
+}
+
+// SetAds sets the VAST ad tag URLs returned by /channels/resolve (empty =
+// null, no ads in that slot). The Roku app requests them through RAF.
+func (h *Handler) SetAds(preRollAd, midRollAd string) {
+	h.preRollAd, h.midRollAd = nonEmpty(preRollAd), nonEmpty(midRollAd)
+}
+
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // Register mounts the channel routes.

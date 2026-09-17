@@ -22,7 +22,22 @@ type listItem struct {
 	ImageURL     *string `json:"image_url"`
 }
 
+// adTags are the VAST ad tags sent with listings for the player; null when
+// that slot has no ads.
+type adTags struct {
+	PreRollAd *string `json:"pre_roll_ad" example:"https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID"`
+	MidRollAd *string `json:"mid_roll_ad" example:"https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID"`
+}
+
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 type listResponse struct {
+	adTags
 	Total      int        `json:"total"`
 	Results    []listItem `json:"results"`
 	NextCursor *string    `json:"next_cursor"`
@@ -36,6 +51,7 @@ type agentDTO struct {
 
 // detailResponse is the full detail-screen payload.
 type detailResponse struct {
+	adTags
 	ZPID            string    `json:"zpid"`
 	Price           int64     `json:"price"`
 	Address         string    `json:"address"`

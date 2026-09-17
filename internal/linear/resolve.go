@@ -60,6 +60,9 @@ type resolveResponse struct {
 	Master string `json:"master"`
 	EPG    string `json:"epg"`
 	Source string `json:"source"` // last_watched | geo | default
+
+	PreRollAd *string `json:"pre_roll_ad"` // VAST tag; null = no ads
+	MidRollAd *string `json:"mid_roll_ad"`
 }
 
 // resolve picks the channel for this viewer: what they watched last, else
@@ -149,6 +152,9 @@ func (h *Handler) writeResolve(w http.ResponseWriter, sc Scope, source string) {
 		Master: base + "master.m3u8" + q,
 		EPG:    base + "epg.json" + q,
 		Source: source,
+
+		PreRollAd: h.preRollAd,
+		MidRollAd: h.midRollAd,
 	})
 }
 

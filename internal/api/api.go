@@ -28,11 +28,19 @@ type API struct {
 	repo Repo
 	maps MapEnsurer
 	log  *slog.Logger
+	ads  adTags
 }
 
 // New creates the public API. maps may be nil, which disables property maps.
 func New(repo Repo, maps MapEnsurer, log *slog.Logger) *API {
 	return &API{repo: repo, maps: maps, log: log}
+}
+
+// SetAds sets the VAST ad tag URLs returned with the listings (empty = null,
+// no ads in that slot). The server never calls them; the Roku app requests
+// them through RAF, like the Cineplex category ads.
+func (a *API) SetAds(preRollAd, midRollAd string) {
+	a.ads = adTags{PreRollAd: nonEmpty(preRollAd), MidRollAd: nonEmpty(midRollAd)}
 }
 
 // Register mounts the public routes on mux.
@@ -87,7 +95,7 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := listResponse{Total: total, Results: make([]listItem, 0, len(props))}
+	resp := listResponse{adTags: a.ads, Total: total, Results: make([]listItem, 0, len(props))}
 	for i := range props {
 		resp.Results = append(resp.Results, toListItem(&props[i]))
 	}
@@ -122,6 +130,7 @@ func (a *API) handleDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := toDetailResponse(p)
+	resp.adTags = a.ads
 
 	// Generate missing maps on demand. Ensure waits a short while; if it is
 	// still working we return what we have and shorten the cache so the next

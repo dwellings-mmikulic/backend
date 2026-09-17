@@ -260,8 +260,16 @@ const docTemplate = `{
                 "map_image_url": {
                     "type": "string"
                 },
+                "mid_roll_ad": {
+                    "type": "string",
+                    "example": "https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID"
+                },
                 "mls_number": {
                     "type": "string"
+                },
+                "pre_roll_ad": {
+                    "type": "string",
+                    "example": "https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID"
                 },
                 "price": {
                     "type": "integer"
@@ -338,8 +346,16 @@ const docTemplate = `{
         "api.listResponse": {
             "type": "object",
             "properties": {
+                "mid_roll_ad": {
+                    "type": "string",
+                    "example": "https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID"
+                },
                 "next_cursor": {
                     "type": "string"
+                },
+                "pre_roll_ad": {
+                    "type": "string",
+                    "example": "https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID"
                 },
                 "results": {
                     "type": "array",
