@@ -292,6 +292,14 @@ Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
 `VIEWER_RETENTION_DAYS` (`30`) and `GEOIP_DB_PATH` (empty = no geo).
 
+`AD_PREROLL_URL` and `AD_MIDROLL_URL` (both empty) are the VAST ad tags from
+the ad server. The backend never calls them: `/api/v1/properties`,
+`/api/v1/properties/{zpid}` and `/channels/resolve` return them as
+`pre_roll_ad` / `mid_roll_ad` (null when unset, like the Cineplex category
+ads), and the Roku app requests them through RAF, substituting device macros
+such as `ROKU_ADS_TRACKING_ID` itself. A value that is not an absolute
+http(s) URL fails startup.
+
 ## OpenWebNinja Zillow API
 
 - Endpoint: `GET https://api.openwebninja.com/realtime-zillow-data/search`

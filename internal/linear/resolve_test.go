@@ -221,3 +221,29 @@ func TestBeat(t *testing.T) {
 		t.Errorf("bad beat: %d, beats %d", rec.Code, len(tr.beats))
 	}
 }
+
+func TestResolve_CarriesAdTags(t *testing.T) {
+	const pre = "https://ads.example.com/vast?pod=pre&did=ROKU_ADS_TRACKING_ID"
+	m := newMemStore()
+	addClips(m, Scope{State: "fl"}, 100, 40)
+	h := NewHandler(testService(m, t0), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.EnableViewers(baseOpts(&fakeAudience{last: map[viewer.ID]string{}}, nil))
+	h.SetAds(pre, "")
+	mux := http.NewServeMux()
+	h.Register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/channels/resolve", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]*string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := body["pre_roll_ad"]; !ok || v == nil || *v != pre {
+		t.Errorf("pre_roll_ad = %v: %s", v, rec.Body.String())
+	}
+	if v, ok := body["mid_roll_ad"]; !ok || v != nil {
+		t.Errorf("mid_roll_ad must be present and null: %s", rec.Body.String())
+	}
+}

@@ -55,7 +55,13 @@ definitions:
         type: string
       map_image_url:
         type: string
+      mid_roll_ad:
+        example: https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID
+        type: string
       mls_number:
+        type: string
+      pre_roll_ad:
+        example: https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID
         type: string
       price:
         type: integer
@@ -106,7 +112,13 @@ definitions:
     type: object
   api.listResponse:
     properties:
+      mid_roll_ad:
+        example: https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID
+        type: string
       next_cursor:
+        type: string
+      pre_roll_ad:
+        example: https://ads.example.com/vast?did=ROKU_ADS_TRACKING_ID
         type: string
       results:
         items:

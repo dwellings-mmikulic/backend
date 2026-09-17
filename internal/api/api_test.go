@@ -73,6 +73,14 @@ func serveWithMaps(t *testing.T, repo Repo, maps MapEnsurer, target string) *htt
 	return rec
 }
 
+func serveAPI(a *API, target string) *httptest.ResponseRecorder {
+	mux := http.NewServeMux()
+	a.Register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	return rec
+}
+
 func TestList_DefaultsAndMapping(t *testing.T) {
 	repo := &fakeRepo{props: []property.Property{sampleProp("Z1", 1)}, total: 312}
 	rec := serve(t, repo, "/api/v1/properties")
@@ -472,5 +480,64 @@ func TestDetail_LightOnlyRowStillPendingDarkShortensCache(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got == "public, max-age=300" {
 		t.Errorf("Cache-Control = %q, want the shortened pending value", got)
+	}
+}
+
+const (
+	testPreRollAd = "https://ads.example.com/vast?pod=pre&did=ROKU_ADS_TRACKING_ID"
+	testMidRollAd = "https://ads.example.com/vast?pod=mid&did=ROKU_ADS_TRACKING_ID"
+)
+
+func adsOf(t *testing.T, rec *httptest.ResponseRecorder) map[string]*string {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]*string{}
+	for _, k := range []string{"pre_roll_ad", "mid_roll_ad"} {
+		raw, ok := body[k]
+		if !ok {
+			t.Fatalf("response lacks %q: %s", k, rec.Body.String())
+		}
+		var v *string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			t.Fatal(err)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func TestList_CarriesAdTags(t *testing.T) {
+	a := New(&fakeRepo{props: []property.Property{sampleProp("1", 1)}, total: 1}, nil, testLogger())
+	a.SetAds(testPreRollAd, testMidRollAd)
+	ads := adsOf(t, serveAPI(a, "/api/v1/properties"))
+	if ads["pre_roll_ad"] == nil || *ads["pre_roll_ad"] != testPreRollAd ||
+		ads["mid_roll_ad"] == nil || *ads["mid_roll_ad"] != testMidRollAd {
+		t.Errorf("ads = %v", ads)
+	}
+}
+
+func TestDetail_CarriesAdTags(t *testing.T) {
+	p := sampleProp("1", 1)
+	a := New(&fakeRepo{detail: &p}, nil, testLogger())
+	a.SetAds(testPreRollAd, "")
+	ads := adsOf(t, serveAPI(a, "/api/v1/properties/1"))
+	if ads["pre_roll_ad"] == nil || *ads["pre_roll_ad"] != testPreRollAd || ads["mid_roll_ad"] != nil {
+		t.Errorf("ads = %v, want pre-roll set and mid-roll null", ads)
+	}
+}
+
+// Unset tags are explicit nulls, so the app can tell "no ads" apart from an
+// old server that never sent the fields.
+func TestList_UnsetAdTagsAreNull(t *testing.T) {
+	a := New(&fakeRepo{}, nil, testLogger())
+	ads := adsOf(t, serveAPI(a, "/api/v1/properties"))
+	if ads["pre_roll_ad"] != nil || ads["mid_roll_ad"] != nil {
+		t.Errorf("ads = %v, want both null", ads)
 	}
 }

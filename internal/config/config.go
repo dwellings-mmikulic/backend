@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -64,6 +65,9 @@ type Config struct {
 
 	// Viewer tracking and the channel resolver.
 	Viewer ViewerConfig
+
+	// Ads — VAST ad tags handed to the Roku app.
+	Ads AdsConfig
 
 	// PublicBaseURL is this server's public origin (e.g. https://api.dwellings.tv)
 	// for absolute URLs in the Roku feed. Empty disables the feed's live entry.
@@ -129,6 +133,16 @@ type ViewerConfig struct {
 	GeoIPDBPath string
 }
 
+// AdsConfig holds the VAST ad tag URLs from the ad server. The backend never
+// calls them: /api/v1/properties and /channels/resolve return them as
+// pre_roll_ad / mid_roll_ad, and the Roku app plays
+// them through RAF, substituting the device macros (ROKU_ADS_TRACKING_ID…)
+// itself. Empty means no ads for that slot.
+type AdsConfig struct {
+	PrerollURL string
+	MidrollURL string
+}
+
 // SearchCriteria defines what properties the scheduler discovers each cycle.
 type SearchCriteria struct {
 	Location    string // e.g. "Punta Gorda, FL"
@@ -184,6 +198,10 @@ func Load() (*Config, error) {
 			RetentionDays: getenvInt("VIEWER_RETENTION_DAYS", 30),
 			GeoIPDBPath:   strings.TrimSpace(getenv("GEOIP_DB_PATH", "")),
 		},
+		Ads: AdsConfig{
+			PrerollURL: strings.TrimSpace(getenv("AD_PREROLL_URL", "")),
+			MidrollURL: strings.TrimSpace(getenv("AD_MIDROLL_URL", "")),
+		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),
 		Concurrency: ConcurrencyConfig{
@@ -229,11 +247,23 @@ func Load() (*Config, error) {
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
+	for key, v := range map[string]string{"AD_PREROLL_URL": c.Ads.PrerollURL, "AD_MIDROLL_URL": c.Ads.MidrollURL} {
+		if v != "" && !isHTTPURL(v) {
+			return nil, fmt.Errorf("%s must be an absolute http(s) URL, got %q", key, v)
+		}
+	}
 	if c.Viewer.RetentionDays < 1 {
 		c.Viewer.RetentionDays = 1
 	}
 
 	return c, nil
+}
+
+// isHTTPURL reports whether s is an absolute http(s) URL with a host. Ad tags
+// carry macros like [CACHEBUSTER] in the query, which url.Parse tolerates.
+func isHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 func getenv(key, def string) string {

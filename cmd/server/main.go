@@ -117,6 +117,8 @@ func run(log *slog.Logger) error {
 	log.Info("scheduler started", "schedule", cfg.CronSchedule)
 
 	publicAPI := api.New(repo, mapEnsurerOrNil(mapSvc), log)
+	publicAPI.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
+	log.Info("ad tags", "pre_roll", cfg.Ads.PrerollURL != "", "mid_roll", cfg.Ads.MidrollURL != "")
 	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
 	if linearRepo != nil {
 		svc := linear.New(linearRepo, linear.Options{
@@ -125,6 +127,7 @@ func run(log *slog.Logger) error {
 			EPGHorizonHours: cfg.Linear.EPGHorizonHours,
 		}, log)
 		h := linear.NewHandler(svc, log)
+		h.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
 		if cfg.Viewer.Enabled {
 			h.EnableViewers(viewerOptions(ctx, cfg, pool, log))
 		}

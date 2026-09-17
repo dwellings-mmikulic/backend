@@ -151,3 +151,29 @@ func TestLoad_ViewerDefaults(t *testing.T) {
 		t.Errorf("viewer env = %+v", cfg.Viewer)
 	}
 }
+
+func TestLoad_AdTags(t *testing.T) {
+	minimalEnv(t)
+	const pre = "https://ads.example.com/vast?pod=pre&cb=[CACHEBUSTER]&did=ROKU_ADS_TRACKING_ID"
+	t.Setenv("AD_PREROLL_URL", " "+pre+" ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ads.PrerollURL != pre || cfg.Ads.MidrollURL != "" {
+		t.Errorf("ads = %+v", cfg.Ads)
+	}
+}
+
+func TestLoad_AdTagMustBeAbsoluteHTTPURL(t *testing.T) {
+	for _, bad := range []string{"ads.example.com/vast", "ftp://ads.example.com/vast", "https://"} {
+		t.Run(bad, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("AD_MIDROLL_URL", bad)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "AD_MIDROLL_URL") {
+				t.Errorf("Load() error = %v, want one naming AD_MIDROLL_URL", err)
+			}
+		})
+	}
+}
