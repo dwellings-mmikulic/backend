@@ -65,3 +65,49 @@ jobs:
             docker compose -f compose.prod.yml pull
             docker compose -f compose.prod.yml up -d
             docker image prune -f
+
+  # Worker fleet. Skipped until the repository variable WORKER_HOSTS is set to
+  # a JSON array of the workers' private addresses, e.g.
+  #   ["10.0.0.11","10.0.0.12"]
+  # Workers have no public SSH: the web box (SSH_HOST) is the jump host, and
+  # the same deploy key must be in each worker's authorized_keys.
+  # Runs after the web box so the new schema is in place before workers boot.
+  deploy-workers:
+    needs: [build-and-push, deploy]
+    # The job-level `if` is evaluated before the matrix, so an unset variable
+    # never reaches fromJSON; the `||` fallback keeps the expression valid
+    # even if that ordering ever changes.
+    if: ${{ vars.WORKER_HOSTS != '' && vars.WORKER_HOSTS != '[]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      # One unreachable box must not cancel its siblings halfway between
+      # `pull` and `up -d`.
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(vars.WORKER_HOSTS || '["unset"]') }}
+    steps:
+      - name: Deploy worker over SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ matrix.host }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          proxy_host: ${{ secrets.SSH_HOST }}
+          proxy_username: ${{ secrets.SSH_USER }}
+          proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: GHCR_USER,GHCR_TOKEN
+          script: |
+            set -e
+            cd /opt/dwellings
+            # Per-run login with the job's token: no long-lived PAT on ten boxes.
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker compose -f compose.worker.yml pull
+            docker compose -f compose.worker.yml up -d
+            docker logout ghcr.io
+            docker image prune -f

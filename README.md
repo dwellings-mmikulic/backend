@@ -1,10 +1,12 @@
 # Dwellings Backend
 
-A single-purpose Go service that collects Zillow property listings on a schedule.
+A single-purpose Go service that collects Zillow property listings within a
+fleet-wide API budget.
 
-Each cycle it:
+Continuously it:
 
-1. Searches the **OpenWebNinja Zillow API** using configurable criteria (location, price, beds).
+1. Searches the **OpenWebNinja Zillow API**, one ZIP code at a time in
+   rotation order, and queues the listings it finds.
 2. Downloads each listing's images and uploads them to **Bunny CDN** storage.
 3. Upserts the property (with CDN image URLs) into **PostgreSQL**.
 4. Renders a 16:9 1080p **listing video** (slideshow + facts overlay + QR + music),
@@ -13,8 +15,11 @@ Each cycle it:
 
 ## Architecture
 
-Monolith with an internal cron scheduler plus a small HTTP server for the feed.
-One binary, one container.
+One binary, one container image. A single instance (`ROLE=all`, the default)
+is a monolith: worker loops plus a small HTTP server. Any number of instances
+can run against the same PostgreSQL — they coordinate through it with
+expiring claims and a shared API budget ledger, never doing the same work
+twice. See [Running several instances](#running-several-instances).
 
 ```
 cmd/server/main.go      entrypoint: config, DB, scheduler, HTTP server
@@ -30,7 +35,11 @@ internal/api            public read-only listings API (browse + detail)
 internal/locationiq     LocationIQ geocoding + static map client
 internal/propertymap    on-demand property map generation
 internal/server         HTTP server: /roku/feed.json, /api/v1/properties*, /healthz
-internal/scheduler      cron ticker; orchestrates the full collection cycle
+internal/scheduler      the worker loops: discovery (search ZIPs → queue),
+                        media (photos → upsert → render → HLS), details
+internal/zipcode        ZIP rotation with atomic, expiring claims
+internal/workqueue      listing_queue: discovered listings awaiting the media loop
+internal/budget         budget windows + the fleet-wide API request ledger
 internal/hls            ffmpeg remux of a listing video into TS segments
 internal/linear         24/7 linear channels: lineups, live HLS playlist, EPG
 ```
@@ -49,18 +58,23 @@ Bunny → store video_url + status.
 - Pacing: every photo for `VIDEO_SECONDS_PER_PHOTO` seconds (default 4).
 - Music: 10 bundled CC0 tracks in `assets/music/` (public domain), chosen
   deterministically by zpid. Empty dir → silent video.
-- Per-listing failures are logged + marked `failed`, never fatal. A listing with
-  no `ready` video is re-rendered on a later cycle even when `SKIP_EXISTING` is
-  set — the revisit renders only, and does not re-upload photos or refresh the
-  row. To clear an existing backlog in one pass (a listing only gets revisited
-  when it resurfaces in search results), run `cmd/backfill-videos`:
+- Per-listing failures are logged + marked `failed`, never fatal: the queued
+  listing is retried with a backoff (5 min, then 30 min) and parked as dead
+  after three attempts. A listing with no `ready` video is re-rendered when it
+  is next discovered even when `SKIP_EXISTING` is set — the revisit renders
+  only, and does not re-upload photos or refresh the row. To clear an existing
+  backlog without waiting for re-discovery, run `cmd/backfill-videos`, which
+  **enqueues** those listings for the workers (it renders nothing itself, so
+  at least one instance with `ROLE=all` or `ROLE=worker` must be running):
 
   ```bash
-  go run ./cmd/backfill-videos -dry-run   # report what would render
-  go run ./cmd/backfill-videos            # render, upload, record
+  go run ./cmd/backfill-videos -dry-run   # report what would be enqueued
+  go run ./cmd/backfill-videos            # enqueue; also revives dead queue rows
+  go run ./cmd/backfill-videos -status    # queue: claimable / claimed / backoff / dead
   ```
 
-  It renders from the stored CDN photos, so it costs no Zillow API quota.
+  Workers render from the stored CDN photos and segment the result for the
+  linear channels, so it costs no Zillow API quota.
 - Needs the `ffmpeg` binary + a TTF font (both in the Docker image).
 
 ### Property maps
@@ -194,7 +208,8 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
 - `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json` — linear channels, see [Linear channels](#linear-channels).
 - `GET /channels/resolve`, `GET /channels/stats` — see [Viewer tracking and channel resolve](#viewer-tracking-and-channel-resolve).
-- `GET /healthz` — liveness.
+- `GET /healthz` — liveness. On a `ROLE=worker` instance it is the only route,
+  and answers 503 while the worker's circuit breaker is open.
 
 ## API
 
@@ -268,19 +283,34 @@ All configuration is via environment variables — see `.env.example`. Required:
 `BUNNY_CDN_BASE_URL`.
 
 `CRON_SCHEDULE` is a standard 5-field cron expression (default `0 */12 * * *`,
-every 12 hours). A cycle also runs once immediately on startup.
+every 12 hours; `@every 12h` also works), evaluated in UTC. It does not
+trigger anything: it defines the **budget windows**. A new window — and a
+fresh budget — starts at each activation; an instance that starts mid-window
+joins the current one rather than getting a budget of its own.
 
-`DETAILS_PER_CYCLE` caps how many properties get a one-time details-API
-enrichment call per cycle (default `50`; `0` disables enrichment entirely).
-
-`API_BUDGET_PER_CYCLE` (default `150`) caps the total OpenWebNinja requests
-one cycle may spend — search pages plus details calls. ZIP codes are not
+`API_BUDGET_PER_CYCLE` (default `150`) caps the OpenWebNinja requests the
+**whole fleet** may spend per window — search pages plus details calls,
+retries included. One request is reserved in PostgreSQL immediately before
+every paid HTTP attempt. `DETAILS_PER_CYCLE` (default `50`; `0` disables
+enrichment entirely) is the share of it reserved for the one-time
+details-API call per property; search gets the rest. ZIP codes are not
 configured: a built-in table of all 29,670 US residential ZIPs is seeded on
-first startup, and each cycle works through it in rotation order
-(never-searched first, most populous first, then stalest), stopping when the
-budget is spent and resuming from the cursor next cycle. A cycle is skipped
-entirely when the provider reports the monthly quota is exhausted, or when a
-previous cycle is still running.
+first startup and worked through in rotation order (never-searched first,
+most populous first, then stalest). When the budget runs out in the middle of
+a ZIP, the search resumes from the next page in the next window. Nothing is
+spent while the provider reports the monthly quota exhausted, or with less
+headroom than the unspent part of the window's budget.
+
+### Running several instances
+
+`ROLE` selects what an instance runs: `all` (default), `api` (HTTP only) or
+`worker` (the loops plus `/healthz`). `INSTANCE_ID` (default: hostname) names
+it in logs and claims, `DB_MAX_CONNS` (default `10`) bounds its PostgreSQL
+pool, and `QUEUE_HIGH_WATER` (default `2000`; `<= 0` disables) pauses
+discovery while that many listings wait to be rendered. The budget variables,
+the search criteria and the video settings must be identical on every
+instance. Provisioning, the connection budget, rollout order and an SQL
+runbook are in [`deploy/README.md`](deploy/README.md#fleet-worker-boxes).
 
 `PUBLIC_BASE_URL` (e.g. `https://api.dwellings.tv`) is this server's public
 origin, used for the absolute URLs in the Roku feed; empty leaves the live
@@ -311,14 +341,18 @@ http(s) URL fails startup.
   `internal/zillow/testdata/`.
 - Full image sets are built from each listing's `carouselPhotosComposable`
   (`baseUrl` + `photoData[].photoKey`), falling back to the `imgSrc` thumbnail.
-- `SearchPages` pages until `SEARCH_MAX_RESULTS` is reached (`0` = uncapped)
-  or the per-cycle API budget runs out (hard cap 20 pages per ZIP). Price and
-  bedroom criteria are applied client-side.
+- `SearchPages` pages until `SEARCH_MAX_RESULTS` is reached (`0` = uncapped,
+  the default) or the window's API budget runs out (hard cap 20 pages per
+  ZIP). Network errors, 429 and 5xx are retried up to three times, honouring
+  `Retry-After`; every attempt is charged to the budget. Price and bedroom
+  criteria are applied client-side.
 
 ## Notes
 
-- Image upload/download failures for individual images are logged and skipped;
-  they don't abort the rest of the cycle.
+- Image upload/download failures for individual images are logged and skipped
+  (Bunny uploads are retried up to three times first). A listing none of whose
+  photos could be stored fails and is retried: an empty gallery is never
+  persisted.
 
 ## Commands
 
