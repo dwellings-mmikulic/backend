@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -10,6 +12,7 @@ import (
 // to it.
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
+	clearFleetEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://example")
 	t.Setenv("ZILLOW_API_KEY", "zillow-key")
 	t.Setenv("SEARCH_LOCATION", "33950")
@@ -66,6 +69,21 @@ func minimalEnv(t *testing.T) {
 	t.Setenv("SEARCH_LOCATION", "")
 	t.Setenv("API_BUDGET_PER_CYCLE", "")
 	t.Setenv("VIEWER_SALT", "test-salt")
+	clearFleetEnv(t)
+}
+
+// clearFleetEnv blanks (= unsets, see getenv) the variables the fleet
+// settings read, so that a ROLE or INSTANCE_ID exported in the developer's
+// shell cannot leak into a test. ROLE matters most: an unknown value fails
+// every Load, and ROLE=worker changes which variables are required.
+func clearFleetEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"ROLE", "INSTANCE_ID", "DB_MAX_CONNS", "QUEUE_HIGH_WATER", "SEARCH_MAX_RESULTS",
+		"LINEAR_ENABLED", "VIEWER_TRACKING_ENABLED",
+	} {
+		t.Setenv(key, "")
+	}
 }
 
 func TestLoad_APIBudgetDefault(t *testing.T) {
@@ -99,6 +117,7 @@ func TestLoad_SearchLocationNotRequired(t *testing.T) {
 }
 
 func TestLoad_LinearDefaults(t *testing.T) {
+	clearFleetEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("ZILLOW_API_KEY", "k")
 	t.Setenv("IMAGES_ENABLED", "false")
@@ -173,6 +192,415 @@ func TestLoad_AdTagMustBeAbsoluteHTTPURL(t *testing.T) {
 			_, err := Load()
 			if err == nil || !strings.Contains(err.Error(), "AD_MIDROLL_URL") {
 				t.Errorf("Load() error = %v, want one naming AD_MIDROLL_URL", err)
+			}
+		})
+	}
+}
+
+// TestLoad_RoleDefault pins the "no new required configuration" promise: a
+// box that never heard of ROLE keeps being the scheduler + API process.
+func TestLoad_RoleDefault(t *testing.T) {
+	minimalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Role != RoleAll {
+		t.Errorf("Role = %q, want %q", cfg.Role, RoleAll)
+	}
+}
+
+func TestLoad_RoleFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want Role
+	}{
+		{"all", RoleAll},
+		{"api", RoleAPI},
+		{"worker", RoleWorker},
+		{"WORKER", RoleWorker},
+		{"Api", RoleAPI},
+		{"  worker  ", RoleWorker},
+		{"\tALL\n", RoleAll},
+		// Whitespace only is "unset", like every other blank variable here.
+		{"   ", RoleAll},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("ROLE", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Role != tc.want {
+				t.Errorf("ROLE=%q: Role = %q, want %q", tc.env, cfg.Role, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoad_RoleInvalid: a typo must stop the boot. Falling back to "all"
+// would quietly turn a worker box into a second public API + scheduler.
+func TestLoad_RoleInvalid(t *testing.T) {
+	for _, bad := range []string{"workers", "scheduler", "all,api", "a p i", "0"} {
+		t.Run(bad, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("ROLE", bad)
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("ROLE=%q: Load succeeded with Role=%q, want an error", bad, cfg.Role)
+			}
+			if cfg != nil {
+				t.Errorf("ROLE=%q: Load returned a config alongside the error", bad)
+			}
+			for _, want := range []string{"ROLE", `"` + bad + `"`, "all", "api", "worker"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestLoad_RoleInvalidReportedFirst: which variables are required depends on
+// the role, so a bad role is reported instead of a list computed from a guess.
+func TestLoad_RoleInvalidReportedFirst(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("ROLE", "workers")
+	t.Setenv("DATABASE_URL", "")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ROLE") {
+		t.Errorf("Load() error = %v, want one naming ROLE", err)
+	}
+}
+
+func TestRole_Capabilities(t *testing.T) {
+	for _, tc := range []struct {
+		role        Role
+		runsWorkers bool
+		servesAPI   bool
+	}{
+		{RoleAll, true, true},
+		{RoleAPI, false, true},
+		{RoleWorker, true, false},
+		// Anything Load would have rejected, the zero value included, does
+		// nothing rather than everything.
+		{Role(""), false, false},
+		{Role("workers"), false, false},
+		{Role("ALL"), false, false},
+	} {
+		if got := tc.role.RunsWorkers(); got != tc.runsWorkers {
+			t.Errorf("Role(%q).RunsWorkers() = %v, want %v", tc.role, got, tc.runsWorkers)
+		}
+		if got := tc.role.ServesAPI(); got != tc.servesAPI {
+			t.Errorf("Role(%q).ServesAPI() = %v, want %v", tc.role, got, tc.servesAPI)
+		}
+	}
+}
+
+func TestRole_ConstantsMatchTheDocumentedValues(t *testing.T) {
+	if RoleAll != "all" || RoleAPI != "api" || RoleWorker != "worker" {
+		t.Errorf("roles = %q %q %q, want all api worker (the values operators put in .env.host)", RoleAll, RoleAPI, RoleWorker)
+	}
+}
+
+func TestLoad_InstanceIDFromEnv(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("INSTANCE_ID", "  worker-03 ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstanceID != "worker-03" {
+		t.Errorf("InstanceID = %q, want %q", cfg.InstanceID, "worker-03")
+	}
+}
+
+func TestLoad_InstanceIDDefaultsToHostname(t *testing.T) {
+	minimalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InstanceID == "" {
+		t.Fatal("InstanceID is empty; claims and logs would carry no attribution")
+	}
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		if cfg.InstanceID != strings.TrimSpace(host) {
+			t.Errorf("InstanceID = %q, want the hostname %q", cfg.InstanceID, host)
+		}
+	}
+}
+
+func TestLoad_InstanceIDHostnameInjected(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		env      string
+		hostname func() (string, error)
+		want     string
+	}{
+		{"hostname", "", func() (string, error) { return "box-7", nil }, "box-7"},
+		{"hostname is trimmed", "", func() (string, error) { return " box-7\n", nil }, "box-7"},
+		{"blank env falls through", "   ", func() (string, error) { return "box-7", nil }, "box-7"},
+		{"env wins", "named", func() (string, error) { return "box-7", nil }, "named"},
+		{"hostname fails", "", func() (string, error) { return "", errors.New("no hostname") }, "unknown"},
+		{"hostname fails with junk", "", func() (string, error) { return "junk", errors.New("no hostname") }, "unknown"},
+		{"hostname empty", "", func() (string, error) { return "", nil }, "unknown"},
+		{"hostname blank", "", func() (string, error) { return "  ", nil }, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("INSTANCE_ID", tc.env)
+			prev := osHostname
+			osHostname = tc.hostname
+			t.Cleanup(func() { osHostname = prev })
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.InstanceID != tc.want {
+				t.Errorf("InstanceID = %q, want %q", cfg.InstanceID, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoad_DBMaxConns mirrors db.Connect (<=0 → 10, floor 4) so the number in
+// the boot log is the size of the pool that was actually opened.
+func TestLoad_DBMaxConns(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{"", 10},
+		{"lots", 10},
+		{"0", 10},
+		{"-3", 10},
+		{"1", 4},
+		{"3", 4},
+		{"4", 4},
+		// First value above the floor: must pass through, not be pulled down.
+		{"5", 5},
+		{"6", 6},
+		{"25", 25},
+		// A CRLF env file or a quoted value must not turn the 6 a worker was
+		// budgeted at into the default 10 (ten boxes: 100 connections, not 60).
+		{"6\r", 6},
+		{" 6 ", 6},
+		{"3\r\n", 4},
+		{"  ", 10},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("DB_MAX_CONNS", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.DBMaxConns != tc.want {
+				t.Errorf("DB_MAX_CONNS=%q: DBMaxConns = %d, want %d", tc.env, cfg.DBMaxConns, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_QueueHighWater(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{"", 2000},
+		{"plenty", 2000},
+		// An explicit 0 is "backpressure off", not "use the default".
+		{"0", 0},
+		{"-1", -1},
+		{"500", 500},
+		// Stray whitespace must not turn "off" back into the default: the
+		// operator asked for no backpressure and would get 2000 with no hint.
+		{"0 ", 0},
+		{" 0", 0},
+		{"0\r", 0},
+		{" 500\n", 500},
+		{" \t", 2000},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("QUEUE_HIGH_WATER", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.QueueHighWater != tc.want {
+				t.Errorf("QUEUE_HIGH_WATER=%q: QueueHighWater = %d, want %d", tc.env, cfg.QueueHighWater, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoad_NumbersAndBoolsIgnoreSurroundingWhitespace: ROLE and INSTANCE_ID
+// are trimmed, so a CRLF .env.fleet boots — and must then mean what it says.
+// The budget pair matters most: the runbook's rollback step is
+// API_BUDGET_PER_CYCLE=0 + DETAILS_PER_CYCLE=0 ("spend nothing"), which an
+// untrimmed parse would quietly turn back into 150 and 50.
+func TestLoad_NumbersAndBoolsIgnoreSurroundingWhitespace(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("API_BUDGET_PER_CYCLE", "0\r")
+	t.Setenv("DETAILS_PER_CYCLE", " 0 ")
+	t.Setenv("SEARCH_MAX_RESULTS", "75\r")
+	t.Setenv("SKIP_EXISTING", "false\r")
+	t.Setenv("VIDEO_ENABLED", " false ")
+	t.Setenv("VIEWER_SALT_ROTATE_DAILY", "true\r\n")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.APIBudgetPerCycle != 0 {
+		t.Errorf(`API_BUDGET_PER_CYCLE="0\r": APIBudgetPerCycle = %d, want 0`, cfg.APIBudgetPerCycle)
+	}
+	if cfg.DetailsPerCycle != 0 {
+		t.Errorf(`DETAILS_PER_CYCLE=" 0 ": DetailsPerCycle = %d, want 0`, cfg.DetailsPerCycle)
+	}
+	if cfg.Search.MaxResults != 75 {
+		t.Errorf(`SEARCH_MAX_RESULTS="75\r": Search.MaxResults = %d, want 75`, cfg.Search.MaxResults)
+	}
+	if cfg.SkipExisting {
+		t.Error(`SKIP_EXISTING="false\r": SkipExisting = true, want false`)
+	}
+	if cfg.Video.Enabled {
+		t.Error(`VIDEO_ENABLED=" false ": Video.Enabled = true, want false`)
+	}
+	if !cfg.Viewer.RotateDaily {
+		t.Error(`VIEWER_SALT_ROTATE_DAILY="true\r\n": Viewer.RotateDaily = false, want true`)
+	}
+}
+
+// TestLoad_UnparseableNumbersAndBoolsKeepTheDefault pins the rule the trim
+// must not change: a value that is still not a number (or a bool) after
+// trimming falls back to the default rather than failing the boot.
+func TestLoad_UnparseableNumbersAndBoolsKeepTheDefault(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("API_BUDGET_PER_CYCLE", "1 50")
+	t.Setenv("DETAILS_PER_CYCLE", "fifty")
+	t.Setenv("SKIP_EXISTING", "nope")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.APIBudgetPerCycle != 150 || cfg.DetailsPerCycle != 50 || !cfg.SkipExisting {
+		t.Errorf("budget = %d, details = %d, skipExisting = %v, want the defaults 150, 50, true",
+			cfg.APIBudgetPerCycle, cfg.DetailsPerCycle, cfg.SkipExisting)
+	}
+}
+
+// TestLoad_InstanceIDNeverContainsTheOwnerSeparator: the claim owner is
+// InstanceID + "/" + nonce and the runbook attributes claims with
+// split_part(claimed_by, '/', 1). A slash inside the id would file
+// "hel1/worker-01" and "hel1/worker-02" under one instance called "hel1".
+// Control characters are replaced too: the id is printed in every log line.
+func TestLoad_InstanceIDNeverContainsTheOwnerSeparator(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		env      string
+		hostname string
+		want     string
+	}{
+		{"slash", "hel1/worker-01", "", "hel1-worker-01"},
+		{"only slashes", "//", "", "--"},
+		{"leading and trailing slash", "/worker-01/", "", "-worker-01-"},
+		{"newline inside", "a\nb", "", "a-b"},
+		{"tab and carriage return inside", "a\tb\rc", "", "a-b-c"},
+		{"delete character", "a\x7fb", "", "a-b"},
+		{"edge whitespace is trimmed, not replaced", " worker-01\r\n", "", "worker-01"},
+		{"hostname goes through the same filter", "", "box/7\x00", "box-7-"},
+		// Left alone: neither breaks attribution nor a log line.
+		{"inner space kept", "worker 01", "", "worker 01"},
+		{"dots, underscores, colons kept", "w_01.hel1:a", "", "w_01.hel1:a"},
+		{"non-ASCII kept", "radnik-š1", "", "radnik-š1"},
+		{"backslash kept", `a\b`, "", `a\b`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("INSTANCE_ID", tc.env)
+			prev := osHostname
+			osHostname = func() (string, error) { return tc.hostname, nil }
+			t.Cleanup(func() { osHostname = prev })
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.InstanceID != tc.want {
+				t.Errorf("InstanceID = %q, want %q", cfg.InstanceID, tc.want)
+			}
+			// What the runbook's split_part sees for owner = id + "/" + nonce.
+			owner := cfg.InstanceID + "/3f9a"
+			if got, _, _ := strings.Cut(owner, "/"); got != cfg.InstanceID {
+				t.Errorf("owner %q attributes to %q, want %q", owner, got, cfg.InstanceID)
+			}
+		})
+	}
+}
+
+// TestLoad_SearchMaxResultsDefaultsToUnlimited: a worker provisioned without
+// the override must not truncate dense ZIPs and still mark them searched.
+func TestLoad_SearchMaxResultsDefaultsToUnlimited(t *testing.T) {
+	minimalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Search.MaxResults != 0 {
+		t.Errorf("Search.MaxResults = %d, want 0 (unlimited)", cfg.Search.MaxResults)
+	}
+	t.Setenv("SEARCH_MAX_RESULTS", "50")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Search.MaxResults != 50 {
+		t.Errorf("Search.MaxResults = %d, want 50", cfg.Search.MaxResults)
+	}
+}
+
+// TestLoad_ViewerSaltByRole: only a process that serves the API hashes
+// viewers, so a worker box must boot without the secret.
+func TestLoad_ViewerSaltByRole(t *testing.T) {
+	for _, tc := range []struct {
+		role     string
+		needSalt bool
+	}{
+		{"", true},
+		{"all", true},
+		{"api", true},
+		{"worker", false},
+	} {
+		t.Run("ROLE="+tc.role, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("ROLE", tc.role)
+			t.Setenv("VIEWER_SALT", "")
+			cfg, err := Load()
+			switch {
+			case tc.needSalt && (err == nil || !strings.Contains(err.Error(), "VIEWER_SALT")):
+				t.Errorf("Load() error = %v, want one naming VIEWER_SALT", err)
+			case !tc.needSalt && err != nil:
+				t.Errorf("Load: %v", err)
+			case !tc.needSalt && (!cfg.Linear.Enabled || !cfg.Viewer.Enabled):
+				// The worker still honours LINEAR_ENABLED for segmentation;
+				// loading without a salt must not switch anything off.
+				t.Errorf("linear = %v, viewer = %v, want both left enabled", cfg.Linear.Enabled, cfg.Viewer.Enabled)
+			}
+
+			// With the salt present every role loads and keeps it.
+			t.Setenv("VIEWER_SALT", "s3cret")
+			cfg, err = Load()
+			if err != nil {
+				t.Fatalf("Load with salt: %v", err)
+			}
+			if cfg.Viewer.Salt != "s3cret" {
+				t.Errorf("Viewer.Salt = %q, want %q", cfg.Viewer.Salt, "s3cret")
 			}
 		})
 	}

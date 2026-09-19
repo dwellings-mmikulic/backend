@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // TargetDuration is the channel-wide EXT-X-TARGETDURATION in seconds. A clip
@@ -77,6 +78,8 @@ func (s *Segmenter) Segment(ctx context.Context, mp4Path, outDir string) (Clip, 
 	}
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, s.ffmpeg, Args(abs)...)
+	// A killed ffmpeg must not leave Run blocked on its stderr pipe: that would hold a work slot past the claim's lease.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = outDir
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

@@ -8,14 +8,42 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Config holds all runtime configuration, loaded from environment variables.
 type Config struct {
+	// Role selects which halves of the binary this instance runs: the three
+	// worker loops, the public HTTP API, or both. It is per box (.env.host).
+	Role Role
+
+	// InstanceID attributes log lines and claims (claimed_by) to a box. It
+	// does not have to be unique: the claim owner is InstanceID plus a random
+	// per-boot nonce, so two boxes sharing a name — or every box falling back
+	// to "unknown" — still cannot pass each other's claim guards.
+	//
+	// It never contains '/' or a control character (Load replaces them with
+	// '-'): '/' separates it from the nonce in claimed_by, and the runbook
+	// splits on it to group claims by box.
+	InstanceID string
+
 	// Database
 	DatabaseURL string
 
-	// Scheduler — standard cron expression (robfig/cron, 5 fields).
+	// DBMaxConns is this instance's pgx pool size. Every instance shares the
+	// one PostgreSQL, so the fleet's pools have to add up to less than its
+	// max_connections. Load applies the same default and floor as db.Connect
+	// (<= 0 → 10, below 4 → 4), so the boot log shows the pool that was
+	// really opened rather than the number somebody typed.
+	DBMaxConns int
+
+	// CronSchedule — standard cron expression (robfig/cron: 5 fields, or a
+	// descriptor such as @every 12h). It no longer triggers anything: the
+	// worker loops run continuously, and the schedule only defines the budget
+	// windows. Each activation starts a new window with a fresh
+	// APIBudgetPerCycle. Every instance derives the window from its own copy,
+	// so the value must be identical on every box (.env.fleet). It is
+	// validated by internal/budget at startup, not here.
 	CronSchedule string
 
 	// OpenWebNinja (Zillow) API
@@ -36,15 +64,29 @@ type Config struct {
 	// are updated each cycle (refreshing price, photos, etc.).
 	SkipExisting bool
 
-	// DetailsPerCycle caps how many properties get a one-time details-API
-	// enrichment call per cycle (protects API quota). <= 0 disables enrichment.
+	// DetailsPerCycle is the details share of APIBudgetPerCycle: how many
+	// one-time details-API enrichment calls the whole fleet may make per
+	// budget window (protects API quota). <= 0 disables enrichment. Like
+	// APIBudgetPerCycle it must be identical on every box.
 	DetailsPerCycle int
 
-	// APIBudgetPerCycle caps the total OpenWebNinja requests (search pages +
-	// details calls) one collection cycle may spend, so a month of cycles
-	// fits the API plan's quota. Search gets APIBudgetPerCycle -
-	// DetailsPerCycle; details keeps its own cap.
+	// APIBudgetPerCycle is the FLEET-WIDE cap on OpenWebNinja requests (search
+	// pages + details calls, retries included) per budget window — see
+	// CronSchedule — so a month of windows fits the API plan's quota. It is
+	// not a per-instance allowance: every instance draws from one ledger in
+	// PostgreSQL, and adding a box adds no budget. Search gets
+	// APIBudgetPerCycle - DetailsPerCycle; details keeps its own cap. The
+	// ledger enforces whatever limit the caller passes, so the effective
+	// fleet limit is the largest value any instance is running with: it must
+	// be identical on every box. (The name predates the fleet, when a window
+	// was one collection cycle.)
 	APIBudgetPerCycle int
+
+	// QueueHighWater is the discovery loop's backpressure: while at least
+	// this many listings are claimable in listing_queue, no further ZIP is
+	// searched, so paid search results do not pile up faster than the fleet
+	// can render them. <= 0 disables backpressure.
+	QueueHighWater int
 
 	// Bunny CDN storage
 	BunnyStorageZone string
@@ -121,7 +163,8 @@ type LinearConfig struct {
 // (see docs/superpowers/specs/2026-08-26-viewer-tracking-design.md).
 type ViewerConfig struct {
 	Enabled bool
-	// Salt is mixed into every viewer hash. Required when tracking is on;
+	// Salt is mixed into every viewer hash. Required when tracking is on and
+	// the role serves the API (a worker hashes nobody and loads without it);
 	// changing it re-identifies everyone.
 	Salt string
 	// RotateDaily also mixes in the UTC date, so ids cannot be linked
@@ -150,15 +193,112 @@ type SearchCriteria struct {
 	MinPrice    int
 	MaxPrice    int
 	MinBedrooms int
-	MaxResults  int
-	MaxPages    int // per-search page cap set by the scheduler; 0 = client hard cap
+	// MaxResults truncates one ZIP's search; 0 (the default) is unlimited.
+	// The default used to be 50, but a ZIP is stamped searched whether or not
+	// its results were cut short, so a worker provisioned without the
+	// override would silently drop the rest of every dense ZIP until the
+	// rotation came round again. Spend is bounded by the fleet budget ledger
+	// instead.
+	MaxResults int
+	MaxPages   int // per-search page cap set by the scheduler; 0 = client hard cap
+}
+
+// Role is what one instance of the binary does. The fleet is about ten
+// workers around a single API box, all running the same image.
+type Role string
+
+const (
+	// RoleAll runs the worker loops and the public API in one process: the
+	// single-instance deployment, and the default so that an existing box
+	// needs no new configuration.
+	RoleAll Role = "all"
+	// RoleAPI serves HTTP only.
+	RoleAPI Role = "api"
+	// RoleWorker runs the worker loops and serves nothing but /healthz.
+	RoleWorker Role = "worker"
+)
+
+// RunsWorkers reports whether this role runs the discovery, media and details
+// loops. The zero Role, like any value Load would have rejected, runs nothing.
+func (r Role) RunsWorkers() bool { return r == RoleAll || r == RoleWorker }
+
+// ServesAPI reports whether this role mounts the public HTTP routes. The zero
+// Role, like any value Load would have rejected, serves nothing.
+func (r Role) ServesAPI() bool { return r == RoleAll || r == RoleAPI }
+
+// parseRole reads ROLE. Blank means unset; anything else has to be one of the
+// three roles. There is deliberately no fallback: ROLE=workers quietly
+// becoming "all" would put a second scheduler-plus-public-API on a box that
+// was provisioned as a worker.
+func parseRole(raw string) (Role, error) {
+	switch r := Role(strings.ToLower(strings.TrimSpace(raw))); r {
+	case "":
+		return RoleAll, nil
+	case RoleAll, RoleAPI, RoleWorker:
+		return r, nil
+	default:
+		return "", fmt.Errorf("ROLE must be one of %s, %s, %s, got %q", RoleAll, RoleAPI, RoleWorker, raw)
+	}
+}
+
+// Pool sizing, mirroring internal/db (config imports no internal package).
+const (
+	defaultDBMaxConns = 10
+	minDBMaxConns     = 4
+)
+
+// unknownInstanceID stands in when neither INSTANCE_ID nor the hostname is
+// usable; see Config.InstanceID for why that is safe.
+const unknownInstanceID = "unknown"
+
+// osHostname is os.Hostname, replaceable in tests.
+var osHostname = os.Hostname
+
+// instanceID resolves INSTANCE_ID, defaulting to the hostname. It never fails
+// and never returns "": attribution is a convenience, not worth refusing to
+// boot over — which is also why an awkward value is cleaned rather than
+// rejected.
+func instanceID() string {
+	if id := cleanInstanceID(getenv("INSTANCE_ID", "")); id != "" {
+		return id
+	}
+	if host, err := osHostname(); err == nil {
+		if host = cleanInstanceID(host); host != "" {
+			return host
+		}
+	}
+	return unknownInstanceID
+}
+
+// cleanInstanceID trims s and replaces '/' and control characters with '-'.
+// The claim owner is InstanceID + "/" + nonce and the runbook reads the
+// instance back with split_part(claimed_by, '/', 1): a slash inside the id
+// would file "hel1/worker-01" and "hel1/worker-02" under one instance named
+// "hel1". Control characters go because the id is printed in every log line.
+// Replacing rather than dropping keeps "a/b" and "ab" apart.
+func cleanInstanceID(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '/' || unicode.IsControl(r) {
+			return '-'
+		}
+		return r
+	}, strings.TrimSpace(s))
 }
 
 // Load reads configuration from the environment, applying defaults and
 // validating required values.
 func Load() (*Config, error) {
+	// First, because which variables are required depends on it.
+	role, err := parseRole(os.Getenv("ROLE"))
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
+		Role:              role,
+		InstanceID:        instanceID(),
 		DatabaseURL:       getenv("DATABASE_URL", ""),
+		DBMaxConns:        getenvInt("DB_MAX_CONNS", defaultDBMaxConns),
 		CronSchedule:      getenv("CRON_SCHEDULE", "0 */12 * * *"), // every 12 hours
 		ZillowBaseURL:     getenv("ZILLOW_BASE_URL", "https://api.openwebninja.com/realtime-zillow-data"),
 		ZillowAPIKey:      getenv("ZILLOW_API_KEY", ""),
@@ -167,6 +307,7 @@ func Load() (*Config, error) {
 		SkipExisting:      getenvBool("SKIP_EXISTING", true),
 		DetailsPerCycle:   getenvInt("DETAILS_PER_CYCLE", 50),
 		APIBudgetPerCycle: getenvInt("API_BUDGET_PER_CYCLE", 150),
+		QueueHighWater:    getenvInt("QUEUE_HIGH_WATER", 2000),
 		BunnyStorageZone:  getenv("BUNNY_STORAGE_ZONE", ""),
 		BunnyAPIKey:       getenv("BUNNY_API_KEY", ""),
 		BunnyStorageHost:  getenv("BUNNY_STORAGE_HOST", "storage.bunnycdn.com"),
@@ -176,7 +317,7 @@ func Load() (*Config, error) {
 			MinPrice:    getenvInt("SEARCH_MIN_PRICE", 0),
 			MaxPrice:    getenvInt("SEARCH_MAX_PRICE", 0),
 			MinBedrooms: getenvInt("SEARCH_MIN_BEDROOMS", 0),
-			MaxResults:  getenvInt("SEARCH_MAX_RESULTS", 50),
+			MaxResults:  getenvInt("SEARCH_MAX_RESULTS", 0),
 		},
 		Video: VideoConfig{
 			Enabled:         getenvBool("VIDEO_ENABLED", true),
@@ -217,6 +358,12 @@ func Load() (*Config, error) {
 	if c.Concurrency.Images < 1 {
 		c.Concurrency.Images = 1
 	}
+	switch {
+	case c.DBMaxConns <= 0:
+		c.DBMaxConns = defaultDBMaxConns
+	case c.DBMaxConns < minDBMaxConns:
+		c.DBMaxConns = minDBMaxConns
+	}
 
 	var missing []string
 	if c.DatabaseURL == "" {
@@ -241,7 +388,10 @@ func Load() (*Config, error) {
 			missing = append(missing, "BUNNY_CDN_BASE_URL")
 		}
 	}
-	if c.Linear.Enabled && c.Viewer.Enabled && c.Viewer.Salt == "" {
+	// Only a process that serves the API hashes viewers. A worker still reads
+	// LINEAR_ENABLED (it segments HLS), so without the role check every worker
+	// box would need a copy of the secret it never uses.
+	if c.Role.ServesAPI() && c.Linear.Enabled && c.Viewer.Enabled && c.Viewer.Salt == "" {
 		missing = append(missing, "VIEWER_SALT (or VIEWER_TRACKING_ENABLED=false)")
 	}
 	if len(missing) > 0 {
@@ -273,20 +423,22 @@ func getenv(key, def string) string {
 	return def
 }
 
+// getenvBool and getenvInt fall back to def when the value does not parse.
+// They trim first because strconv does not: ROLE and INSTANCE_ID are trimmed,
+// so a CRLF env file (or a quoted "0 ") boots fine, and without the trim
+// every number and flag in it would silently be its default instead —
+// QUEUE_HIGH_WATER="0\r" leaving backpressure on, API_BUDGET_PER_CYCLE="0\r"
+// spending 150 requests a window.
 func getenvBool(key string, def bool) bool {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
+	if b, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key))); err == nil {
+		return b
 	}
 	return def
 }
 
 func getenvInt(key string, def int) int {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil {
+		return n
 	}
 	return def
 }
