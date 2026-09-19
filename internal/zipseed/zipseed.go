@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/dwellingtw/backend/internal/db"
 )
 
 //go:embed zips.csv
@@ -47,29 +49,40 @@ func parseRows() ([]row, error) {
 // Seed inserts the embedded ZIP set into zip_codes when the table is empty.
 // It returns the number of rows inserted (0 when the table was already
 // seeded, so rotation state survives redeploys).
+//
+// The emptiness check and the COPY share one transaction under an advisory
+// lock: instances booting together against an empty table would otherwise all
+// pass the check, and all but one would die on the primary key.
 func Seed(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM zip_codes`).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count zip_codes: %w", err)
-	}
-	if n > 0 {
-		return 0, nil
-	}
-	rows, err := parseRows()
+	var inserted int64
+	err := db.WithXactLock(ctx, pool, db.LockSeed, func(tx pgx.Tx) error {
+		var seeded bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM zip_codes)`).Scan(&seeded); err != nil {
+			return fmt.Errorf("check zip_codes: %w", err)
+		}
+		if seeded {
+			return nil
+		}
+		rows, err := parseRows()
+		if err != nil {
+			return err
+		}
+		src := make([][]any, len(rows))
+		for i, r := range rows {
+			src[i] = []any{r.Zip, r.City, r.State, r.County, r.Population}
+		}
+		inserted, err = tx.CopyFrom(ctx,
+			pgx.Identifier{"zip_codes"},
+			[]string{"zip", "city", "state", "county", "population"},
+			pgx.CopyFromRows(src),
+		)
+		if err != nil {
+			return fmt.Errorf("copy zip_codes: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, err
-	}
-	src := make([][]any, len(rows))
-	for i, r := range rows {
-		src[i] = []any{r.Zip, r.City, r.State, r.County, r.Population}
-	}
-	inserted, err := pool.CopyFrom(ctx,
-		pgx.Identifier{"zip_codes"},
-		[]string{"zip", "city", "state", "county", "population"},
-		pgx.CopyFromRows(src),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("copy zip_codes: %w", err)
 	}
 	return int(inserted), nil
 }

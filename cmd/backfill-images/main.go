@@ -25,6 +25,10 @@ import (
 	"github.com/dwellingtw/backend/internal/imaging"
 )
 
+// toolMaxConns keeps a maintenance run small next to the fleet's pools: they
+// all share one PostgreSQL and its max_connections.
+const toolMaxConns = 4
+
 func main() {
 	dryRun := flag.Bool("dry-run", false, "report without uploading or updating")
 	flag.Parse()
@@ -36,7 +40,7 @@ func main() {
 }
 
 func run(ctx context.Context, dryRun bool) error {
-	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"))
+	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"), toolMaxConns)
 	if err != nil {
 		return err
 	}

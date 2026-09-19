@@ -140,3 +140,55 @@ CREATE TABLE IF NOT EXISTS viewer_last_channel (
     channel_key TEXT NOT NULL,
     seen_at     TIMESTAMPTZ NOT NULL
 );
+
+-- Multi-instance workers (see
+-- docs/superpowers/specs/2026-09-19-multi-instance-workers-design.md).
+-- schema_meta: the hash of this file as last applied, so Migrate can skip the
+-- whole script (and its table locks) on a routine restart.
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- ZIP claims: a ZIP is claimable when claimed_until is NULL or in the past.
+-- A kept lease doubles as the retry backoff of a failed or deferred ZIP.
+-- resume_page is where a search cut short (budget, error) continues, so pages
+-- already paid for are not bought again.
+ALTER TABLE zip_codes ADD COLUMN IF NOT EXISTS claimed_by    TEXT;
+ALTER TABLE zip_codes ADD COLUMN IF NOT EXISTS claimed_until TIMESTAMPTZ;
+ALTER TABLE zip_codes ADD COLUMN IF NOT EXISTS failures      INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE zip_codes ADD COLUMN IF NOT EXISTS resume_page   INTEGER NOT NULL DEFAULT 0;
+
+-- listing_queue: discovered listings waiting for the media pipeline. A row is
+-- deleted when its listing is done; the properties row is the record. The 3
+-- below is workqueue.MaxAttempts: a row that has used them all is dead and
+-- stays for inspection until re-discovery or backfill-videos revives it.
+CREATE TABLE IF NOT EXISTS listing_queue (
+    zpid          TEXT PRIMARY KEY,
+    payload       JSONB NOT NULL,
+    source_zip    TEXT NOT NULL DEFAULT '',
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    available_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    claimed_by    TEXT,
+    claimed_until TIMESTAMPTZ,
+    last_error    TEXT,
+    enqueued_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_listing_queue_claimable
+    ON listing_queue (available_at) WHERE attempts < 3;
+
+-- api_budget: provider requests spent per budget window, fleet-wide. One
+-- request is reserved immediately before every paid HTTP attempt.
+CREATE TABLE IF NOT EXISTS api_budget (
+    window_start TIMESTAMPTZ NOT NULL,
+    kind         TEXT NOT NULL,
+    spent        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (window_start, kind)
+);
+
+-- Details claims. The 5 below is property.MaxDetailsAttempts; rows that have
+-- used them all drop out of the index and are never claimed again.
+ALTER TABLE properties ADD COLUMN IF NOT EXISTS details_claimed_until TIMESTAMPTZ;
+ALTER TABLE properties ADD COLUMN IF NOT EXISTS details_attempts      INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_properties_details_todo
+    ON properties (created_at) WHERE details_fetched_at IS NULL AND details_attempts < 5;

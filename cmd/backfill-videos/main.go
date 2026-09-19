@@ -37,6 +37,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// toolMaxConns keeps a maintenance run small next to the fleet's pools: they
+// all share one PostgreSQL and its max_connections.
+const toolMaxConns = 4
+
 func main() {
 	dryRun := flag.Bool("dry-run", false, "report without rendering, uploading, or updating")
 	limit := flag.Int("limit", 0, "process at most this many properties (0 = all)")
@@ -49,7 +53,7 @@ func main() {
 }
 
 func run(ctx context.Context, dryRun bool, limit int) error {
-	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"))
+	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"), toolMaxConns)
 	if err != nil {
 		return err
 	}
