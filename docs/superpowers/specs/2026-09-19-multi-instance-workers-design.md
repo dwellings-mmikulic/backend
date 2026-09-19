@@ -236,9 +236,11 @@ a deploy cannot abandon healthy rows.
 - `SetVideoFailed`: `… AND video_status IS DISTINCT FROM 'ready'` — a failed
   re-render no longer takes a working video off the feed.
 - `SetDetails`: `… AND details_fetched_at IS NULL`.
-- Zillow: a 200 whose envelope `status` is present, is not `OK`, **and** whose
-  data is empty is a retryable error rather than "not found"/"no listings".
-  An `OK` envelope with empty data keeps today's meaning.
+- Zillow: a 200 whose envelope `status` is present, is not `OK`, **and** which
+  carries no usable payload (empty data, or an error object instead of a
+  record / listing array) is a transient error rather than "not found"/"no
+  listings". An `OK` or absent status with empty data keeps today's meaning,
+  and a real payload is kept whatever the status says.
 
 ### 3.7 Startup
 
@@ -276,9 +278,13 @@ see §3.2 step 7 for the ZIP. `Scheduler.Stop` waits for all loops.
 ### 3.10 Hardening
 
 - Bunny `Upload`: up to 3 attempts on network errors, 429 and 5xx (1 s / 4 s
-  backoff) when the body is an `io.Seeker`. The body is wrapped in
-  `io.NopCloser` so the transport cannot close the caller's file, and
-  `Seek(0)` precedes every attempt. Non-seekable bodies get one attempt.
+  backoff) when the body is an `io.Seeker`. The body is wrapped in a
+  no-op-`Close` reader so the transport cannot close the caller's file, and it
+  is **detached when the attempt ends**: net/http reads the body on its own
+  goroutine and can still be reading after `Do` returns (an early 5xx), which
+  would race the `Seek(0)` of the next attempt and store a truncated object.
+  `Content-Length` is set, so a short body is an error, never a silent
+  truncation. Non-seekable bodies get one attempt.
 - Zillow: up to 3 attempts on network errors, 429 and 5xx, honouring
   `Retry-After` (capped at 60 s); every attempt asks the permit first.
   `SearchPages` returns the pages already fetched together with an error.
@@ -396,6 +402,8 @@ type NewItem struct { ZPID string; Payload []byte; SourceZip string }
 type Item struct { ZPID string; Payload []byte; Attempts int; Token time.Time }
 type Stats struct { Claimable, Claimed, Backoff, Dead int }
 var ErrLeaseLost = errors.New(...)
+var ErrUnstorable = errors.New(...)   // Enqueue: some items were refused by PostgreSQL (e.g. a NUL in a provider
+                                      // string); every storable item WAS enqueued and n is valid. Callers log and carry on.
 func (r *Repository) Enqueue(ctx, items []NewItem) (enqueued int, err error)
 func (r *Repository) Claim(ctx, owner string, limit int, lease time.Duration) ([]Item, error)
 func (r *Repository) Complete(ctx, it Item, owner string) error
@@ -437,7 +445,9 @@ Config.Role, Config.InstanceID, Config.DBMaxConns, Config.QueueHighWater
 func (r Role) RunsWorkers() bool; func (r Role) ServesAPI() bool
 
 // internal/scheduler
-func New(cfg, zillow, bunny, repo, zips, queue, ledger, windows, render, owner, log) *Scheduler
+type Deps struct { Zillow; Bunny; Repo; Zips; Queue; Ledger; Windows; Render }   // consumer-side interfaces
+func New(cfg *config.Config, d Deps, owner string, log *slog.Logger) *Scheduler
+func EncodeListing(p *property.Property, revisit bool) ([]byte, error)             // the queue payload; used by cmd/backfill-videos
 func (s *Scheduler) Start(ctx) error; func (s *Scheduler) Stop(); func (s *Scheduler) Healthy() bool
 func (s *Scheduler) RunOnce(ctx) // one synchronous pass: discover until it would wait, drain the queue, details until it would wait — the tests' entry point
 ```
