@@ -12,9 +12,15 @@ import (
 //
 // It can be started once. A second Start would double every loop under the
 // same owner, which the claims would survive but the concurrency limit not.
+// A Start after Stop is refused too: Stop can only cancel a context Start has
+// already made, so loops launched after it would run on until the caller's own
+// context ended — past the shutdown that Stop reported as finished.
 func (s *Scheduler) Start(ctx context.Context) error {
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
+	if s.stopped {
+		return errors.New("scheduler: stopped")
+	}
 	if s.started {
 		return errors.New("scheduler: already started")
 	}
@@ -45,6 +51,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 // for them forever.
 func (s *Scheduler) Stop() {
 	s.lifecycle.Lock()
+	s.stopped = true
 	cancel := s.cancel
 	s.lifecycle.Unlock()
 

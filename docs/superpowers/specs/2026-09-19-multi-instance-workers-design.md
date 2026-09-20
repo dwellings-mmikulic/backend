@@ -92,6 +92,13 @@ never claim the same row.
 - Claims return `claimed_until`; it is the per-claim **fencing token**. Every
   completion is guarded by `claimed_by = $owner AND claimed_until = $token`;
   zero rows affected is logged as a lost lease and changes nothing.
+- The claim statement itself runs **detached from the loop's context** (the
+  same `WithoutCancel` + timeout as a transition), and the claim is handed
+  straight back when the process turned out to be shutting down. A SIGTERM
+  inside a claim's round trip otherwise makes the client abandon a statement
+  PostgreSQL goes on to commit: the row ends up claimed by an owner that never
+  learned it holds it, hidden until the lease runs out, with no release path
+  able to fire.
 - Every post-work transition (enqueue, mark, defer, fail, complete, release)
   runs under `context.WithoutCancel(ctx)` with a 15 s timeout — the lease
   margin exists to cover it — so deadlines and SIGTERM never lose bookkeeping.
@@ -201,13 +208,18 @@ context error during segmentation is returned.
 
 Payloads may carry `revisit: true` (set by the `backfill-videos` enqueuer):
 `processListing` then takes the video-only revisit path regardless of
-`SKIP_EXISTING`. A worker with video disabled releases such items with a
+`SKIP_EXISTING`, after re-checking that the listing still wants a video (it
+may have been rendered since it was enqueued, and the revisit path never loads
+the stored status, so the render's own "unchanged" check cannot catch it). A worker with video disabled releases such items with a
 10 min delay instead of completing them.
 
 Circuit breaker: 5 consecutive infrastructure failures open it for
 `min(1 min · 2^k, 15 min)`. After the pause — **and at boot** — it is
 half-open: exactly one item is claimed; success closes it (full concurrency),
-failure re-opens it. A failure recorded while open/half-open refunds the
+failure re-opens it. The probe carries an id that is never reused, so only its
+own outcome ends it: a straggler claimed before the breaker opened is still
+refunded when it fails, but it neither re-opens the breaker nor frees the
+probe's place next to the item still running. A failure recorded while open/half-open refunds the
 attempt (backoff only), so a broken or crash-looping box cannot dead-letter
 healthy items. Only `ROLE=worker` ties `/healthz` to the breaker (503 while
 open); `all`/`api` stay pure liveness.
@@ -225,7 +237,14 @@ Runs concurrently with the other two, behind the same quota gate. Per batch:
 - permit denied → release the unfetched rows, wait for the next window
 - 429 / 5xx / network / context error → stop the batch, release the current
   and unfetched rows, back the loop off like §3.2; **no attempt is counted**
-- row-specific failure (decode error, 4xx other than 429, store error) →
+- account-level rejection (401, 402, 403: a revoked key, a lapsed or
+  suspended plan) → the provider is refusing the account, not the row, and
+  every row would get the same answer: release this row and the rest,
+  invalidate the quota gate, back off. **No attempt counted** — otherwise a
+  bad key spends the window's whole details budget in seconds and burns an
+  attempt on that many healthy rows, abandoning them for good after about
+  five windows
+- row-specific failure (decode error, any other 4xx, store error) →
   `details_attempts + 1`, lease kept as backoff; abandoned at 5 attempts
 
 `details_attempts` is never incremented at claim time, so a provider outage or

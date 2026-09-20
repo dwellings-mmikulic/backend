@@ -40,7 +40,13 @@ func (s *Scheduler) detailsStep(ctx context.Context) time.Duration {
 		return s.untilNextWindow()
 	}
 
-	zpids, err := s.repo.ClaimMissingDetails(ctx, detailsBatch, detailsLease)
+	// The claim runs detached from ctx: a SIGTERM landing inside its round trip
+	// would otherwise abandon a statement PostgreSQL goes on to commit,
+	// leaving rows claimed by an owner that never learned it holds them —
+	// hidden until the lease runs out, with no release path able to fire.
+	cctx, ccancel := s.bookkeeping(ctx)
+	zpids, err := s.repo.ClaimMissingDetails(cctx, detailsBatch, detailsLease)
+	ccancel()
 	if err != nil {
 		if ctx.Err() != nil {
 			return 0
@@ -50,6 +56,12 @@ func (s *Scheduler) detailsStep(ctx context.Context) time.Duration {
 	}
 	if len(zpids) == 0 {
 		return noDetailsWait
+	}
+	if ctx.Err() != nil {
+		// Shutdown during the claim: the rows go back untouched, no attempt
+		// counted against any of them.
+		s.releaseDetails(ctx, zpids)
+		return 0
 	}
 
 	// The batch works under a deadline shorter than its lease.
@@ -101,6 +113,20 @@ batch:
 		case errors.Is(err, zillow.ErrBudgetExhausted):
 			s.releaseDetails(ctx, zpids[i:])
 			wait = s.untilNextWindow()
+			break batch
+
+		case isAccountRejected(err):
+			// The provider refused the account, not the row: a revoked key, a
+			// lapsed or suspended plan. Every row would get the same answer,
+			// so counting it against this one is wrong twice over — it would
+			// spend the window's whole details budget in seconds and burn one
+			// of five attempts on that many healthy rows, and after about
+			// five windows of a bad key they are abandoned for good. An
+			// abandoned row is never enriched.
+			s.log.Error("details fetch rejected for the account, batch released", "zpid", zpid, "error", err)
+			s.invalidateGate()
+			s.releaseDetails(ctx, zpids[i:])
+			wait = s.detailsFailed()
 			break batch
 
 		case zillow.IsTransient(err):

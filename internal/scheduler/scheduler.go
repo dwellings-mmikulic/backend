@@ -232,9 +232,11 @@ type Scheduler struct {
 	// wg tracks every goroutine Start launches, item goroutines included.
 	wg sync.WaitGroup
 
-	// lifecycle guards started and cancel, so Stop can race Start safely.
+	// lifecycle guards started, stopped and cancel, so Stop can race Start
+	// safely: whichever wins, the loops are either never launched or ended.
 	lifecycle sync.Mutex
 	started   bool
+	stopped   bool
 	cancel    context.CancelFunc
 }
 

@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -195,6 +199,99 @@ func TestMedia_PanicInTheRendererFailsTheItemAndTheProcessSurvives(t *testing.T)
 	}
 }
 
+// processListingSafely's recover only covers the item's own goroutine, but
+// the pipeline starts goroutines of its own: the photo downloads run
+// imaging.Normalize (the x/image webp/tiff/bmp decoders) and the photo uploads
+// run the CDN client inside errgroup closures, and errgroup does not pass a
+// panic on to Wait. So "an image the decoder chokes on" used to kill the whole
+// worker, leaving every other listing in flight claimed for its 65 min lease
+// with an attempt already spent. Run in a child process, because the failure
+// mode is the process dying.
+func TestMedia_PanicInAPhotoGoroutineFailsTheItemAndTheProcessSurvives(t *testing.T) {
+	const childEnv = "SCHED_PHOTO_PANIC_CHILD"
+	if side := os.Getenv(childEnv); side != "" {
+		img := jpegServer(t)
+		h := newHarness(t, serialConfig())
+		h.closeBreaker()
+		switch side {
+		case "download":
+			h.s.http = &http.Client{Transport: panicRoundTripper{}}
+		case "upload":
+			h.bunny.onUpload = func(string) { panic("bug in a photo goroutine") }
+		default:
+			t.Fatalf("unknown side %q", side)
+		}
+		h.queue.put(t, listing("ZP1", img.URL+"/a.jpg"), false)
+
+		h.s.drainQueue(context.Background())
+
+		fails := h.queue.historyOf("fail")
+		if len(fails) != 1 || fails[0].zpid != "ZP1" {
+			t.Fatalf("want the item failed once, got %+v", h.queue.history())
+		}
+		recs := h.logs.find("panicked, photo dropped")
+		if len(recs) != 1 || recs[0].level != slog.LevelError {
+			t.Fatalf("want one Error about the panicking photo, got %+v", recs)
+		}
+		if stack, _ := recs[0].attrs["stack"].(string); !strings.Contains(stack, "goroutine") {
+			t.Errorf("the panic log should carry the stack, got %q", stack)
+		}
+		return
+	}
+	for _, side := range []string{"download", "upload"} {
+		t.Run(side, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0],
+				"-test.run=^TestMedia_PanicInAPhotoGoroutineFailsTheItemAndTheProcessSurvives$", "-test.count=1")
+			cmd.Env = append(os.Environ(), childEnv+"="+side)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				if len(out) > 1500 {
+					out = out[:1500]
+				}
+				t.Fatalf("the whole process died of one listing's panic (%v):\n%s", err, out)
+			}
+		})
+	}
+}
+
+// panicRoundTripper stands in for a photo the image decoder chokes on: the
+// panic happens on the download goroutine, where no caller's recover reaches.
+type panicRoundTripper struct{}
+
+func (panicRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	panic("bug in a photo goroutine")
+}
+
+// hls.Upload runs the segment uploads in errgroup goroutines inside another
+// package, so the recover has to travel with the uploader. A panicking segment
+// upload is a failed segmentation: the VOD render still goes ready.
+func TestMedia_PanicInASegmentUploadIsAnErrorNotACrash(t *testing.T) {
+	img := jpegServer(t)
+	h := newHarness(t, serialConfig())
+	h.closeBreaker()
+	rec := h.enableHLS(&fakeSegmenter{})
+	h.bunny.onUpload = func(p string) {
+		if strings.HasPrefix(p, "hls/") {
+			panic("bug in a segment upload")
+		}
+	}
+	h.queue.put(t, listing("ZP1", img.URL+"/a.jpg"), false)
+
+	h.s.drainQueue(context.Background())
+
+	if got := zpidsOf(h.queue.historyOf("complete")); !reflect.DeepEqual(got, []string{"ZP1"}) {
+		t.Fatalf("completed = %v, want [ZP1]: a segment that will not upload is not a failed render", got)
+	}
+	if got := h.store.ready(); !reflect.DeepEqual(got, []string{"ZP1"}) {
+		t.Errorf("ready = %v, want [ZP1]", got)
+	}
+	if n := rec.count(); n != 0 {
+		t.Errorf("recorded %d clips, want none", n)
+	}
+	if recs := h.logs.find("upload panicked"); len(recs) == 0 {
+		t.Error("want the panicking segment upload logged")
+	}
+}
+
 func TestMedia_UndecodablePayloadIsParkedUntilItDies(t *testing.T) {
 	h := newHarness(t, serialConfig())
 	h.queue.putRaw(t, "JUNK", []byte(`{"zpid": 12}`))
@@ -214,7 +311,7 @@ func TestMedia_UndecodablePayloadIsParkedUntilItDies(t *testing.T) {
 		t.Errorf("want one Error about the payload, got %+v", recs)
 	}
 	// It says nothing about the box: the boot probe is still to be done.
-	if n, _ := h.s.breaker.allow(4); n != 1 {
+	if n, _, _ := h.s.breaker.allow(4); n != 1 {
 		t.Errorf("breaker allowance = %d, want 1: still half-open, and the probe slot is free again", n)
 	}
 }
@@ -240,7 +337,7 @@ func TestMedia_NoSourcePhotosCompletesWithoutTouchingTheBreaker(t *testing.T) {
 	if got := h.s.breaker.stateName(); got != "half-open" {
 		t.Errorf("breaker = %s, want it untouched (half-open)", got)
 	}
-	if n, _ := h.s.breaker.allow(4); n != 1 {
+	if n, _, _ := h.s.breaker.allow(4); n != 1 {
 		t.Errorf("breaker allowance = %d, want 1: the probe slot must be free again", n)
 	}
 }
@@ -335,6 +432,7 @@ func TestMedia_RevisitPayload(t *testing.T) {
 	t.Run("takes the video-only path even with SKIP_EXISTING off", func(t *testing.T) {
 		img := jpegServer(t)
 		h := newHarness(t, serialConfig())
+		h.store.needsVideo = map[string]bool{"ZP1": true} // stored, still without a video
 		h.queue.put(t, listing("ZP1", img.URL+"/a.jpg"), true)
 
 		h.s.drainQueue(context.Background())
@@ -367,13 +465,42 @@ func TestMedia_RevisitPayload(t *testing.T) {
 		if got := h.s.breaker.stateName(); got != "half-open" {
 			t.Errorf("breaker = %s, want it untouched", got)
 		}
-		if n, _ := h.s.breaker.allow(4); n != 1 {
+		if n, _, _ := h.s.breaker.allow(4); n != 1 {
 			t.Errorf("breaker allowance = %d, want 1: the probe slot must be free again", n)
 		}
 		if h.s.failed.Load() != 0 {
 			t.Error("not a failure")
 		}
 	})
+}
+
+// Spec 3.1, for the queue's Fail. TestMedia_ShutdownReleasesTheItem covers the
+// shutdown a listing notices; this is the one it does not — SIGTERM landing
+// between the verdict and the write. Without the detached context the Fail is
+// lost and the item stays claimed by a process that is gone, hidden for the
+// whole 65 min lease with an attempt already spent.
+func TestMedia_FailedListingIsRecordedOnACancelledContext(t *testing.T) {
+	h := newHarness(t, serialConfig())
+	h.queue.put(t, listing("ZP1"), false)
+	items, err := h.queue.Claim(context.Background(), testOwner, 1, listingLease)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("claim = (%+v, %v), want one item", items, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	h.s.failItem(ctx, items[0], errRender, listingRetryFirst, false)
+
+	fails := h.queue.historyOf("fail")
+	if len(fails) != 1 || fails[0].zpid != "ZP1" || fails[0].retryAfter != listingRetryFirst {
+		t.Fatalf("fail transitions = %+v, want ZP1 failed with a %s backoff", fails, listingRetryFirst)
+	}
+	if !strings.Contains(fails[0].msg, errRender.Error()) {
+		t.Errorf("fail message = %q, want the cause kept", fails[0].msg)
+	}
+	if recs := h.logs.find("fail listing failed"); len(recs) != 0 {
+		t.Errorf("the transition was lost: %+v", recs)
+	}
 }
 
 func TestMedia_LostLeaseOnCompleteIsAWarning(t *testing.T) {
@@ -553,12 +680,12 @@ func TestMedia_FiveConsecutiveFailuresOpenTheBreaker(t *testing.T) {
 func TestDispatch_OpenBreakerWaitsOutThePauseWithoutClaiming(t *testing.T) {
 	h := newHarness(t, baseConfig())
 	h.queue.put(t, listing("ZP1"), false)
-	h.s.breaker.allow(4)
-	h.s.breaker.failure() // open for 1m
+	_, probe, _ := h.s.breaker.allow(4)
+	h.s.breaker.failure(probe) // open for 1m
 	h.clock.advance(20 * time.Second)
 	slots := make(chan struct{}, 4)
 
-	wait := h.s.dispatch(context.Background(), slots, func(workqueue.Item) { t.Error("item dispatched") })
+	wait := h.s.dispatch(context.Background(), slots, func(workqueue.Item, probeID) { t.Error("item dispatched") })
 
 	if wait != 40*time.Second {
 		t.Errorf("wait = %s, want the 40s left of the pause", wait)
@@ -568,6 +695,114 @@ func TestDispatch_OpenBreakerWaitsOutThePauseWithoutClaiming(t *testing.T) {
 	}
 	if len(slots) != 0 {
 		t.Errorf("%d slots still held", len(slots))
+	}
+}
+
+// A straggler is an item claimed while the breaker was still closed that is
+// still running after it opened and half-opened again. Its outcome is not the
+// probe's: reporting inconclusive (a skip, a photo-less listing, a shutdown
+// release, an undecodable payload) must not free the probe's place, or the
+// next dispatch hands out a second probe next to the one still rendering —
+// against spec 3.4's "half-open: exactly one item is claimed".
+func TestDispatch_StragglerOutcomeDoesNotFreeTheHalfOpenProbe(t *testing.T) {
+	img := jpegServer(t)
+	cfg := baseConfig() // 4 slots
+	cfg.SkipExisting = true
+	h := newHarness(t, cfg)
+	h.store.existing = map[string]bool{"S": true} // stored, video ready: skipped
+	h.closeBreaker()
+
+	var existsCalls atomic.Int64
+	sEntered := make(chan struct{})
+	releaseS := make(chan struct{})
+	h.store.onExists = func(ctx context.Context) {
+		if existsCalls.Add(1) == 1 { // the straggler only
+			close(sEntered)
+			<-releaseS
+		}
+	}
+	entered := make(chan string, 4)
+	h.render.setHook(func(ctx context.Context, p *property.Property) error {
+		entered <- p.ZPID
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	defer func() { cancel(); wg.Wait() }()
+	slots := make(chan struct{}, 4)
+	run := func(it workqueue.Item, probe probeID) { h.s.launch(ctx, &wg, slots, it, probe, nil) }
+
+	// 1. The straggler is claimed while closed and hangs in its DB lookup.
+	h.queue.put(t, listing("S", img.URL+"/a.jpg"), false)
+	h.s.dispatch(ctx, slots, run)
+	recv(t, sEntered, "the straggler to start")
+
+	// 2. Five failures elsewhere open the breaker; the pause elapses.
+	for i := 0; i < breakerThreshold; i++ {
+		h.s.breaker.failure(0)
+	}
+	h.clock.advance(breakerBasePause)
+
+	// 3. Half-open: one probe.
+	h.queue.put(t, listing("P1", img.URL+"/a.jpg"), false)
+	h.queue.put(t, listing("P2", img.URL+"/a.jpg"), false)
+	h.s.dispatch(ctx, slots, run)
+	if got := recv(t, entered, "the probe's render"); got != "P1" {
+		t.Fatalf("probe = %s, want P1", got)
+	}
+
+	// 4. The straggler finishes as a skip -> inconclusive, under its own id.
+	close(releaseS)
+	deadline := time.Now().Add(failAfter)
+	for len(h.queue.historyOf("complete")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("straggler never completed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// 5. Still half-open, P1 still out: the dispatcher must not claim again.
+	if st := h.s.breaker.stateName(); st != "half-open" {
+		t.Fatalf("breaker = %s, want half-open", st)
+	}
+	h.s.dispatch(ctx, slots, run)
+	select {
+	case z := <-entered:
+		t.Errorf("second half-open probe %s dispatched while the first (P1) is still in flight; claim limits %v", z, h.queue.limits())
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The same rule for a straggler that fails: it is refunded like any other
+// failure on a suspect box, but it is not the probe's verdict, so it neither
+// re-opens the breaker nor frees the probe's place.
+func TestBreaker_StragglerFailureWhileHalfOpenIsNotTheProbesVerdict(t *testing.T) {
+	clock := newFakeClock()
+	b := newTestBreaker(clock)
+	b.failure(takeProbe(t, b, 4)) // the boot probe fails: open for 1m
+	clock.advance(breakerBasePause)
+	probe := takeProbe(t, b, 4) // half-open again, one probe out
+
+	if refund := b.failure(0); !refund {
+		t.Error("a straggler failing on a suspect box must get its attempt back")
+	}
+	if got := b.stateName(); got != "half-open" {
+		t.Errorf("state = %q, want half-open: a straggler must not re-open the breaker", got)
+	}
+	if n, p, _ := b.allow(4); n != 0 || p != 0 {
+		t.Errorf("allow(4) = (%d, %d), want no second probe while the first is out", n, p)
+	}
+	// Only the probe's own verdict counts, and it still can be given.
+	if refund := b.failure(probe); !refund {
+		t.Error("the probe's own failure must refund the attempt")
+	}
+	if b.healthy() {
+		t.Error("the probe's failure must re-open the breaker")
+	}
+	if _, _, wait := b.allow(4); wait != 2*breakerBasePause {
+		t.Errorf("pause = %s, want %s: only the probe's failure counts as an opening", wait, 2*breakerBasePause)
 	}
 }
 
@@ -585,7 +820,7 @@ func TestDispatch_NothingClaimedHandsEverythingBack(t *testing.T) {
 			h.queue.claimErr = tt.claimErr
 			slots := make(chan struct{}, 4)
 
-			wait := h.s.dispatch(context.Background(), slots, func(workqueue.Item) { t.Error("item dispatched") })
+			wait := h.s.dispatch(context.Background(), slots, func(workqueue.Item, probeID) { t.Error("item dispatched") })
 
 			if wait != queuePoll {
 				t.Errorf("wait = %s, want %s", wait, queuePoll)
@@ -594,7 +829,7 @@ func TestDispatch_NothingClaimedHandsEverythingBack(t *testing.T) {
 				t.Errorf("%d slots still held, want all handed back", len(slots))
 			}
 			// The probe that found nothing to work on must not block the next.
-			if n, _ := h.s.breaker.allow(4); n != 1 {
+			if n, _, _ := h.s.breaker.allow(4); n != 1 {
 				t.Errorf("breaker allowance = %d, want 1", n)
 			}
 			if tt.claimErr != nil {
@@ -616,7 +851,7 @@ func TestDispatch_ClaimsOnlyTheFreeSlots(t *testing.T) {
 	slots <- struct{}{} // one listing is still rendering
 	var got []string
 
-	wait := h.s.dispatch(context.Background(), slots, func(it workqueue.Item) { got = append(got, it.ZPID) })
+	wait := h.s.dispatch(context.Background(), slots, func(it workqueue.Item, _ probeID) { got = append(got, it.ZPID) })
 
 	if wait != 0 {
 		t.Errorf("wait = %s, want 0 after a claim", wait)
@@ -638,7 +873,7 @@ func TestDispatch_FewerItemsThanSlotsReturnsTheRest(t *testing.T) {
 	h.queue.put(t, listing("ZP0"), false)
 	slots := make(chan struct{}, 4)
 
-	h.s.dispatch(context.Background(), slots, func(workqueue.Item) {})
+	h.s.dispatch(context.Background(), slots, func(workqueue.Item, probeID) {})
 
 	if len(slots) != 1 {
 		t.Errorf("slots held = %d, want 1: unused slots go back", len(slots))
@@ -652,7 +887,7 @@ func TestDispatch_CancelledWhileWaitingForASlot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	h.s.dispatch(ctx, slots, func(workqueue.Item) { t.Error("item dispatched") })
+	h.s.dispatch(ctx, slots, func(workqueue.Item, probeID) { t.Error("item dispatched") })
 
 	if len(h.queue.limits()) != 0 {
 		t.Error("Claim called after the context was cancelled")

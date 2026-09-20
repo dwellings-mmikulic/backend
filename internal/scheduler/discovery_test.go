@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -423,6 +424,16 @@ func TestDiscover_SearchErrorKeepsPartialResultsAndFailsTheZip(t *testing.T) {
 	if recs := h.logs.find("search failed"); len(recs) != 1 || recs[0].level != slog.LevelError {
 		t.Errorf("want one Error about the failed search, got %+v", recs)
 	}
+	// The listings from the pages that were paid for are still reported: they
+	// are what the money bought, and "properties discovered" is the line the
+	// runbook counts a pass by.
+	recs := h.logs.find("properties discovered")
+	if len(recs) != 1 {
+		t.Fatalf("want one line about the partial result, got %+v", recs)
+	}
+	if recs[0].attrs["count"] != int64(2) || recs[0].attrs["enqueued"] != int64(2) {
+		t.Errorf("properties discovered = %v, want count=2 enqueued=2", recs[0].attrs)
+	}
 
 	// This replaces the old in-memory "tried" map: the failed ZIP is hidden,
 	// so the rest of the budget goes to the ZIPs behind it, not to retries.
@@ -637,6 +648,27 @@ func TestDiscover_EnqueueFilter(t *testing.T) {
 	}
 }
 
+// PostgreSQL refuses a NUL in text, so every zpid is stripped before it is
+// used. The skip-existing lookup has to ask about the stripped one: asking
+// about the raw one would make VideoStates fail, which counts as a failed
+// enqueue and fails the whole ZIP — five times over, until the ZIP is pushed
+// to the back of the rotation and its listings are lost for a pass.
+func TestDiscover_EnqueueFilterAsksAboutStrippedZPIDs(t *testing.T) {
+	cfg := leanConfig(10, 0)
+	cfg.SkipExisting = true
+	h := newHarness(t, cfg, "33950")
+	h.zillow.pages = map[string][][]property.Property{"33950": {{listing("ZP\x001")}}}
+
+	h.discoverUntilWait(t, context.Background())
+
+	if got := h.store.videoStatesAsked(); !reflect.DeepEqual(got, []string{"ZP1"}) {
+		t.Errorf("VideoStates asked about %q, want [ZP1]: the NUL must be gone before the query", got)
+	}
+	if got := h.queue.queued(); !reflect.DeepEqual(got, []string{"ZP1"}) {
+		t.Errorf("queued %v, want [ZP1]", got)
+	}
+}
+
 func TestDiscover_EnqueueFailure(t *testing.T) {
 	dbDown := errors.New("db down")
 
@@ -779,6 +811,81 @@ func TestDiscover_Shutdown(t *testing.T) {
 			t.Errorf("marked = %v, want 11111 with 1 listing", got)
 		}
 	})
+}
+
+// Spec 3.1: every post-work transition runs on a context detached from the
+// work's, with a short timeout of its own — a SIGTERM must never lose one.
+// The shutdown-during-a-search cases are above; these are the three the ZIP
+// can end in when the context dies between the search returning and the
+// transition being written. A lost one leaves the ZIP claimed by a process
+// that is gone, hidden until its 15 min lease runs out — and for the deferred
+// case, the pages already paid for would be bought again.
+func TestDiscover_ZipTransitionsOutliveACancelledContext(t *testing.T) {
+	t.Run("failed enqueue: the zip is failed with its original resume page", func(t *testing.T) {
+		h := newHarness(t, leanConfig(10, 0), "11111")
+		h.zips.setResume("11111", 2)
+		h.zillow.pages = map[string][][]property.Property{"11111": {props("a"), props("b")}}
+		dbDown := errors.New("db down")
+		h.queue.enqueueErrs = []error{dbDown, dbDown}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		h.zillow.afterSearch = func(string) { cancel() }
+
+		h.s.discoverStep(ctx)
+
+		want := []zipTransition{{kind: "fail", zip: "11111", until: h.nextWindow(), resumePage: 2}}
+		if got := h.zips.history(); !reflect.DeepEqual(got, want) {
+			t.Errorf("zip transitions = %+v\nwant %+v", got, want)
+		}
+		assertNoLostTransition(t, h)
+	})
+
+	t.Run("budget ran out mid-zip: the zip is deferred to the next window", func(t *testing.T) {
+		h := newHarness(t, leanConfig(2, 0), "11111") // two requests, three pages
+		h.zillow.pages = map[string][][]property.Property{"11111": {props("a"), props("b"), props("c")}}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		h.zillow.afterDenial = func(string, int) { cancel() }
+
+		h.s.discoverStep(ctx)
+
+		want := []zipTransition{{kind: "defer", zip: "11111", until: h.nextWindow(), resumePage: 3}}
+		if got := h.zips.history(); !reflect.DeepEqual(got, want) {
+			t.Errorf("zip transitions = %+v\nwant %+v: without the defer the two paid pages are bought again", got, want)
+		}
+		if got := h.queue.queued(); !reflect.DeepEqual(got, []string{"a", "b"}) {
+			t.Errorf("queued %v, want the two pages that were paid for", got)
+		}
+		assertNoLostTransition(t, h)
+	})
+
+	t.Run("denied before the first request: the zip is released", func(t *testing.T) {
+		h := newHarness(t, leanConfig(10, 0), "11111")
+		h.ledger.reserveErr = errors.New("ledger unreachable")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		h.zillow.afterDenial = func(string, int) { cancel() }
+
+		h.s.discoverStep(ctx)
+
+		want := []zipTransition{{kind: "release", zip: "11111"}}
+		if got := h.zips.history(); !reflect.DeepEqual(got, want) {
+			t.Errorf("zip transitions = %+v\nwant %+v", got, want)
+		}
+		assertNoLostTransition(t, h)
+	})
+}
+
+// assertNoLostTransition fails when the scheduler logged that a claim
+// transition could not be recorded. transitionFailed spells those "<what>
+// failed", which is what makes them recognisable.
+func assertNoLostTransition(t *testing.T, h *harness) {
+	t.Helper()
+	for _, r := range h.logs.find("") {
+		if r.level == slog.LevelError && strings.HasSuffix(r.msg, " failed") {
+			t.Errorf("a claim transition was lost: %s %v", r.msg, r.attrs)
+		}
+	}
 }
 
 func TestDiscover_LostLeaseIsAWarningNotAnError(t *testing.T) {

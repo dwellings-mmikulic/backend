@@ -196,11 +196,14 @@ func TestStartStop_RunsAllLoopsAndLeavesNoGoroutineBehind(t *testing.T) {
 	h := newHarness(t, cfg) // no ZIPs: discovery idles
 	sleeps := h.parkSleeps()
 
-	// One item that is being worked on when the shutdown comes.
+	// One item that is being worked on when the shutdown comes, and that takes
+	// a moment to give up: Stop must wait for it, not merely for the loops.
 	blocked := make(chan struct{})
+	finish := make(chan struct{})
 	h.store.onExists = func(ctx context.Context) {
 		close(blocked)
 		<-ctx.Done()
+		<-finish
 	}
 	h.queue.put(t, listing("ZP1", "https://photos.example/a.jpg"), false)
 
@@ -233,6 +236,15 @@ func TestStartStop_RunsAllLoopsAndLeavesNoGoroutineBehind(t *testing.T) {
 		defer close(stopped)
 		h.s.Stop()
 	}()
+	// The item goroutine is still winding down. Stop tracks it, so it cannot
+	// have returned: a Stop that returns here reports a shutdown that is not
+	// over, and the claims of everything in flight are left to their leases.
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a listing was still in flight: the item goroutines are not tracked")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finish)
 	recv(t, stopped, "Stop to return")
 
 	// Stop waited for the item goroutine too: its release is on record.
@@ -281,6 +293,122 @@ func TestStop_BeforeStartReturnsAtOnce(t *testing.T) {
 		h.s.Stop()
 	}()
 	recv(t, stopped, "Stop to return")
+}
+
+// Stop can only cancel a context Start has already made. Loops launched after
+// Stop returned would therefore never be ended by it, and would go on claiming
+// (and a Stop that lost the race could sit in wg.Wait on them). main is not
+// exposed to this — it always Starts, waits for the signal, then Stops — but
+// the lifecycle must hold for any caller.
+func TestStart_AfterStopIsRefusedAndLaunchesNothing(t *testing.T) {
+	cfg := baseConfig()
+	cfg.DetailsPerCycle = 0
+	h := newHarness(t, cfg, "11111")
+	h.queue.put(t, listing("ZP1", "https://photos.example/a.jpg"), false)
+
+	h.s.Stop()
+	if err := h.s.Start(context.Background()); err == nil {
+		t.Fatal("Start after Stop must be refused: Stop cannot end loops it never made")
+	}
+
+	// Give anything that was started a chance to reach the database.
+	time.Sleep(20 * time.Millisecond)
+	if n := len(h.queue.limits()); n != 0 {
+		t.Errorf("the media loop claimed %d time(s) after Stop", n)
+	}
+	if n := h.zips.claimCount(); n != 0 {
+		t.Errorf("discovery claimed %d ZIP(s) after Stop", n)
+	}
+	h.s.Stop() // still idempotent, and still returns
+}
+
+// Spec 3.1: "The work done under a claim runs under a context deadline shorter
+// than the lease." That is what lets a live worker never work on an expired
+// claim, and what makes renewal unnecessary. The margin — lease minus deadline
+// — is what the bookkeeping recorded after the work runs in, so it has to be
+// longer than the bookkeeping timeout.
+func TestClaims_EveryLeaseOutlastsItsWorkDeadlineAndTheBookkeeping(t *testing.T) {
+	for _, c := range []struct {
+		what            string
+		deadline, lease time.Duration
+	}{
+		{"zip", zipDeadline, zipLease},
+		{"listing", listingDeadline, listingLease},
+		{"details", detailsDeadline, detailsLease},
+	} {
+		if c.lease <= c.deadline+bookkeepingTimeout {
+			t.Errorf("%s: lease %s leaves no room for %s of work plus %s of bookkeeping: a worker could still be holding the claim after it expired",
+				c.what, c.lease, c.deadline, bookkeepingTimeout)
+		}
+	}
+}
+
+// And the constants have to be the ones actually used: the lease every claim
+// is taken with, and a deadline on the context the paid or expensive work runs
+// under. Without the deadline a stuck ffmpeg or a hung HTTP call would keep
+// working on a claim the fleet has already given to somebody else.
+func TestClaims_WorkRunsUnderTheDeadlineAndTheClaimTakesTheLease(t *testing.T) {
+	t.Run("zip", func(t *testing.T) {
+		h := newHarness(t, leanConfig(10, 0), "11111")
+		start := time.Now()
+
+		h.s.discoverStep(context.Background())
+
+		if got := h.zips.leases(); !reflect.DeepEqual(got, []time.Duration{zipLease}) {
+			t.Errorf("zip claim leases = %v, want [%s]", got, zipLease)
+		}
+		dl, ok := h.zillow.workDeadline("search")
+		assertWorkDeadline(t, "the ZIP search", dl, ok, start, zipDeadline)
+	})
+
+	t.Run("listing", func(t *testing.T) {
+		img := jpegServer(t)
+		h := newHarness(t, serialConfig())
+		start := time.Now()
+		var renderDL time.Time
+		var renderOK bool
+		h.render.setHook(func(ctx context.Context, _ *property.Property) error {
+			renderDL, renderOK = ctx.Deadline()
+			return nil
+		})
+		h.queue.put(t, listing("ZP1", img.URL+"/a.jpg"), false)
+
+		h.s.drainQueue(context.Background())
+
+		if got := h.queue.leases(); len(got) == 0 || got[0] != listingLease {
+			t.Errorf("listing claim leases = %v, want them taken with %s", got, listingLease)
+		}
+		assertWorkDeadline(t, "the listing pipeline", renderDL, renderOK, start, listingDeadline)
+	})
+
+	t.Run("details", func(t *testing.T) {
+		h := detailsHarness(t, 10, "Z1")
+		start := time.Now()
+
+		h.s.detailsStep(context.Background())
+
+		if got := h.store.detailsLeases(); !reflect.DeepEqual(got, []time.Duration{detailsLease}) {
+			t.Errorf("details claim leases = %v, want [%s]", got, detailsLease)
+		}
+		dl, ok := h.zillow.workDeadline("details")
+		assertWorkDeadline(t, "the details batch", dl, ok, start, detailsDeadline)
+	})
+}
+
+// assertWorkDeadline checks that the work ran under a deadline, and that the
+// deadline is the intended one rather than, say, the lease itself.
+func assertWorkDeadline(t *testing.T, what string, dl time.Time, ok bool, start time.Time, want time.Duration) {
+	t.Helper()
+	if !ok {
+		t.Fatalf("%s ran without a deadline: it could still be working after its claim expired", what)
+	}
+	// start is taken just before the step, so the deadline lands a hair later
+	// than now+want. The slack is far smaller than the gap between any
+	// deadline and its lease, which is what this has to tell apart.
+	const slack = 5 * time.Second
+	if got := dl.Sub(start); got < want-slack || got > want+slack {
+		t.Errorf("%s deadline = %s after the step began, want about %s", what, got, want)
+	}
 }
 
 func TestLoop_StepsAgainAtOnceOnZeroAndSleepsOtherwise(t *testing.T) {

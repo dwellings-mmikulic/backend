@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"image"
 	"image/jpeg"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dwellingtw/backend/internal/hls"
 	"github.com/dwellingtw/backend/internal/property"
@@ -65,6 +67,146 @@ func TestUploadPhotos_PreservesOrder(t *testing.T) {
 		if !strings.HasSuffix(u, want) {
 			t.Errorf("url[%d] = %q, want suffix %q (order not preserved)", i, u, want)
 		}
+	}
+}
+
+// The gallery's order is the order the provider gave, and the video's photos
+// follow it. The downloads run concurrently, so each one has to land in its
+// own slot rather than wherever it finished: a listing whose photos come back
+// out of order shows the kitchen first and ends the video on the front door.
+// Each source serves an image of a distinct size, which is what the decoded
+// result is checked against.
+func TestDownloadPhotos_PreservesOrder(t *testing.T) {
+	const n = 8
+	// A later photo is served more slowly, so completion order is the reverse
+	// of source order unless the code places each result by its index.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".jpg"))
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		time.Sleep(time.Duration(n-idx) * time.Millisecond)
+		var buf bytes.Buffer
+		// Width identifies the source: 8, 16, 24 … (JPEG needs a few pixels).
+		if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 8*(idx+1), 8)), nil); err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	var srcs []string
+	for i := 0; i < n; i++ {
+		srcs = append(srcs, srv.URL+"/"+strconv.Itoa(i)+".jpg")
+	}
+	h := newHarness(t, baseConfig())
+
+	local := h.s.downloadPhotos(context.Background(), srcs, t.TempDir())
+
+	if len(local) != n {
+		t.Fatalf("got %d local photos, want %d", len(local), n)
+	}
+	for i, p := range local {
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := jpeg.DecodeConfig(f)
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := 8 * (i + 1); cfg.Width != want {
+			t.Errorf("local[%d] is %dpx wide, i.e. came from source %d, want source %d: the gallery order is the provider's order",
+				i, cfg.Width, cfg.Width/8-1, i)
+		}
+	}
+}
+
+// IMAGE_CONCURRENCY is what keeps one listing from opening a socket per photo
+// against the photo CDN and Bunny at once; a dense listing has dozens, and
+// LISTING_CONCURRENCY of them run side by side on the same box.
+func TestPhotos_ConcurrencyIsBoundedByTheImageLimit(t *testing.T) {
+	const (
+		limit  = 3
+		photos = 9
+	)
+	cfg := baseConfig()
+	cfg.Concurrency.Images = limit
+
+	t.Run("download", func(t *testing.T) {
+		started := make(chan struct{}, photos)
+		release := make(chan struct{})
+		data := jpegBytes(t)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			started <- struct{}{}
+			<-release
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(data)
+		}))
+		defer srv.Close()
+		var srcs []string
+		for i := 0; i < photos; i++ {
+			srcs = append(srcs, srv.URL+"/"+strconv.Itoa(i)+".jpg")
+		}
+		h := newHarness(t, cfg)
+
+		done := make(chan []string, 1)
+		go func() { done <- h.s.downloadPhotos(context.Background(), srcs, t.TempDir()) }()
+
+		assertAtMostInFlight(t, started, limit, "photo downloads")
+		close(release)
+		if got := recv(t, done, "the downloads to finish"); len(got) != photos {
+			t.Errorf("downloaded %d photos, want %d", len(got), photos)
+		}
+	})
+
+	t.Run("upload", func(t *testing.T) {
+		dir := t.TempDir()
+		var local []string
+		for i := 0; i < photos; i++ {
+			p := filepath.Join(dir, strconv.Itoa(i)+".jpg")
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			local = append(local, p)
+		}
+		h := newHarness(t, cfg)
+		started := make(chan struct{}, photos)
+		release := make(chan struct{})
+		h.bunny.onUpload = func(string) {
+			started <- struct{}{}
+			<-release
+		}
+
+		done := make(chan []string, 1)
+		go func() { done <- h.s.uploadPhotos(context.Background(), "ZP1", local) }()
+
+		assertAtMostInFlight(t, started, limit, "photo uploads")
+		close(release)
+		if got := recv(t, done, "the uploads to finish"); len(got) != photos {
+			t.Errorf("uploaded %d photos, want %d", len(got), photos)
+		}
+		if peak := h.bunny.peak.Load(); peak != int64(limit) {
+			t.Errorf("peak concurrent uploads = %d, want %d", peak, limit)
+		}
+	})
+}
+
+// assertAtMostInFlight waits for want tokens (they must arrive: the work is
+// parked) and then checks that no further one does while they are all held.
+func assertAtMostInFlight(t *testing.T, started <-chan struct{}, want int, what string) {
+	t.Helper()
+	for i := 0; i < want; i++ {
+		recv(t, started, what)
+	}
+	select {
+	case <-started:
+		t.Fatalf("more than %d %s ran at once: the IMAGE_CONCURRENCY limit is gone", want, what)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -236,7 +378,8 @@ func TestProcessListing_SkipExisting(t *testing.T) {
 // SKIP_EXISTING says: the tool selected the listing because it is stored.
 func TestProcessListing_RevisitPayloadForcesTheVideoOnlyPath(t *testing.T) {
 	img := jpegServer(t)
-	h := newHarness(t, baseConfig()) // SkipExisting is false
+	h := newHarness(t, baseConfig())                  // SkipExisting is false
+	h.store.needsVideo = map[string]bool{"ZP1": true} // stored, still without a video
 	p := listing("ZP1", img.URL+"/a.jpg")
 
 	skipped, err := h.s.processListing(context.Background(), &p, true)
@@ -251,6 +394,49 @@ func TestProcessListing_RevisitPayloadForcesTheVideoOnlyPath(t *testing.T) {
 	}
 	if got := h.store.ready(); !reflect.DeepEqual(got, []string{"ZP1"}) {
 		t.Errorf("video ready = %v, want [ZP1]", got)
+	}
+}
+
+// Spec 3.2: "The media worker re-checks, as processListing does today", and
+// the branch's goal: no listing rendered twice. A revisit item whose listing
+// has got its video since it was enqueued — its first run rendered it and then
+// lost the Complete (a DB blip inside the bookkeeping timeout, a SIGKILL
+// between SetVideoReady and Complete), so the item is claimed again after its
+// lease — must not be rendered, uploaded and segmented a second time. The
+// revisit path never loads the stored status and hash, so renderVideo's
+// "unchanged, skip" cannot catch this one.
+func TestProcessListing_RevisitOfAnAlreadyReadyListingIsSkipped(t *testing.T) {
+	tests := []struct {
+		name       string
+		needsVideo map[string]bool
+	}{
+		{"video ready since it was enqueued", map[string]bool{"ZP1": false}},
+		{"listing no longer stored at all", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			img := jpegServer(t)
+			cfg := baseConfig()
+			cfg.SkipExisting = true
+			h := newHarness(t, cfg)
+			h.store.needsVideo = tt.needsVideo
+			p := listing("ZP1", img.URL+"/a.jpg")
+
+			skipped, err := h.s.processListing(context.Background(), &p, true)
+
+			if err != nil || !skipped {
+				t.Fatalf("processListing = (%v, %v), want (true, nil): nothing left to do", skipped, err)
+			}
+			if n := h.render.calls.Load(); n != 0 {
+				t.Errorf("rendered %d time(s) a listing that does not need a video", n)
+			}
+			if got := h.bunny.paths(); len(got) != 0 {
+				t.Errorf("uploaded %v, want nothing", got)
+			}
+			if got := h.store.ready(); len(got) != 0 {
+				t.Errorf("SetVideoReady for %v, want none", got)
+			}
+		})
 	}
 }
 
@@ -306,6 +492,7 @@ func TestProcessListing_NoSourcePhotosIsTerminalNotAnError(t *testing.T) {
 			cfg := baseConfig()
 			cfg.ImagesEnabled, cfg.Video.Enabled = tt.images, tt.video
 			h := newHarness(t, cfg)
+			h.store.needsVideo = map[string]bool{"ZP1": true}
 			p := listing("ZP1")
 
 			skipped, err := h.s.processListing(context.Background(), &p, tt.revisit)
@@ -478,6 +665,79 @@ func TestProcessListing_UnchangedReadyVideoIsNotReRendered(t *testing.T) {
 	if h.render.calls.Load() != 0 {
 		t.Error("rendered although the stored video is ready and the content hash unchanged")
 	}
+}
+
+// The skip needs BOTH halves: the stored video is ready AND its content hash
+// still matches. Before this branch SetVideoFailed was unguarded, so rows that
+// carry a matching hash next to a 'failed' or 'pending' status exist in
+// production; on the hash alone they would never be rendered again.
+func TestProcessListing_OnlyAReadyVideoWithAMatchingHashIsSkipped(t *testing.T) {
+	for _, status := range []property.VideoStatus{property.VideoFailed, property.VideoPending} {
+		t.Run(string(status), func(t *testing.T) {
+			img := jpegServer(t)
+			h := newHarness(t, baseConfig())
+			p := listing("ZP1", img.URL+"/a.jpg")
+
+			stored := p
+			stored.ImageURLs = []string{"https://cdn.example/properties/ZP1/0.jpg"}
+			h.store.storedStatus = map[string]property.VideoStatus{"ZP1": status}
+			h.store.storedHash = map[string]string{"ZP1": video.ContentHash(&stored, h.cfg.Video.SecondsPerPhoto)}
+
+			if _, err := h.s.processListing(context.Background(), &p, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := h.render.calls.Load(); got != 1 {
+				t.Errorf("renders = %d, want 1: the hash matches but the stored video is %s, not ready", got, status)
+			}
+			if got := h.store.ready(); !reflect.DeepEqual(got, []string{"ZP1"}) {
+				t.Errorf("video ready = %v, want [ZP1]", got)
+			}
+		})
+	}
+}
+
+// Two error paths the pipeline has to return rather than swallow: an unusable
+// database answer must fail the item so it is retried, not be read as "this
+// listing is fine".
+func TestProcessListing_StoreErrorsAreReturned(t *testing.T) {
+	dbDown := errors.New("db down")
+
+	// Swallowing this would download and re-upload the photos of every stored
+	// listing on every pass, which is what SKIP_EXISTING exists to prevent.
+	t.Run("the existence check fails", func(t *testing.T) {
+		img := jpegServer(t)
+		cfg := baseConfig()
+		cfg.SkipExisting = true
+		h := newHarness(t, cfg)
+		h.store.existsErr = dbDown
+		p := listing("ZP1", img.URL+"/a.jpg")
+
+		_, err := h.s.processListing(context.Background(), &p, false)
+
+		if !errors.Is(err, dbDown) {
+			t.Fatalf("err = %v, want the lookup failure returned", err)
+		}
+		if h.store.upsertCount() != 0 || len(h.bunny.paths()) != 0 {
+			t.Error("nothing may be written when it is not known whether the listing is stored")
+		}
+	})
+
+	// Swallowing this would leave the row 'pending' for ever: NeedsVideo keeps
+	// saying yes, so every pass revisits a listing that has no photos to render.
+	t.Run("marking the photo-less video failed does not stick", func(t *testing.T) {
+		h := newHarness(t, baseConfig())
+		h.store.setFailedErr = dbDown
+		p := listing("BARE")
+
+		_, err := h.s.processListing(context.Background(), &p, false)
+
+		if !errors.Is(err, dbDown) {
+			t.Fatalf("err = %v, want the write failure returned so the item is retried", err)
+		}
+		if h.store.upsertCount() != 1 {
+			t.Error("the listing itself was stored and must stay stored")
+		}
+	})
 }
 
 func TestProcessListing_VideoFailuresAreReturnedAndRecorded(t *testing.T) {
@@ -684,6 +944,38 @@ func TestProcessListing_CancelDuringSegmentationRetriesTheWholeItem(t *testing.T
 				t.Error("no segments should be recorded")
 			}
 		})
+	}
+}
+
+// The same guard, but reached through the listing's work deadline rather than
+// a shutdown. With the context gone the segmentation failure says nothing
+// about the clip, so the item is retried whole: going ready now would strand a
+// listing that no channel can play and nothing ever segments, and marking the
+// video failed would take a good render off the feed over a timeout.
+func TestProcessListing_DeadlineDuringSegmentationRetriesTheWholeItem(t *testing.T) {
+	img := jpegServer(t)
+	h := newHarness(t, baseConfig())
+	ctx, expire := context.WithCancelCause(context.Background())
+	defer expire(nil)
+	rec := h.enableHLS(&fakeSegmenter{hook: func(ctx context.Context) error {
+		expire(errListingDeadline) // what WithTimeoutCause does when the timer fires
+		return ctx.Err()
+	}})
+	p := listing("ZP1", img.URL+"/a.jpg")
+
+	_, err := h.s.processListing(ctx, &p, false)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the context error returned", err)
+	}
+	if got := h.store.ready(); len(got) != 0 {
+		t.Errorf("SetVideoReady called (%v) although segmentation was cut short", got)
+	}
+	if got := h.store.videoFailed(); len(got) != 0 {
+		t.Errorf("SetVideoFailed called (%v): the clip was never judged", got)
+	}
+	if rec.count() != 0 {
+		t.Error("no segments should be recorded")
 	}
 }
 

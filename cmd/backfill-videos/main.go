@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -82,14 +83,77 @@ func run(ctx context.Context, dryRun bool, limit int, statusOnly bool) error {
 	}
 	log.Printf("found %d properties with photos but no ready video", len(zpids))
 
-	repo := property.NewRepository(pool)
-	var offered, enqueued, failed int
+	c, err := enqueueRevisits(ctx, property.NewRepository(pool), queue, zpids, dryRun)
+	if err != nil {
+		return err
+	}
+
+	// Ctrl-C must not read as a crash: what was enqueued before it is real
+	// work, and the tool is idempotent, so a rerun picks up where this left
+	// off. The counts are reported either way, and only then the interruption.
+	verb := "done"
+	if ctx.Err() != nil {
+		verb = "interrupted"
+	}
+	if dryRun {
+		log.Printf("%s (dry run): %d would be offered to the queue, %d failed to load", verb, c.offered, c.failed)
+		return ctx.Err()
+	}
+	// Enqueue leaves rows that are already waiting or being rendered alone;
+	// dead rows are revived and count as enqueued.
+	log.Printf("%s: %d enqueued (new or revived), %d already queued or not storable, %d failed to load or encode",
+		verb, c.enqueued, c.offered-c.enqueued, c.failed)
+	rctx, cancel := reportCtx(ctx)
+	defer cancel()
+	if err := printStatus(rctx, queue); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// listingLoader and revisitQueue are the two things the enqueue pass needs:
+// *property.Repository and *workqueue.Repository.
+type listingLoader interface {
+	GetByZPID(ctx context.Context, zpid string) (*property.Property, error)
+}
+
+type revisitQueue interface {
+	Enqueue(ctx context.Context, items []workqueue.NewItem) (int, error)
+}
+
+// counts is what one enqueue pass came to.
+type counts struct {
+	offered  int // listings handed to the queue (or, in a dry run, that would be)
+	enqueued int // rows the queue created or revived
+	failed   int // listings that could not be loaded or encoded
+}
+
+// reportTimeout bounds the work that still has to happen after an interrupt:
+// the last batch and the closing status query.
+const reportTimeout = 15 * time.Second
+
+// reportCtx is the context for that closing work. While the run is healthy it
+// is the caller's own; once the signal has arrived it is a detached one with a
+// short timeout, because the interrupt is exactly when it matters that the
+// batch already loaded is not thrown away and the operator gets a summary.
+func reportCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), reportTimeout)
+}
+
+// enqueueRevisits loads each listing and enqueues it with revisit: true, in
+// batches. An interrupt ends the pass but not the bookkeeping: the batch in
+// hand is still flushed, and the counts describe what really happened.
+func enqueueRevisits(ctx context.Context, repo listingLoader, queue revisitQueue, zpids []string, dryRun bool) (counts, error) {
+	var c counts
 	batch := make([]workqueue.NewItem, 0, enqueueBatch)
-	flush := func() error {
+	flush := func(fctx context.Context) error {
 		if len(batch) == 0 {
 			return nil
 		}
-		n, err := queue.Enqueue(ctx, batch)
+		n, err := queue.Enqueue(fctx, batch)
 		// ErrUnstorable: everything storable in the batch WAS enqueued and n
 		// is valid; the message names the listings PostgreSQL refused.
 		if errors.Is(err, workqueue.ErrUnstorable) {
@@ -99,8 +163,8 @@ func run(ctx context.Context, dryRun bool, limit int, statusOnly bool) error {
 		if err != nil {
 			return fmt.Errorf("enqueue: %w", err)
 		}
-		offered += len(batch)
-		enqueued += n
+		c.offered += len(batch)
+		c.enqueued += n
 		batch = batch[:0]
 		return nil
 	}
@@ -111,13 +175,16 @@ func run(ctx context.Context, dryRun bool, limit int, statusOnly bool) error {
 		}
 		p, err := repo.GetByZPID(ctx, zpid)
 		if err != nil {
+			if ctx.Err() != nil {
+				break // the interrupt, not this listing
+			}
 			log.Printf("zpid=%s load failed: %v", zpid, err)
-			failed++
+			c.failed++
 			continue
 		}
 		if dryRun {
 			log.Printf("zpid=%s: would enqueue (%d photos)", zpid, len(p.ImageURLs))
-			offered++
+			c.offered++
 			continue
 		}
 		// revisit: render only. The stored row and its CDN photos are left
@@ -125,32 +192,28 @@ func run(ctx context.Context, dryRun bool, limit int, statusOnly bool) error {
 		payload, err := scheduler.EncodeListing(p, true)
 		if err != nil {
 			log.Printf("zpid=%s encode failed: %v", zpid, err)
-			failed++
+			c.failed++
 			continue
 		}
 		batch = append(batch, workqueue.NewItem{ZPID: p.ZPID, Payload: payload, SourceZip: p.Zip})
-		if len(batch) == enqueueBatch {
-			if err := flush(); err != nil {
-				return err
+		if len(batch) < enqueueBatch {
+			continue
+		}
+		if err := flush(ctx); err != nil {
+			if ctx.Err() == nil {
+				return c, err
 			}
+			break // interrupted mid-batch: the retry below has its own context
 		}
 	}
-	if err := flush(); err != nil {
-		return err
+	// The listings in hand are loaded and the queue is idempotent, so the last
+	// batch is worth finishing even when the signal has already arrived.
+	fctx, cancel := reportCtx(ctx)
+	defer cancel()
+	if err := flush(fctx); err != nil {
+		return c, err
 	}
-
-	if dryRun {
-		log.Printf("dry run: %d would be offered to the queue, %d failed to load", offered, failed)
-		return ctx.Err()
-	}
-	// Enqueue leaves rows that are already waiting or being rendered alone;
-	// dead rows are revived and count as enqueued.
-	log.Printf("done: %d enqueued (new or revived), %d already queued or not storable, %d failed to load or encode",
-		enqueued, offered-enqueued, failed)
-	if err := printStatus(ctx, queue); err != nil {
-		return err
-	}
-	return ctx.Err()
+	return c, nil
 }
 
 func printStatus(ctx context.Context, queue *workqueue.Repository) error {

@@ -25,8 +25,8 @@ func (s *Scheduler) listingSlots() int {
 func (s *Scheduler) mediaLoop(ctx context.Context) {
 	slots := make(chan struct{}, s.listingSlots())
 	for ctx.Err() == nil {
-		wait := s.dispatch(ctx, slots, func(it workqueue.Item) {
-			s.launch(ctx, &s.wg, slots, it, nil)
+		wait := s.dispatch(ctx, slots, func(it workqueue.Item, probe probeID) {
+			s.launch(ctx, &s.wg, slots, it, probe, nil)
 		})
 		if wait > 0 {
 			s.sleep(ctx, wait)
@@ -58,9 +58,9 @@ func (s *Scheduler) drainQueue(ctx context.Context) {
 		// decision ("nothing to claim", "a probe is still out") may already
 		// be stale, and must be taken again rather than acted on.
 		seen := finished.Load()
-		wait := s.dispatch(ctx, slots, func(it workqueue.Item) {
+		wait := s.dispatch(ctx, slots, func(it workqueue.Item, probe probeID) {
 			launched++
-			s.launch(ctx, &wg, slots, it, itemDone)
+			s.launch(ctx, &wg, slots, it, probe, itemDone)
 		})
 		if wait == 0 || finished.Load() != seen {
 			continue
@@ -84,7 +84,7 @@ func (s *Scheduler) drainQueue(ctx context.Context) {
 // The first slot is waited for BEFORE the breaker is asked. The other way
 // round, an allowance granted while every slot was busy would still be acted
 // on after those very items had failed and opened the breaker.
-func (s *Scheduler) dispatch(ctx context.Context, slots chan struct{}, run func(workqueue.Item)) time.Duration {
+func (s *Scheduler) dispatch(ctx context.Context, slots chan struct{}, run func(workqueue.Item, probeID)) time.Duration {
 	select {
 	case slots <- struct{}{}:
 	case <-ctx.Done():
@@ -97,7 +97,7 @@ func (s *Scheduler) dispatch(ctx context.Context, slots chan struct{}, run func(
 		}
 	}
 
-	allowed, wait := s.breaker.allow(cap(slots))
+	allowed, probe, wait := s.breaker.allow(cap(slots))
 	if allowed == 0 {
 		handBack(held)
 		if wait <= 0 {
@@ -117,7 +117,15 @@ fill:
 		}
 	}
 
-	items, err := s.queue.Claim(ctx, s.owner, held, listingLease)
+	// The claim runs detached from ctx: a SIGTERM landing inside its round
+	// trip would otherwise abandon a statement PostgreSQL goes on to commit,
+	// leaving items claimed by an owner that never learned it holds them —
+	// hidden for the whole 65 min lease with an attempt already spent, and no
+	// release path able to fire. Detached, the claim always arrives, and the
+	// shutdown check below hands the items straight back.
+	cctx, ccancel := s.bookkeeping(ctx)
+	items, err := s.queue.Claim(cctx, s.owner, held, listingLease)
+	ccancel()
 	if err != nil && ctx.Err() == nil {
 		s.log.Error("claim listings failed", "error", err)
 	}
@@ -128,22 +136,32 @@ fill:
 			"asked", held, "got", len(items))
 		items = items[:held]
 	}
+	if ctx.Err() != nil {
+		// Shutdown during the claim. Release refunds the attempt, so the items
+		// are claimable again at once by a box that is staying up.
+		for _, it := range items {
+			s.releaseItem(ctx, it, 0)
+		}
+		s.breaker.inconclusive(probe)
+		handBack(held)
+		return 0
+	}
 	handBack(held - len(items))
 	if len(items) == 0 {
 		// A probe reserved for an item that does not exist must not block
 		// the next one.
-		s.breaker.inconclusive()
+		s.breaker.inconclusive(probe)
 		return queuePoll
 	}
 	for _, it := range items {
-		run(it)
+		run(it, probe)
 	}
 	return 0
 }
 
 // launch runs one claimed item in its own goroutine, tracked by wg, and gives
 // the item's slot back when it is done. done, when set, runs after that.
-func (s *Scheduler) launch(ctx context.Context, wg *sync.WaitGroup, slots chan struct{}, it workqueue.Item, done func()) {
+func (s *Scheduler) launch(ctx context.Context, wg *sync.WaitGroup, slots chan struct{}, it workqueue.Item, probe probeID, done func()) {
 	wg.Go(func() {
 		defer func() {
 			<-slots
@@ -151,7 +169,7 @@ func (s *Scheduler) launch(ctx context.Context, wg *sync.WaitGroup, slots chan s
 				done()
 			}
 		}()
-		s.processItem(ctx, it)
+		s.processItem(ctx, it, probe)
 	})
 }
 
@@ -159,7 +177,7 @@ func (s *Scheduler) launch(ctx context.Context, wg *sync.WaitGroup, slots chan s
 // for it. ctx is the loop's context: its cancellation means shutdown. The
 // work itself runs under the listing deadline, which is shorter than the
 // lease, so a live worker never works on an expired claim.
-func (s *Scheduler) processItem(ctx context.Context, it workqueue.Item) {
+func (s *Scheduler) processItem(ctx context.Context, it workqueue.Item, probe probeID) {
 	s.inFlight.Add(1)
 	defer s.inFlight.Add(-1)
 
@@ -170,7 +188,7 @@ func (s *Scheduler) processItem(ctx context.Context, it workqueue.Item) {
 		// nothing about this box, so the breaker is not told.
 		s.log.Error("undecodable queue payload", "zpid", it.ZPID, "attempt", it.Attempts, "error", err)
 		s.failed.Add(1)
-		s.breaker.inconclusive()
+		s.breaker.inconclusive(probe)
 		s.failItem(ctx, it, err, poisonRetry, false)
 		return
 	}
@@ -189,9 +207,9 @@ func (s *Scheduler) processItem(ctx context.Context, it workqueue.Item) {
 			// upload: a skip only read the database, and a listing without
 			// photos only wrote to it. Closing the breaker on that would let
 			// a broken box back to full concurrency.
-			s.breaker.inconclusive()
+			s.breaker.inconclusive(probe)
 		} else {
-			s.breaker.success()
+			s.breaker.success(probe)
 		}
 		bctx, cancel := s.bookkeeping(ctx)
 		defer cancel()
@@ -203,21 +221,21 @@ func (s *Scheduler) processItem(ctx context.Context, it workqueue.Item) {
 		// Shutdown. Whatever the error says, it is not a verdict on the item
 		// or on this box: the attempt is refunded and the item is claimable
 		// again at once, by a box that is staying up.
-		s.breaker.inconclusive()
+		s.breaker.inconclusive(probe)
 		s.log.Info("listing released on shutdown", "zpid", it.ZPID)
 		s.releaseItem(ctx, it, 0)
 
 	case errors.Is(err, errVideoDisabledRevisit):
 		// Completing it would lose the backfill request; failing it would
 		// spend its attempts on boxes that can never do it.
-		s.breaker.inconclusive()
+		s.breaker.inconclusive(probe)
 		s.log.Info("revisit item released, this worker renders no video",
 			"zpid", it.ZPID, "retry_in", revisitNoVideoDelay.String())
 		s.releaseItem(ctx, it, revisitNoVideoDelay)
 
 	default:
 		s.failed.Add(1)
-		refund := s.breaker.failure()
+		refund := s.breaker.failure(probe)
 		backoff := listingBackoff(it.Attempts)
 		s.log.Error("listing failed", "zpid", it.ZPID, "attempt", it.Attempts,
 			"retry_in", backoff.String(), "attempt_refunded", refund, "error", err)

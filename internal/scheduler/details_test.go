@@ -202,6 +202,50 @@ func TestDetails_TransientErrorReleasesTheRestAndBacksOff(t *testing.T) {
 	}
 }
 
+// A revoked key, a lapsed plan or a suspended account answers every row the
+// same way. Treating it as the row's own failure would spend the window's
+// whole details budget within seconds and burn one of five attempts on that
+// many healthy rows; after about five windows of a bad key they would be
+// abandoned for good, and an abandoned row is never enriched.
+func TestDetails_AccountRejectionReleasesTheBatchInsteadOfBlamingTheRows(t *testing.T) {
+	for _, code := range []int{401, 402, 403} {
+		t.Run(fmt.Sprintf("status %d", code), func(t *testing.T) {
+			h := detailsHarness(t, 10, "Z1", "Z2", "Z3")
+			h.zillow.setUsage(usageWith("active", 100000), nil)
+			h.zillow.detailsErr = map[string]error{"Z2": &zillow.StatusError{Code: code}}
+			if !h.s.gateOpen(context.Background()) { // prime the cached verdict
+				t.Fatal("gate must start open")
+			}
+
+			wait := h.s.detailsStep(context.Background())
+
+			set, released, failed := h.store.detailsState()
+			if !reflect.DeepEqual(set, []string{"Z1"}) {
+				t.Errorf("SetDetails calls = %v, want [Z1]", set)
+			}
+			if !reflect.DeepEqual(released, [][]string{{"Z2", "Z3"}}) {
+				t.Errorf("released = %v, want [[Z2 Z3]]: the refused row and everything after it", released)
+			}
+			if len(failed) != 0 {
+				t.Errorf("FailDetails = %v: the account is refused, the rows are healthy", failed)
+			}
+			if got := h.zillow.detailsCalled(); !reflect.DeepEqual(got, []string{"Z1", "Z2"}) {
+				t.Errorf("fetched %v, want the batch stopped at Z2", got)
+			}
+			if wait != 5*time.Second {
+				t.Errorf("wait = %s, want the failure pause, not 0: the loop must not spin the budget away", wait)
+			}
+			if recs := h.logs.find("rejected for the account"); len(recs) != 1 || recs[0].level != slog.LevelError {
+				t.Errorf("want one Error naming the account, got %+v", recs)
+			}
+			if !h.s.gate.cached {
+				return // the verdict was dropped, which is what we want
+			}
+			t.Error("the cached quota verdict must be dropped: the provider has changed its mind about this key")
+		})
+	}
+}
+
 func TestDetails_PauseGrowsAndASuccessResetsIt(t *testing.T) {
 	h := detailsHarness(t, 100, "Z1")
 	h.zillow.detailsErr = map[string]error{"Z1": &zillow.StatusError{Code: 502}}
@@ -220,6 +264,46 @@ func TestDetails_PauseGrowsAndASuccessResetsIt(t *testing.T) {
 	}
 	if h.s.detailsFailures != 0 {
 		t.Errorf("consecutive failures = %d, want 0 after a success", h.s.detailsFailures)
+	}
+}
+
+// Spec 3.1, for the details claim. A row whose own failure was decided just as
+// the process was told to stop must still have its attempt recorded: the
+// alternative is a row left claimed by a process that is gone, hidden until
+// its 10 min lease runs out.
+func TestDetails_RowAttemptIsRecordedOnACancelledContext(t *testing.T) {
+	h := detailsHarness(t, 10, "Z1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	h.s.failDetails(ctx, "Z1")
+
+	if _, _, failed := h.store.detailsState(); !reflect.DeepEqual(failed, []string{"Z1"}) {
+		t.Errorf("FailDetails = %v, want [Z1]", failed)
+	}
+	if recs := h.logs.find("count details attempt failed"); len(recs) != 0 {
+		t.Errorf("the attempt was lost: %+v", recs)
+	}
+}
+
+// The details loop's own Spent lookup is advisory: it only saves a claim when
+// the window is already spent. When it fails, the permit — which fails closed
+// and is asked before every paid request — is what keeps the budget. Backing
+// off here instead would idle the loop on a hiccup the permit already covers.
+func TestDetails_BudgetLookupErrorRelieseOnThePermit(t *testing.T) {
+	h := detailsHarness(t, 10, "Z1", "Z2")
+	h.ledger.spentErr = errors.New("db down")
+
+	wait := h.s.detailsStep(context.Background())
+
+	if wait != 0 {
+		t.Errorf("wait = %s, want 0: the permit bounds the spend, so the batch goes ahead", wait)
+	}
+	if set, _, _ := h.store.detailsState(); !reflect.DeepEqual(set, []string{"Z1", "Z2"}) {
+		t.Errorf("SetDetails calls = %v, want [Z1 Z2]", set)
+	}
+	if recs := h.logs.find("details budget lookup failed"); len(recs) != 1 || recs[0].level != slog.LevelWarn {
+		t.Errorf("want one Warn about the failed lookup, got %+v", recs)
 	}
 }
 

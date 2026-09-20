@@ -79,7 +79,11 @@ type quotaGate struct {
 //
 // A failed usage check proceeds (fail-open): a flaky usage endpoint must not
 // halt collection, and the ledger still bounds the spend. That verdict is NOT
-// cached, so the next step asks again.
+// cached, so the next step asks again. Neither is a closed verdict that rests
+// on a ledger read that failed: counting an unreadable ledger as nothing spent
+// makes the gate demand the provider's whole budget, and caching THAT would
+// idle this instance's discovery and details loops for the rest of the window
+// over one failed lookup.
 //
 // The mutex is held across the HTTP call on purpose: when a window opens both
 // loops arrive here together, and the second should wait for the first one's
@@ -100,8 +104,10 @@ func (s *Scheduler) gateOpen(ctx context.Context) bool {
 		}
 		return true
 	}
-	open := s.quotaAllows(ctx, u, window)
-	s.gate.cached, s.gate.window, s.gate.open = true, window, open
+	open, firm := s.quotaAllows(ctx, u, window)
+	if firm {
+		s.gate.cached, s.gate.window, s.gate.open = true, window, open
+	}
 	return open
 }
 
@@ -112,41 +118,50 @@ func (s *Scheduler) gateOpen(ctx context.Context) bool {
 // restart, a 429): by then the fleet has used some of the quota itself, and
 // holding that against the quota again would close the gate for the requests
 // the plan can in fact still serve.
-func (s *Scheduler) quotaAllows(ctx context.Context, u *zillow.Usage, window time.Time) bool {
+// It also reports whether the verdict is firm enough to cache for the rest of
+// the window. Only one verdict is not: a closed one worked out from a ledger
+// read that failed. Counting the unreadable part as nothing spent can only
+// overstate what is unspent, so an open verdict would stay open with the true
+// figures, while a closed one may well be wrong.
+func (s *Scheduler) quotaAllows(ctx context.Context, u *zillow.Usage, window time.Time) (open, firm bool) {
 	if u.Status == "exceeded" {
 		s.log.Warn("zillow quota exhausted, waiting for the next window", "status", u.Status)
-		return false
+		return false, true
 	}
 	for _, q := range u.Quotas {
 		if q.Name != "Requests" {
 			continue
 		}
-		unspent := s.cfg.APIBudgetPerCycle - s.spentThisWindow(ctx, window)
+		spent, ledgerRead := s.spentThisWindow(ctx, window)
+		unspent := s.cfg.APIBudgetPerCycle - spent
 		if q.Remaining < unspent {
 			s.log.Warn("zillow quota below the window's unspent budget, waiting for the next window",
 				"remaining", q.Remaining, "unspent", unspent, "budget", s.cfg.APIBudgetPerCycle)
-			return false
+			return false, ledgerRead
 		}
-		return true
+		return true, true
 	}
 	s.log.Warn("zillow usage report has no Requests quota, proceeding", "status", u.Status)
-	return true
+	return true, true
 }
 
-// spentThisWindow adds up both kinds. An unreadable ledger counts as nothing
-// spent, which is the cautious reading here: it makes the gate demand the
-// whole budget of the provider.
-func (s *Scheduler) spentThisWindow(ctx context.Context, window time.Time) int {
-	total := 0
+// spentThisWindow adds up both kinds and reports whether every lookup
+// answered. An unreadable ledger counts as nothing spent, which is the
+// cautious reading here: it makes the gate demand the whole budget of the
+// provider. The caller needs to know, because a verdict resting on a guess
+// must not be cached for the window.
+func (s *Scheduler) spentThisWindow(ctx context.Context, window time.Time) (total int, read bool) {
+	read = true
 	for _, kind := range []string{budget.KindSearch, budget.KindDetails} {
 		n, err := s.ledger.Spent(ctx, window, kind)
 		if err != nil {
 			s.log.Warn("budget spent lookup failed, counting it as zero", "kind", kind, "error", err)
+			read = false
 			continue
 		}
 		total += n
 	}
-	return total
+	return total, read
 }
 
 // invalidateGate drops the cached verdict. A 429 means the provider disagrees
@@ -156,6 +171,22 @@ func (s *Scheduler) invalidateGate() {
 	s.gate.mu.Lock()
 	defer s.gate.mu.Unlock()
 	s.gate.cached = false
+}
+
+// isAccountRejected reports whether err is the provider refusing the account
+// rather than the request: an unauthorized, payment-required or forbidden
+// answer — a revoked key, a lapsed plan, a suspended account. Every request
+// would get the same answer, so it is never one row's own failure.
+func isAccountRejected(err error) bool {
+	var se *zillow.StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.Code {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return true
+	}
+	return false
 }
 
 // isRateLimited reports whether err carries the provider's 429, however

@@ -64,8 +64,15 @@ func (s *Scheduler) discoverStep(ctx context.Context) time.Duration {
 		return s.untilNextWindow()
 	}
 
-	// 4. One ZIP, exclusively.
-	claim, err := s.zips.Claim(ctx, s.owner, zipLease)
+	// 4. One ZIP, exclusively. The claim itself runs detached from ctx: a
+	// SIGTERM landing inside its round trip would otherwise abandon the
+	// statement that PostgreSQL goes on to commit, leaving the ZIP claimed by
+	// an owner that never learned it holds it — hidden until the lease runs
+	// out, with no release path able to fire. Detached, the claim always
+	// arrives, and a shutdown meanwhile hands it straight back.
+	cctx, ccancel := s.bookkeeping(ctx)
+	claim, err := s.zips.Claim(cctx, s.owner, zipLease)
+	ccancel()
 	if err != nil {
 		if ctx.Err() != nil {
 			return 0
@@ -75,6 +82,12 @@ func (s *Scheduler) discoverStep(ctx context.Context) time.Duration {
 	}
 	if claim == nil {
 		return noZipWait
+	}
+	if ctx.Err() != nil {
+		// Shutdown during the claim. Nothing was searched, so the ZIP goes
+		// back exactly as it was claimed.
+		s.handBackZip(ctx, *claim, 0)
+		return 0
 	}
 
 	// 5. Search it, under a deadline shorter than the lease. MaxPages stays 0:

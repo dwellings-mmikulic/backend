@@ -205,6 +205,42 @@ func TestGate_RemainingIsComparedWithTheUnspentBudget(t *testing.T) {
 	}
 }
 
+// A closed verdict that rests on a ledger read that failed is a guess, not a
+// judgement: counting an unreadable ledger as nothing spent makes the gate
+// demand the provider's whole budget. Caching it would idle this instance's
+// discovery and details loops until the window rolls — up to 12 hours — over
+// one failed lookup, which contradicts the fail-open rule the failed /usage
+// call already follows.
+func TestGate_ClosedVerdictFromAFailedLedgerReadIsNotCached(t *testing.T) {
+	h := newHarness(t, leanConfig(1000, 0))
+	h.zillow.setUsage(usageWith("ok", 500), nil)
+	h.ledger.set(h.windowStart(), budget.KindSearch, 900)
+	h.ledger.spentErr = errors.New("db down")
+	ctx := context.Background()
+
+	if h.s.gateOpen(ctx) {
+		t.Fatal("gate open although 500 remaining is below the 1000 it has to assume is unspent")
+	}
+	if h.s.gate.cached {
+		t.Error("the guessed closed verdict was cached for the whole window")
+	}
+
+	// The ledger answers: 900 of 1000 spent, so 500 remaining is ample.
+	h.ledger.spentErr = nil
+	if !h.s.gateOpen(ctx) {
+		t.Error("gate still closed although the ledger now says only 100 is unspent")
+	}
+	if got := h.zillow.usageCallCount(); got != 2 {
+		t.Errorf("Usage called %d times, want 2: the guess must be re-checked", got)
+	}
+
+	// An open verdict is firm however the ledger behaved: counting a failed
+	// lookup as zero can only overstate the unspent part.
+	if !h.s.gate.cached || !h.s.gate.open {
+		t.Error("the open verdict must be cached")
+	}
+}
+
 func TestGate_NoRequestsQuotaProceedsAndIsCached(t *testing.T) {
 	h := newHarness(t, leanConfig(10, 0))
 	u := &zillow.Usage{Status: "ok"}

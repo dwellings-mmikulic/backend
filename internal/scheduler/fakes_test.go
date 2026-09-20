@@ -185,9 +185,16 @@ type fakeZillow struct {
 	pageErr map[string]map[int]error
 	// beforePage runs before each page's context check, afterSearch just
 	// before a search returns successfully: hooks for shutdown tests.
+	// afterDenial runs just before a permit-denied search returns (NextPage
+	// set, no error), which is where a SIGTERM lands in the budget tests.
 	beforePage  func(location string, page int)
 	afterSearch func(location string)
+	afterDenial func(location string, page int)
 	searches    []searchCall
+	// searchCtx and detailsCtx are the contexts the last search and the last
+	// details fetch ran under: what pins their work deadlines.
+	searchCtx  context.Context
+	detailsCtx context.Context
 
 	detailsErr   map[string]error
 	detailsCalls []string
@@ -206,6 +213,7 @@ type fakeZillow struct {
 func (f *fakeZillow) SearchPages(ctx context.Context, c config.SearchCriteria, startPage int, permit zillow.Permit) (zillow.SearchResult, error) {
 	f.mu.Lock()
 	f.searches = append(f.searches, searchCall{c.Location, startPage, c.MaxPages})
+	f.searchCtx = ctx
 	pages, ok := f.pages[c.Location]
 	if !ok && f.props != nil {
 		pages = [][]property.Property{f.props}
@@ -231,6 +239,12 @@ func (f *fakeZillow) SearchPages(ctx context.Context, c config.SearchCriteria, s
 			if err := ctx.Err(); err != nil {
 				return res, fmt.Errorf("search page %d: %w", page, err)
 			}
+			f.mu.Lock()
+			afterDenial := f.afterDenial
+			f.mu.Unlock()
+			if afterDenial != nil {
+				afterDenial(c.Location, page)
+			}
 			return res, nil
 		}
 		res.Requests++
@@ -252,6 +266,7 @@ func (f *fakeZillow) SearchPages(ctx context.Context, c config.SearchCriteria, s
 func (f *fakeZillow) PropertyDetails(ctx context.Context, zpid string, permit zillow.Permit) (*property.Details, []byte, error) {
 	f.mu.Lock()
 	before := f.beforeDetails
+	f.detailsCtx = ctx
 	f.mu.Unlock()
 	if before != nil {
 		before(zpid)
@@ -326,6 +341,21 @@ func (f *fakeZillow) detailsCalled() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.detailsCalls...)
+}
+
+// workDeadline reports the deadline of the context the last call of that kind
+// ran under ("search" or "details").
+func (f *fakeZillow) workDeadline(kind string) (time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ctx := f.searchCtx
+	if kind == "details" {
+		ctx = f.detailsCtx
+	}
+	if ctx == nil {
+		return time.Time{}, false
+	}
+	return ctx.Deadline()
 }
 
 func (f *fakeZillow) setUsage(u *zillow.Usage, err error) {
@@ -405,7 +435,8 @@ type fakeStore struct {
 	mu     sync.Mutex
 	events *eventLog
 
-	existing map[string]bool
+	existing  map[string]bool
+	existsErr error
 	// onExists runs inside Exists, before its context check; it may block.
 	onExists func(ctx context.Context)
 	// needsVideo is what NeedsVideo / VideoStates report for a stored listing.
@@ -421,14 +452,17 @@ type fakeStore struct {
 	setReadyErr    error
 	afterReady     func() // runs once SetVideoReady has recorded the video
 	failedZPIDs    []string
+	setFailedErr   error
 	videoStatesErr error
 	videoStatesN   int
+	videoStatesGot []string // the zpids of the last VideoStates call
 
 	// missingDetails are the rows ClaimMissingDetails offers, oldest first.
 	missingDetails  []string
 	detailsTaken    map[string]bool // leased, stored or failed: not offered again
 	claimDetailsErr error
 	claimLimits     []int
+	claimLeases     []time.Duration
 	detailsSet      []string // zpids passed to SetDetails, in order
 	detailsGot      map[string]*property.Details
 	setDetailsErr   map[string]error
@@ -448,6 +482,9 @@ func (s *fakeStore) Exists(ctx context.Context, zpid string) (bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.existsErr != nil {
+		return false, s.existsErr
+	}
 	return s.existing[zpid], nil
 }
 
@@ -467,6 +504,7 @@ func (s *fakeStore) VideoStates(ctx context.Context, zpids []string) (map[string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.videoStatesN++
+	s.videoStatesGot = append([]string(nil), zpids...)
 	if s.videoStatesErr != nil {
 		return nil, s.videoStatesErr
 	}
@@ -523,18 +561,22 @@ func (s *fakeStore) SetVideoFailed(ctx context.Context, zpid string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.setFailedErr != nil {
+		return s.setFailedErr
+	}
 	s.failedZPIDs = append(s.failedZPIDs, zpid)
 	s.events.add("video-failed:" + zpid)
 	return nil
 }
 
-func (s *fakeStore) ClaimMissingDetails(ctx context.Context, limit int, _ time.Duration) ([]string, error) {
+func (s *fakeStore) ClaimMissingDetails(ctx context.Context, limit int, lease time.Duration) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.claimLimits = append(s.claimLimits, limit)
+	s.claimLeases = append(s.claimLeases, lease)
 	if s.claimDetailsErr != nil {
 		return nil, s.claimDetailsErr
 	}
@@ -614,6 +656,20 @@ func (s *fakeStore) videoFailed() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.failedZPIDs...)
+}
+
+// videoStatesAsked returns the zpids of the last VideoStates call.
+func (s *fakeStore) videoStatesAsked() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.videoStatesGot...)
+}
+
+// detailsLeases returns the leases the details claims were taken with.
+func (s *fakeStore) detailsLeases() []time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Duration(nil), s.claimLeases...)
 }
 
 func (s *fakeStore) videoStatesCalls() int {
@@ -765,6 +821,7 @@ type fakeZips struct {
 
 	claimErr    error
 	claims      int
+	claimLeases []time.Duration
 	transitions []zipTransition
 }
 
@@ -783,6 +840,7 @@ func (f *fakeZips) Claim(ctx context.Context, _ string, lease time.Duration) (*z
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claims++
+	f.claimLeases = append(f.claimLeases, lease)
 	if f.claimErr != nil {
 		return nil, f.claimErr
 	}
@@ -859,6 +917,13 @@ func (f *fakeZips) claimCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.claims
+}
+
+// leases returns the leases the ZIP claims were taken with.
+func (f *fakeZips) leases() []time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Duration(nil), f.claimLeases...)
 }
 
 func (f *fakeZips) history() []zipTransition {
@@ -947,6 +1012,7 @@ type fakeQueue struct {
 	enqueueCalls int
 	claimErr     error
 	claimLimits  []int
+	claimLeases  []time.Duration
 	depthErr     error
 	depthCalls   int
 	transitions  []queueTransition
@@ -1007,6 +1073,7 @@ func (q *fakeQueue) Claim(ctx context.Context, owner string, limit int, lease ti
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.claimLimits = append(q.claimLimits, limit)
+	q.claimLeases = append(q.claimLeases, lease)
 	if q.claimErr != nil {
 		return nil, q.claimErr
 	}
@@ -1174,6 +1241,13 @@ func (q *fakeQueue) limits() []int {
 }
 
 // queued returns the zpids in the queue (any state), sorted.
+// leases returns the leases the listing claims were taken with.
+func (q *fakeQueue) leases() []time.Duration {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]time.Duration(nil), q.claimLeases...)
+}
+
 func (q *fakeQueue) queued() []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -1363,7 +1437,7 @@ func (h *harness) nextWindow() time.Time {
 
 // closeBreaker puts the breaker in the closed state, for tests that are not
 // about the boot probe.
-func (h *harness) closeBreaker() { h.s.breaker.success() }
+func (h *harness) closeBreaker() { h.s.breaker.success(0) }
 
 func listing(zpid string, imageURLs ...string) property.Property {
 	return property.Property{

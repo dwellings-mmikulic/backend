@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -59,6 +61,22 @@ func (s *Scheduler) processListing(ctx context.Context, p *property.Property, re
 	case revisit:
 		if !videoWanted {
 			return false, errVideoDisabledRevisit
+		}
+		// The media worker re-checks (spec 3.2). cmd/backfill-videos may have
+		// enqueued this hours ago, and the listing may have got its video
+		// since — from another instance, or from this very item's earlier run
+		// whose Complete was lost. The revisit path never loads the stored
+		// status and hash (there is no Upsert), so renderVideo's "unchanged,
+		// skip" cannot catch it: without this the video would be rendered,
+		// uploaded and segmented a second time. A listing that is no longer
+		// stored at all reports the same and is skipped too.
+		needsVideo, err := s.repo.NeedsVideo(ctx, p.ZPID)
+		if err != nil {
+			return false, fmt.Errorf("check listing video: %w", err)
+		}
+		if !needsVideo {
+			s.log.Debug("skipping revisit of a listing that already has its video", "zpid", p.ZPID)
+			return true, nil
 		}
 		revisitForVideo = true
 	case s.cfg.SkipExisting:
@@ -260,7 +278,7 @@ func (s *Scheduler) segmentVideo(ctx context.Context, zpid, hash, mp4Path, workD
 	if err != nil {
 		return fmt.Errorf("segment: %w", err)
 	}
-	base, err := hls.Upload(ctx, s.bunny, dir, hls.Prefix(zpid, hash), clip, s.cfg.Concurrency.Images)
+	base, err := hls.Upload(ctx, safeUploader{s.bunny, s.log}, dir, hls.Prefix(zpid, hash), clip, s.cfg.Concurrency.Images)
 	if err != nil {
 		return fmt.Errorf("upload segments: %w", err)
 	}
@@ -280,6 +298,7 @@ func (s *Scheduler) downloadPhotos(ctx context.Context, srcURLs []string, workDi
 	g.SetLimit(s.cfg.Concurrency.Images)
 	for idx, src := range srcURLs {
 		g.Go(func() error {
+			defer s.dropPhotoOnPanic("image download", src)
 			data, err := s.download(ctx, src)
 			if err != nil {
 				s.log.Warn("image download failed", "src", src, "error", err)
@@ -313,6 +332,7 @@ func (s *Scheduler) uploadPhotos(ctx context.Context, zpid string, localPhotos [
 	g.SetLimit(s.cfg.Concurrency.Images)
 	for idx, lp := range localPhotos {
 		g.Go(func() error {
+			defer s.dropPhotoOnPanic("image upload", lp)
 			f, err := os.Open(lp)
 			if err != nil {
 				s.log.Warn("open local image failed", "path", lp, "error", err)
@@ -331,6 +351,42 @@ func (s *Scheduler) uploadPhotos(ctx context.Context, zpid string, localPhotos [
 	}
 	_ = g.Wait()
 	return compact(results)
+}
+
+// dropPhotoOnPanic recovers a panic raised in one photo's goroutine, logs it
+// with its stack and drops that photo — exactly what happens to a photo that
+// fails for any other reason.
+//
+// processListingSafely's recover only covers the item's own goroutine, and
+// errgroup (x/sync) explicitly does not pass a panic on to Wait. So every
+// goroutine the pipeline starts has to recover for itself, or the image the
+// decoder chokes on kills the process: every other listing in flight is then
+// left claimed for its whole 65 min lease with an attempt already spent, and
+// the box that claims the poison listing next dies the same way.
+func (s *Scheduler) dropPhotoOnPanic(what, src string) {
+	if r := recover(); r != nil {
+		s.log.Error(what+" panicked, photo dropped", "src", src,
+			"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+	}
+}
+
+// safeUploader turns a panic inside an upload into an error. hls.Upload runs
+// the segment uploads in errgroup goroutines of its own, which no recover of
+// ours covers; wrapping the uploader puts the recover on those goroutines.
+type safeUploader struct {
+	up  uploader
+	log *slog.Logger
+}
+
+func (u safeUploader) Upload(ctx context.Context, path string, content io.Reader, contentType string) (url string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			u.log.Error("upload panicked", "path", path,
+				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			url, err = "", fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return u.up.Upload(ctx, path, content, contentType)
 }
 
 // compact drops empty strings while preserving order.
