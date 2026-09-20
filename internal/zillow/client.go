@@ -6,8 +6,8 @@ package zillow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -24,6 +24,11 @@ type Client struct {
 	baseURL string
 	apiKey  string
 	http    *http.Client
+
+	// wait sleeps between retry attempts and gives up early when ctx is
+	// done. It is a field only so tests can assert the back-off without
+	// sleeping through it.
+	wait func(ctx context.Context, d time.Duration) error
 }
 
 // New creates a Zillow API client.
@@ -32,6 +37,7 @@ func New(baseURL, apiKey string, timeout time.Duration) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		http:    &http.Client{Timeout: timeout},
+		wait:    sleepCtx,
 	}
 }
 
@@ -63,32 +69,54 @@ type carousel struct {
 	} `json:"photoData"`
 }
 
-// searchResponse is the OpenWebNinja envelope: {status, request_id, parameters, data:[...]}.
-type searchResponse struct {
-	Status string    `json:"status"`
-	Data   []listing `json:"data"`
+// maxSearchPages is the hard safety cap on pagination.
+const maxSearchPages = 20
+
+// SearchResult is what one SearchPages call fetched, complete or not.
+type SearchResult struct {
+	Properties []property.Property
+	// Requests is the number of HTTP requests actually sent, retries
+	// included. It is reported even alongside an error: a failed request
+	// still counted against the provider's quota.
+	Requests int
+	// NextPage is 0 when the search ran to completion. Otherwise the search
+	// stopped early and NextPage is the first page that was not fetched,
+	// which is where a later call should resume.
+	NextPage int
 }
 
 // SearchPages returns properties matching the configured criteria, paging
-// until MaxResults is reached, the API runs out of results, or the page cap
-// is hit. The returned int is the number of HTTP search requests actually
-// made — the scheduler charges them against its per-cycle API budget — and
-// is reported even when an error is returned (a failed request still counted
-// against the provider's quota). Price and bedroom criteria are applied
-// client-side. s.MaxPages, when > 0, lowers the hard 20-page safety cap.
-func (c *Client) SearchPages(ctx context.Context, s config.SearchCriteria) ([]property.Property, int, error) {
-	maxPages := 20 // hard safety cap on pagination
-	if s.MaxPages > 0 && s.MaxPages < maxPages {
-		maxPages = s.MaxPages
+// from startPage (<= 0 means 1) until MaxResults is reached, the API runs out
+// of results, or the page cap is hit; all three are a complete search
+// (NextPage 0). s.MaxPages, when > 0, lowers the hard 20-page cap; both are
+// absolute page numbers, so a resumed search stops where an uninterrupted one
+// would have. Price and bedroom criteria are applied client-side.
+//
+// The permit is asked before every HTTP attempt. When it denies page p the
+// budget has run out mid-ZIP, which is not a failure: the pages fetched so far
+// come back with NextPage = p and a nil error. Any other failure on page p
+// returns the pages fetched so far TOGETHER with the error and NextPage = p,
+// so nothing already paid for is thrown away or bought again.
+func (c *Client) SearchPages(ctx context.Context, s config.SearchCriteria, startPage int, permit Permit) (SearchResult, error) {
+	lastPage := maxSearchPages
+	if s.MaxPages > 0 && s.MaxPages < lastPage {
+		lastPage = s.MaxPages
+	}
+	if startPage <= 0 {
+		startPage = 1
 	}
 
-	var out []property.Property
-	pages := 0
-	for page := 1; page <= maxPages; page++ {
-		raw, err := c.searchPage(ctx, s, page)
-		pages++
+	var res SearchResult
+	for page := startPage; page <= lastPage; page++ {
+		raw, sent, err := c.searchPage(ctx, s, page, permit)
+		res.Requests += sent
+		if errors.Is(err, ErrBudgetExhausted) {
+			res.NextPage = page
+			return res, nil
+		}
 		if err != nil {
-			return nil, pages, err
+			res.NextPage = page
+			return res, fmt.Errorf("search page %d: %w", page, err)
 		}
 		if len(raw) == 0 {
 			break
@@ -98,13 +126,13 @@ func (c *Client) SearchPages(ctx context.Context, s config.SearchCriteria) ([]pr
 			if !matches(&p, s) {
 				continue
 			}
-			out = append(out, p)
-			if s.MaxResults > 0 && len(out) >= s.MaxResults {
-				return out, pages, nil
+			res.Properties = append(res.Properties, p)
+			if s.MaxResults > 0 && len(res.Properties) >= s.MaxResults {
+				return res, nil
 			}
 		}
 	}
-	return out, pages, nil
+	return res, nil
 }
 
 // Usage reports the account's current quota for this API, queried from the
@@ -140,16 +168,28 @@ func (c *Client) Usage(ctx context.Context) (*Usage, error) {
 	}
 	endpoint := fmt.Sprintf("%s://%s/usage?api_id=%s", base.Scheme, base.Host, url.QueryEscape(apiID))
 
+	// Deliberately outside fetch: the quota probe is not charged to the budget
+	// ledger, so it asks no permit, and the quota gate fails open on any
+	// error, so a retry would buy nothing.
+	req, err := c.newRequest(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	body, _, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
 	var env struct {
 		Data Usage `json:"data"`
 	}
-	if err := c.getJSON(ctx, endpoint, &env); err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("decode zillow response: %w", err)
 	}
 	return &env.Data, nil
 }
 
-func (c *Client) searchPage(ctx context.Context, s config.SearchCriteria, page int) ([]listing, error) {
+// searchPage fetches one page. The int is the number of requests sent for it.
+func (c *Client) searchPage(ctx context.Context, s config.SearchCriteria, page int, permit Permit) ([]listing, int, error) {
 	q := url.Values{}
 	q.Set("location", s.Location)
 	q.Set("page", strconv.Itoa(page))
@@ -158,41 +198,39 @@ func (c *Client) searchPage(ctx context.Context, s config.SearchCriteria, page i
 	}
 	endpoint := fmt.Sprintf("%s/search?%s", c.baseURL, q.Encode())
 
-	var resp searchResponse
-	if err := c.getJSON(ctx, endpoint, &resp); err != nil {
-		return nil, err
+	body, sent, err := c.fetch(ctx, endpoint, permit)
+	if err != nil {
+		return nil, sent, err
 	}
-	return resp.Data, nil
+	listings, err := decodeListings(body)
+	return listings, sent, err
 }
 
-func (c *Client) getJSON(ctx context.Context, endpoint string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+// decodeListings unwraps a search response, whose data is a flat array of
+// listings. No listings (with an OK envelope) is the end of the results.
+//
+// Only what has always meant "no listings" does: an empty array, null, or no
+// data at all. An empty object or string is a shape this client does not
+// know and stays a decode error, because the caller marks the ZIP searched on
+// a clean end of results: a provider that moved its listings elsewhere would
+// otherwise empty every ZIP without a single error in the logs.
+func decodeListings(body []byte) ([]listing, error) {
+	env, err := decodeEnvelope(body)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, err
 	}
-	req.Header.Set("X-API-Key", c.apiKey)
-	req.Header.Set("Accept", "application/json")
-
-	res, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("zillow request: %w", err)
+	if len(env.Data) == 0 {
+		return nil, nil // no "data" key; [] and null need no help from us
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		// Include the API's error body (e.g. "Too Many Requests") so quota vs.
-		// rate-limit vs. auth failures are distinguishable from the logs alone.
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
-		msg := strings.TrimSpace(string(body))
-		if msg == "" {
-			return fmt.Errorf("zillow API returned status %d", res.StatusCode)
+	var listings []listing
+	if err := json.Unmarshal(env.Data, &listings); err != nil {
+		if env.failed() {
+			// Not an array because it is the failure report, not a page.
+			return nil, env.softError(body)
 		}
-		return fmt.Errorf("zillow API returned status %d: %s", res.StatusCode, msg)
+		return nil, fmt.Errorf("decode zillow listings: %w", err)
 	}
-	if err := json.NewDecoder(res.Body).Decode(dst); err != nil {
-		return fmt.Errorf("decode zillow response: %w", err)
-	}
-	return nil
+	return listings, nil
 }
 
 // matches applies the config criteria that the API call itself doesn't enforce.

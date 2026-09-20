@@ -9,6 +9,10 @@ services:
     ports:
       - "127.0.0.1:8080:8080"   # localhost only; nginx proxies public :80
     restart: unless-stopped
+    # With ROLE=all this box renders too: on SIGTERM it kills its ffmpeg
+    # children and hands its claims back. The 10 s default would SIGKILL it
+    # first, and the claims would sit out their leases instead.
+    stop_grace_period: 60s
     logging:
       driver: json-file
       options:

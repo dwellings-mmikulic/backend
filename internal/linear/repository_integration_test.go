@@ -33,7 +33,7 @@ func TestRepository_Integration(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL to run the linear repository integration test")
 	}
 	ctx := context.Background()
-	pool, err := db.Connect(ctx, url)
+	pool, err := db.Connect(ctx, url, 0)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

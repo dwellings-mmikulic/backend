@@ -1,9 +1,6 @@
 package zillow
 
-import (
-	"encoding/json"
-	"testing"
-)
+import "testing"
 
 func TestToProperty(t *testing.T) {
 	l := listing{
@@ -58,12 +55,12 @@ func TestLotToSqft_Acres(t *testing.T) {
 // TestSearchResponseDecode verifies the envelope decodes a real-shaped payload.
 func TestSearchResponseDecode(t *testing.T) {
 	const body = `{"status":"OK","request_id":"x","parameters":{},"data":[{"zpid":"1","price":195000,"streetAddress":"1 Main","city":"Tampa","state":"FL","zipcode":"33601","livingArea":1000,"lotAreaValue":5000,"lotAreaUnit":"sqft","bedrooms":3,"bathrooms":2,"imgSrc":"https://x/t.jpg"}]}`
-	var r searchResponse
-	if err := json.Unmarshal([]byte(body), &r); err != nil {
+	data, err := decodeListings([]byte(body))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Status != "OK" || len(r.Data) != 1 || r.Data[0].ZPID != "1" {
-		t.Errorf("decoded wrong: %+v", r)
+	if len(data) != 1 || data[0].ZPID != "1" {
+		t.Errorf("decoded wrong: %+v", data)
 	}
 }
 
@@ -71,11 +68,11 @@ func TestSearchResponseDecode_EmptyStringNumbers(t *testing.T) {
 	// The provider sometimes sends "" (or null) where a number is expected;
 	// that must not fail the whole ZIP search.
 	const body = `{"status":"OK","data":[{"zpid":"1","price":"","livingArea":null,"lotAreaValue":"","bedrooms":"3","bathrooms":2.5}]}`
-	var r searchResponse
-	if err := json.Unmarshal([]byte(body), &r); err != nil {
+	data, err := decodeListings([]byte(body))
+	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	l := r.Data[0]
+	l := data[0]
 	if toFloat(l.Price) != 0 || toFloat(l.LivingArea) != 0 || toFloat(l.LotAreaValue) != 0 {
 		t.Errorf("empty/null should read as 0: %+v", l)
 	}

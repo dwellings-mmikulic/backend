@@ -1,973 +1,495 @@
 package scheduler
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"image"
-	"image/jpeg"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strconv"
+	"reflect"
+	"runtime"
+	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/dwellingtw/backend/internal/config"
-	"github.com/dwellingtw/backend/internal/hls"
 	"github.com/dwellingtw/backend/internal/property"
-	"github.com/dwellingtw/backend/internal/zillow"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+// --- RunOnce: one synchronous pass through all three loops ---
 
-// jpegBytes returns a real, decodable JPEG image.
-func jpegBytes(t *testing.T) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 4, 4)), nil); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-// jpegServer serves a real JPEG for any path.
-func jpegServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	data := jpegBytes(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		_, _ = w.Write(data)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-// --- fakes ---
-
-type fakeSearch struct {
-	props []property.Property
-	// byLocation, when set, returns per-location props and records each queried
-	// location in order. Takes precedence over props.
-	byLocation map[string][]property.Property
-	queried    []string
-	// maxPages records each call's criteria.MaxPages, in call order — lets
-	// tests assert the per-search page cap tracked the remaining budget.
-	maxPages []int
-	// searchErr, when set for a location, is returned by SearchPages for it.
-	searchErr map[string]error
-	// pagesFor, when set for a location, is the page count SearchPages reports
-	// for it (default 1).
-	pagesFor map[string]int
-	// detailsErr, when set for a zpid, is returned by PropertyDetails.
-	detailsErr map[string]error
-	// usage is returned by Usage; usageErr takes precedence. A nil usage with
-	// nil usageErr returns an "ok" report with ample remaining quota.
-	usage    *zillow.Usage
-	usageErr error
-	// blockSearch, when non-nil, is closed-waited inside SearchPages after
-	// signalling searchEntered — for overlap-guard tests.
-	blockSearch   chan struct{}
-	searchEntered chan struct{}
-	mu            sync.Mutex
-}
-
-func (f *fakeSearch) SearchPages(_ context.Context, c config.SearchCriteria) ([]property.Property, int, error) {
-	if f.searchEntered != nil {
-		f.searchEntered <- struct{}{}
-	}
-	if f.blockSearch != nil {
-		<-f.blockSearch
-	}
-	f.mu.Lock()
-	f.queried = append(f.queried, c.Location)
-	f.maxPages = append(f.maxPages, c.MaxPages)
-	f.mu.Unlock()
-
-	pages := 1
-	if p, ok := f.pagesFor[c.Location]; ok {
-		pages = p
-	}
-	if err := f.searchErr[c.Location]; err != nil {
-		return nil, pages, err
-	}
-	if f.byLocation != nil {
-		return f.byLocation[c.Location], pages, nil
-	}
-	return f.props, pages, nil
-}
-
-func (f *fakeSearch) Usage(_ context.Context) (*zillow.Usage, error) {
-	if f.usageErr != nil {
-		return nil, f.usageErr
-	}
-	if f.usage != nil {
-		return f.usage, nil
-	}
-	u := &zillow.Usage{Status: "ok"}
-	u.Quotas = []zillow.QuotaMetric{{Name: "Requests", Limit: 10000, Used: 0, Remaining: 10000}}
-	return u, nil
-}
-
-func (f *fakeSearch) queriedLocations() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.queried...)
-}
-
-func (f *fakeSearch) maxPagesRecorded() []int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]int(nil), f.maxPages...)
-}
-
-func (f *fakeSearch) PropertyDetails(_ context.Context, zpid string) (*property.Details, []byte, error) {
-	if err := f.detailsErr[zpid]; err != nil {
-		return nil, nil, err
-	}
-	pt := "SINGLE_FAMILY"
-	return &property.Details{PropertyType: &pt}, []byte(`{"status":"OK"}`), nil
-}
-
-// fakeUploader records peak concurrency and echoes the path into the URL so
-// ordering can be asserted.
-type fakeUploader struct {
-	cur, peak atomic.Int64
-
-	mu       sync.Mutex
-	uploaded []string // every path passed to Upload, in completion order
-}
-
-func (u *fakeUploader) Upload(_ context.Context, path string, content io.Reader, _ string) (string, error) {
-	n := u.cur.Add(1)
-	for {
-		p := u.peak.Load()
-		if n <= p || u.peak.CompareAndSwap(p, n) {
-			break
-		}
-	}
-	_, _ = io.Copy(io.Discard, content)
-	u.cur.Add(-1)
-
-	u.mu.Lock()
-	u.uploaded = append(u.uploaded, path)
-	u.mu.Unlock()
-	return "https://cdn.example/" + path, nil
-}
-
-// paths returns a copy of the recorded upload paths.
-func (u *fakeUploader) paths() []string {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return append([]string(nil), u.uploaded...)
-}
-
-type fakeStore struct {
-	upserts, ready, failed atomic.Int64
-	existing               map[string]bool
-	// needsVideo is what NeedsVideo reports for an already-stored listing.
-	needsVideo map[string]bool
-	// missingDetails is what ListZPIDsMissingDetails returns (up to limit).
-	missingDetails []string
-	mu             sync.Mutex
-	detailsSet     []string // zpids passed to SetDetails, in order
-	detailsGot     map[string]*property.Details
-}
-
-func (s *fakeStore) Exists(_ context.Context, zpid string) (bool, error) {
-	return s.existing[zpid], nil
-}
-
-func (s *fakeStore) NeedsVideo(_ context.Context, zpid string) (bool, error) {
-	return s.needsVideo[zpid], nil
-}
-
-func (s *fakeStore) Upsert(_ context.Context, p *property.Property) error {
-	s.upserts.Add(1)
-	p.VideoStatus = property.VideoPending
-	return nil
-}
-func (s *fakeStore) SetVideoReady(context.Context, string, string, string, int) error {
-	s.ready.Add(1)
-	return nil
-}
-func (s *fakeStore) SetVideoFailed(context.Context, string) error {
-	s.failed.Add(1)
-	return nil
-}
-
-func (s *fakeStore) ListZPIDsMissingDetails(_ context.Context, limit int) ([]string, error) {
-	if len(s.missingDetails) > limit {
-		return s.missingDetails[:limit], nil
-	}
-	return s.missingDetails, nil
-}
-
-func (s *fakeStore) SetDetails(_ context.Context, zpid string, d *property.Details, _ []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.detailsSet = append(s.detailsSet, zpid)
-	if s.detailsGot == nil {
-		s.detailsGot = map[string]*property.Details{}
-	}
-	s.detailsGot[zpid] = d
-	return nil
-}
-
-type fakeRenderer struct{ peak, cur atomic.Int64 }
-
-func (r *fakeRenderer) Render(_ context.Context, _ *property.Property, imgs []string, _, outPath string) (int, error) {
-	n := r.cur.Add(1)
-	for {
-		p := r.peak.Load()
-		if n <= p || r.peak.CompareAndSwap(p, n) {
-			break
-		}
-	}
-	defer r.cur.Add(-1)
-	if err := os.WriteFile(outPath, []byte("video"), 0o644); err != nil {
-		return 0, err
-	}
-	return len(imgs) * 2, nil
-}
-
-// fakeZips serves a fixed queue in order, skipping already-marked ZIPs —
-// mirroring the real rotation query, where marking pushes a ZIP to the back.
-type fakeZips struct {
-	mu     sync.Mutex
-	queue  []string
-	marked map[string]int // zip → listing count recorded by MarkSearched
-}
-
-func (f *fakeZips) NextBatch(_ context.Context, limit int) ([]string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for _, z := range f.queue {
-		if _, done := f.marked[z]; done {
-			continue
-		}
-		out = append(out, z)
-		if len(out) == limit {
-			break
-		}
-	}
-	return out, nil
-}
-
-func (f *fakeZips) MarkSearched(_ context.Context, zip string, listingCount int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.marked == nil {
-		f.marked = map[string]int{}
-	}
-	f.marked[zip] = listingCount
-	return nil
-}
-
-func (f *fakeZips) markedZips() map[string]int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := map[string]int{}
-	for k, v := range f.marked {
-		out[k] = v
-	}
-	return out
-}
-
-func baseConfig() *config.Config {
-	return &config.Config{
-		ImagesEnabled:     true,
-		Video:             config.VideoConfig{Enabled: true, SecondsPerPhoto: 2},
-		Concurrency:       config.ConcurrencyConfig{Listings: 4, Images: 4},
-		APIBudgetPerCycle: 1000,
-	}
-}
-
-func TestUploadPhotos_PreservesOrder(t *testing.T) {
-	dir := t.TempDir()
-	var local []string
-	for i := 0; i < 12; i++ {
-		p := dir + "/" + strconv.Itoa(i) + ".jpg"
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		local = append(local, p)
-	}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, zips, &fakeRenderer{}, testLogger())
-
-	urls := s.uploadPhotos(context.Background(), "ZP1", local)
-	if len(urls) != 12 {
-		t.Fatalf("got %d urls, want 12", len(urls))
-	}
-	for i, u := range urls {
-		want := "properties/ZP1/" + strconv.Itoa(i) + ".jpg"
-		if !strings.HasSuffix(u, want) {
-			t.Errorf("url[%d] = %q, want suffix %q (order not preserved)", i, u, want)
-		}
-	}
-}
-
-func TestRunCycle_AllListingsRenderedConcurrently(t *testing.T) {
-	imgSrv := jpegServer(t)
-
-	var props []property.Property
+func TestRunOnce_DiscoversRendersAndEnrichesInOnePass(t *testing.T) {
+	img := jpegServer(t)
+	var found []property.Property
 	for i := 0; i < 8; i++ {
-		props = append(props, property.Property{
-			ZPID:      fmt.Sprintf("ZP%d", i),
-			Address:   "addr",
-			ImageURLs: []string{imgSrv.URL + "/a.jpg", imgSrv.URL + "/b.jpg"},
-			DetailURL: "https://www.zillow.com/x/",
-		})
+		found = append(found, listing(fmt.Sprintf("ZP%d", i), img.URL+"/a.jpg", img.URL+"/b.jpg"))
 	}
+	cfg := baseConfig()
+	cfg.DetailsPerCycle = 5
+	h := newHarness(t, cfg, "33950")
+	h.zillow.pages = map[string][][]property.Property{"33950": {found}}
+	h.store.missingDetails = []string{"ZP0", "ZP1"}
 
-	store := &fakeStore{}
-	render := &fakeRenderer{}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(baseConfig(), &fakeSearch{props: props}, &fakeUploader{}, store, zips, render, testLogger())
+	h.s.RunOnce(context.Background())
 
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
+	if got := h.zips.markedZips(); got["33950"] != 8 {
+		t.Errorf("marked = %v, want 33950 with 8 listings", got)
 	}
-	if got := store.ready.Load(); got != 8 {
-		t.Errorf("video ready = %d, want 8", got)
+	if got := len(h.store.ready()); got != 8 {
+		t.Errorf("video ready = %d, want 8: listings discovered in a pass are rendered in it", got)
 	}
-	if got := store.failed.Load(); got != 0 {
+	if got := len(h.store.videoFailed()); got != 0 {
 		t.Errorf("video failed = %d, want 0", got)
 	}
-	if got := store.upserts.Load(); got != 8 {
+	if got := h.store.upsertCount(); got != 8 {
 		t.Errorf("upserts = %d, want 8", got)
 	}
-	// With 8 listings and a limit of 4, more than one render must have overlapped.
-	if peak := render.peak.Load(); peak < 2 {
-		t.Errorf("expected concurrent renders, peak = %d", peak)
+	if got := len(h.queue.historyOf("complete")); got != 8 || len(h.queue.queued()) != 0 {
+		t.Errorf("completed %d items, %v still queued; want 8 and none", got, h.queue.queued())
 	}
-	if peak := render.peak.Load(); peak > 4 {
-		t.Errorf("render concurrency exceeded limit: peak = %d", peak)
+	if peak := h.render.peak.Load(); peak > 4 {
+		t.Errorf("render concurrency exceeded the limit: peak = %d", peak)
+	}
+	if set, _, _ := h.store.detailsState(); !reflect.DeepEqual(set, []string{"ZP0", "ZP1"}) {
+		t.Errorf("details stored for %v, want [ZP0 ZP1]", set)
+	}
+	if got := h.s.inFlight.Load(); got != 0 {
+		t.Errorf("in flight after RunOnce = %d, want 0: it is synchronous", got)
 	}
 }
 
-func TestRunCycle_SkipsExisting(t *testing.T) {
-	imgSrv := jpegServer(t)
-
-	var props []property.Property
+func TestRunOnce_SkipsExisting(t *testing.T) {
+	img := jpegServer(t)
+	var found []property.Property
 	for i := 0; i < 5; i++ {
-		props = append(props, property.Property{
-			ZPID:      fmt.Sprintf("ZP%d", i),
-			ImageURLs: []string{imgSrv.URL + "/a.jpg"},
-		})
+		found = append(found, listing(fmt.Sprintf("ZP%d", i), img.URL+"/a.jpg"))
 	}
-
 	cfg := baseConfig()
 	cfg.SkipExisting = true
+	h := newHarness(t, cfg, "33950")
+	h.zillow.pages = map[string][][]property.Property{"33950": {found}}
 	// ZP0, ZP1, ZP2 already exist → should be skipped.
-	store := &fakeStore{existing: map[string]bool{"ZP0": true, "ZP1": true, "ZP2": true}}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(cfg, &fakeSearch{props: props}, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
+	h.store.existing = map[string]bool{"ZP0": true, "ZP1": true, "ZP2": true}
 
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	h.s.RunOnce(context.Background())
+
 	// Only ZP3, ZP4 are new → 2 upserts and 2 videos.
-	if got := store.upserts.Load(); got != 2 {
+	if got := h.store.upsertCount(); got != 2 {
 		t.Errorf("upserts = %d, want 2 (existing should be skipped)", got)
 	}
-	if got := store.ready.Load(); got != 2 {
-		t.Errorf("video ready = %d, want 2", got)
+	if got := h.store.ready(); len(got) != 2 {
+		t.Errorf("video ready = %v, want 2", got)
+	}
+	completed := zpidsOf(h.queue.historyOf("complete"))
+	sort.Strings(completed)
+	if !reflect.DeepEqual(completed, []string{"ZP3", "ZP4"}) {
+		t.Errorf("queue items worked on = %v, want only [ZP3 ZP4]: the rest never reach the queue", completed)
 	}
 }
 
-// A stored listing whose render failed previously must be revisited so the
-// video can be retried. Before this, SkipExisting returned before renderVideo
-// ran, so a single failed render stranded that listing without a video for
-// good — which is how 24 production listings ended up permanently videoless.
-// The revisit renders only: it must not re-upload images or re-upsert the row.
-func TestRunCycle_ExistingListingWithoutVideoIsReRendered(t *testing.T) {
-	imgSrv := jpegServer(t)
-
-	var props []property.Property
+func TestRunOnce_ExistingListingWithoutVideoIsReRendered(t *testing.T) {
+	img := jpegServer(t)
+	var found []property.Property
 	for i := 0; i < 4; i++ {
-		props = append(props, property.Property{
-			ZPID:      fmt.Sprintf("ZP%d", i),
-			ImageURLs: []string{imgSrv.URL + "/a.jpg"},
-		})
+		found = append(found, listing(fmt.Sprintf("ZP%d", i), img.URL+"/a.jpg"))
 	}
-
 	cfg := baseConfig()
 	cfg.SkipExisting = true
-	store := &fakeStore{
-		// All four are stored already.
-		existing: map[string]bool{"ZP0": true, "ZP1": true, "ZP2": true, "ZP3": true},
-		// ZP1 and ZP2 have no ready video — only those two get revisited.
-		needsVideo: map[string]bool{"ZP1": true, "ZP2": true},
-	}
-	up := &fakeUploader{}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(cfg, &fakeSearch{props: props}, up, store, zips, &fakeRenderer{}, testLogger())
+	h := newHarness(t, cfg, "33950")
+	h.zillow.pages = map[string][][]property.Property{"33950": {found}}
+	// All four are stored already.
+	h.store.existing = map[string]bool{"ZP0": true, "ZP1": true, "ZP2": true, "ZP3": true}
+	// ZP1 and ZP2 have no ready video — only those two get revisited.
+	h.store.needsVideo = map[string]bool{"ZP1": true, "ZP2": true}
 
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	h.s.RunOnce(context.Background())
 
-	if got := store.ready.Load(); got != 2 {
-		t.Errorf("video ready = %d, want 2 (ZP1 and ZP2 re-rendered)", got)
+	ready := h.store.ready()
+	sort.Strings(ready)
+	if !reflect.DeepEqual(ready, []string{"ZP1", "ZP2"}) {
+		t.Errorf("video ready = %v, want [ZP1 ZP2] re-rendered", ready)
 	}
-	if got := store.upserts.Load(); got != 0 {
+	if got := h.store.upsertCount(); got != 0 {
 		t.Errorf("upserts = %d, want 0 — a video revisit must not rewrite the row", got)
 	}
 	// Only the rendered videos should be uploaded; no listing photos.
-	for _, path := range up.paths() {
+	for _, path := range h.bunny.paths() {
 		if !strings.HasPrefix(path, "videos/") {
 			t.Errorf("unexpected upload %q — a video revisit must not re-upload photos", path)
 		}
 	}
 }
 
-func TestRunCycle_RotatesUntilBudgetExhausted(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 3, // no details reserve → 3 search pages
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{byLocation: map[string][]property.Property{}} // every zip: 0 listings, 1 page
-	zips := &fakeZips{queue: []string{"11111", "22222", "33333", "44444", "55555"}}
-	store := &fakeStore{}
-	s := New(cfg, search, &fakeUploader{}, store, zips, nil, testLogger())
+func TestRunOnce_SegmentsRenderedVideos(t *testing.T) {
+	img := jpegServer(t)
+	h := newHarness(t, baseConfig(), "33950")
+	h.zillow.props = []property.Property{listing("ZP1", img.URL+"/a.jpg")}
+	seg := &fakeSegmenter{}
+	rec := h.enableHLS(seg)
 
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	h.s.RunOnce(context.Background())
 
-	marked := zips.markedZips()
-	if len(marked) != 3 {
-		t.Fatalf("marked %d zips, want 3 (budget): %v", len(marked), marked)
+	if seg.calls.Load() != 1 {
+		t.Errorf("segmenter calls = %d, want 1", seg.calls.Load())
 	}
-	for _, z := range []string{"11111", "22222", "33333"} {
-		if _, ok := marked[z]; !ok {
-			t.Errorf("zip %s not marked; queue order should win", z)
-		}
+	if base := rec.base("ZP1"); !strings.HasPrefix(base, "https://cdn.example/hls/v1/ZP1/") {
+		t.Errorf("recorded base url = %q", base)
+	}
+	if got := h.store.ready(); !reflect.DeepEqual(got, []string{"ZP1"}) {
+		t.Errorf("video ready = %v, want [ZP1]", got)
 	}
 }
 
-func TestRunCycle_DetailsReserveShrinksSearchBudget(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 3,
-		DetailsPerCycle:   2, // search budget = 3 - 2 = 1
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{byLocation: map[string][]property.Property{}}
-	zips := &fakeZips{queue: []string{"11111", "22222"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(zips.markedZips()); got != 1 {
-		t.Fatalf("marked %d zips, want 1 (search budget 1)", got)
-	}
-}
-
-func TestRunCycle_FailedSearchNotMarkedButBudgetSpent(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 2,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{
-		byLocation: map[string][]property.Property{},
-		searchErr:  map[string]error{"11111": errors.New("boom")},
-	}
-	zips := &fakeZips{queue: []string{"11111", "22222"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	marked := zips.markedZips()
-	if _, ok := marked["11111"]; ok {
-		t.Error("failed zip 11111 must not be marked (retries next cycle)")
-	}
-	if _, ok := marked["22222"]; !ok {
-		t.Error("zip 22222 should be searched with the remaining budget")
-	}
-}
-
-// TestRunCycle_FailedZipAttemptedOnceThenSkipped covers the "tried" guard: a
-// failed ZIP stays unmarked (genuinely retries next cycle) but must not be
-// re-attempted within the SAME cycle, or a persistently failing ZIP at the
-// rotation front would burn the whole budget retrying just it.
-func TestRunCycle_FailedZipAttemptedOnceThenSkipped(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 5,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{
-		byLocation: map[string][]property.Property{},
-		searchErr:  map[string]error{"11111": errors.New("boom")},
-	}
-	zips := &fakeZips{queue: []string{"11111", "22222"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	var attempts int
-	for _, z := range search.queriedLocations() {
-		if z == "11111" {
-			attempts++
-		}
-	}
-	if attempts != 1 {
-		t.Errorf("11111 queried %d times, want exactly 1 (must not retry within the cycle)", attempts)
-	}
-
-	marked := zips.markedZips()
-	if _, ok := marked["11111"]; ok {
-		t.Error("failed zip 11111 must not be marked")
-	}
-	if _, ok := marked["22222"]; !ok {
-		t.Error("zip 22222 should still be marked")
-	}
-}
-
-// TestRunCycle_MultiPageSearchChargesBudget covers multi-page budget
-// accounting: a search reporting more than one page must deduct that many
-// requests, and each search's MaxPages must reflect the budget remaining
-// when it was issued.
-func TestRunCycle_MultiPageSearchChargesBudget(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 3,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{
-		byLocation: map[string][]property.Property{},
-		pagesFor:   map[string]int{"11111": 2},
-	}
-	zips := &fakeZips{queue: []string{"11111", "22222", "33333"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	marked := zips.markedZips()
-	if _, ok := marked["11111"]; !ok {
-		t.Error("zip 11111 (2 pages) should be marked")
-	}
-	if _, ok := marked["22222"]; !ok {
-		t.Error("zip 22222 (1 page) should be marked")
-	}
-	if _, ok := marked["33333"]; ok {
-		t.Error("zip 33333 should never be queried — budget exhausted by 11111+22222 (2+1=3)")
-	}
-
-	want := []int{3, 1}
-	got := search.maxPagesRecorded()
-	if len(got) != len(want) {
-		t.Fatalf("maxPages recorded = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("maxPages[%d] = %d, want %d (MaxPages must equal budget remaining at call time)", i, got[i], want[i])
-		}
-	}
-}
-
-// TestRunCycle_BudgetExhaustsMidBatch covers a batch of ZIPs where the first
-// one alone spends the entire budget: the rest of that same batch must be
-// left untouched, not queried.
-func TestRunCycle_BudgetExhaustsMidBatch(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 3,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{
-		byLocation: map[string][]property.Property{},
-		pagesFor:   map[string]int{"11111": 3},
-	}
-	zips := &fakeZips{queue: []string{"11111", "22222", "33333"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := search.queriedLocations(); len(got) != 1 || got[0] != "11111" {
-		t.Fatalf("queried = %v, want only [11111]", got)
-	}
-	marked := zips.markedZips()
-	if _, ok := marked["11111"]; !ok {
-		t.Error("zip 11111 should be marked")
-	}
-	if _, ok := marked["22222"]; ok {
-		t.Error("zip 22222 must not be touched — budget exhausted by 11111 alone")
-	}
-	if _, ok := marked["33333"]; ok {
-		t.Error("zip 33333 must not be touched — budget exhausted by 11111 alone")
-	}
-}
-
-func TestRunCycle_MarksListingCount(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 10,
-		SkipExisting:      true,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{byLocation: map[string][]property.Property{
-		"33950": {{ZPID: "a"}, {ZPID: "b"}},
-	}}
-	store := &fakeStore{existing: map[string]bool{"a": true, "b": true}}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(cfg, search, &fakeUploader{}, store, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := zips.markedZips()["33950"]; got != 2 {
-		t.Errorf("last_listing_count = %d, want 2", got)
-	}
-}
-
-func TestRunCycle_SkipsWhenQuotaExceeded(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 10,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{usage: &zillow.Usage{Status: "exceeded"}}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := search.queriedLocations(); len(got) != 0 {
-		t.Errorf("searched %v, want none when quota exceeded", got)
-	}
-}
-
-func TestRunCycle_SkipsWhenRemainingBelowBudget(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 150,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	u := &zillow.Usage{Status: "ok"}
-	u.Quotas = []zillow.QuotaMetric{{Name: "Requests", Limit: 10000, Used: 9900, Remaining: 100}}
-	search := &fakeSearch{usage: u}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := search.queriedLocations(); len(got) != 0 {
-		t.Errorf("searched %v, want none when remaining < budget", got)
-	}
-}
-
-func TestRunCycle_ProceedsWhenUsageCheckFails(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 10,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{
-		byLocation: map[string][]property.Property{},
-		usageErr:   errors.New("usage endpoint down"),
-	}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := zips.markedZips()["33950"]; !ok {
-		t.Error("cycle should proceed (fail-open) when the usage check errors")
-	}
-}
-
-func TestRunCycle_SkipsOverlappingCycle(t *testing.T) {
-	cfg := &config.Config{
-		APIBudgetPerCycle: 10,
-		Concurrency:       config.ConcurrencyConfig{Listings: 1, Images: 1},
-	}
-	search := &fakeSearch{
-		byLocation:    map[string][]property.Property{},
-		blockSearch:   make(chan struct{}),
-		searchEntered: make(chan struct{}, 1),
-	}
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(cfg, search, &fakeUploader{}, &fakeStore{}, zips, nil, testLogger())
+func TestRunOnce_IsBoundedByTheContext(t *testing.T) {
+	cfg := baseConfig()
+	cfg.DetailsPerCycle = 5
+	h := newHarness(t, cfg, "33950")
+	h.queue.put(t, listing("ZP1"), false)
+	h.store.missingDetails = []string{"Z1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	done := make(chan struct{})
 	go func() {
-		_ = s.RunCycle(context.Background())
-		close(done)
+		defer close(done)
+		h.s.RunOnce(ctx)
 	}()
-	<-search.searchEntered // first cycle is now mid-search
+	recv(t, done, "RunOnce to return under a cancelled context")
 
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(search.queriedLocations()); got != 0 {
-		// queried is appended after the block, so at this point the first
-		// cycle hasn't recorded its search yet; any entry means the second
-		// cycle ran a search.
-		t.Errorf("second cycle performed %d searches, want 0", got)
-	}
-
-	close(search.blockSearch)
-	<-done
-}
-
-func TestDownloadPhotos_NormalizesWebPToJPEG(t *testing.T) {
-	webp, err := os.ReadFile("../imaging/testdata/opaque.webp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/webp")
-		_, _ = w.Write(webp)
-	}))
-	defer srv.Close()
-
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, zips, &fakeRenderer{}, testLogger())
-	dir := t.TempDir()
-
-	local := s.downloadPhotos(context.Background(), []string{srv.URL + "/photo.webp"}, dir)
-	if len(local) != 1 {
-		t.Fatalf("got %d local photos, want 1", len(local))
-	}
-	if ext := filepath.Ext(local[0]); ext != ".jpg" {
-		t.Errorf("local file ext = %q, want .jpg (webp must be transcoded)", ext)
-	}
-	data, err := os.ReadFile(local[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := jpeg.Decode(bytes.NewReader(data)); err != nil {
-		t.Errorf("local file is not valid JPEG: %v", err)
+	if h.zips.claimCount() != 0 || len(h.queue.limits()) != 0 || len(h.store.claimLimits) != 0 {
+		t.Error("a cancelled RunOnce must not claim anything")
 	}
 }
 
-func TestDownloadPhotos_SkipsUndecodableData(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		_, _ = w.Write([]byte("<html>error page pretending to be an image</html>"))
-	}))
-	defer srv.Close()
+// --- Start / Stop ---
 
-	zips := &fakeZips{queue: []string{"33950"}}
-	s := New(baseConfig(), &fakeSearch{}, &fakeUploader{}, &fakeStore{}, zips, &fakeRenderer{}, testLogger())
+// parkSleeps replaces the injected sleep with one that reports the wait and
+// then parks until the context ends, so every loop does one step and stops.
+func (h *harness) parkSleeps() <-chan time.Duration {
+	sleeps := make(chan time.Duration, 64)
+	h.s.sleep = func(ctx context.Context, d time.Duration) {
+		sleeps <- d
+		<-ctx.Done()
+	}
+	return sleeps
+}
 
-	local := s.downloadPhotos(context.Background(), []string{srv.URL + "/broken.jpg"}, t.TempDir())
-	if len(local) != 0 {
-		t.Errorf("got %d local photos, want 0 (undecodable data must be skipped)", len(local))
+// settledGoroutines polls until the goroutine count is back at or below
+// baseline. Goroutines that called wg.Done are gone a moment later, not at
+// once, hence the (tiny, bounded) polling.
+func settledGoroutines(baseline int) (int, bool) {
+	deadline := time.Now().Add(failAfter)
+	for {
+		n := runtime.NumGoroutine()
+		if n <= baseline {
+			return n, true
+		}
+		if time.Now().After(deadline) {
+			return n, false
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
-func TestRunCycle_EnrichesDetailsUpToCap(t *testing.T) {
+func TestStartStop_RunsAllLoopsAndLeavesNoGoroutineBehind(t *testing.T) {
 	cfg := baseConfig()
-	cfg.DetailsPerCycle = 2
+	cfg.SkipExisting = true
+	cfg.DetailsPerCycle = 0
+	h := newHarness(t, cfg) // no ZIPs: discovery idles
+	sleeps := h.parkSleeps()
 
-	store := &fakeStore{missingDetails: []string{"Z1", "Z2", "Z3"}}
-	zips := &fakeZips{} // no search work — isolate enrichment
-	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
+	// One item that is being worked on when the shutdown comes, and that takes
+	// a moment to give up: Stop must wait for it, not merely for the loops.
+	blocked := make(chan struct{})
+	finish := make(chan struct{})
+	h.store.onExists = func(ctx context.Context) {
+		close(blocked)
+		<-ctx.Done()
+		<-finish
+	}
+	h.queue.put(t, listing("ZP1", "https://photos.example/a.jpg"), false)
 
-	if err := s.RunCycle(context.Background()); err != nil {
+	baseline := runtime.NumGoroutine()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := h.s.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.detailsSet) != 2 {
-		t.Fatalf("SetDetails calls = %v, want exactly the 2-cap", store.detailsSet)
+	if err := h.s.Start(ctx); err == nil {
+		t.Error("a second Start must be refused: it would double every loop")
 	}
-	if store.detailsSet[0] != "Z1" || store.detailsSet[1] != "Z2" {
-		t.Errorf("enriched %v, want [Z1 Z2] (oldest first)", store.detailsSet)
+
+	// Start is non-blocking: every loop gets to its first sleep on its own.
+	recv(t, blocked, "the media loop to pick the item up")
+	var got []time.Duration
+	for i := 0; i < 4; i++ {
+		got = append(got, recv(t, sleeps, "a loop to reach its sleep"))
 	}
-	if d := store.detailsGot["Z1"]; d == nil || d.PropertyType == nil || *d.PropertyType != "SINGLE_FAMILY" {
-		t.Errorf("details not stored: %+v", store.detailsGot["Z1"])
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	// media: a probe is out → poll; discovery: no ZIP; status; details: off.
+	want := []time.Duration{queuePoll, noZipWait, statusInterval, detailsDisabledWait}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("first sleeps = %v, want %v (media, discovery, status, details)", got, want)
+	}
+
+	cancel()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		h.s.Stop()
+	}()
+	// The item goroutine is still winding down. Stop tracks it, so it cannot
+	// have returned: a Stop that returns here reports a shutdown that is not
+	// over, and the claims of everything in flight are left to their leases.
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a listing was still in flight: the item goroutines are not tracked")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finish)
+	recv(t, stopped, "Stop to return")
+
+	// Stop waited for the item goroutine too: its release is on record.
+	wantQueue := []queueTransition{{kind: "release", zpid: "ZP1", attempts: 1}}
+	if got := h.queue.history(); !reflect.DeepEqual(got, wantQueue) {
+		t.Errorf("queue transitions when Stop returned = %+v\nwant %+v", got, wantQueue)
+	}
+	if n, ok := settledGoroutines(baseline); !ok {
+		t.Errorf("goroutines = %d after Stop, want <= %d: something leaked", n, baseline)
+	}
+	claims := len(h.queue.limits())
+	h.s.Stop() // idempotent
+	if got := len(h.queue.limits()); got != claims {
+		t.Error("the media loop is still claiming after Stop")
 	}
 }
 
-func TestRunCycle_EnrichmentDisabledWhenCapZero(t *testing.T) {
+// main cancels the context before it calls Stop, but Stop must not depend on
+// it: a Stop that waits for loops nobody told to stop never returns.
+func TestStop_StopsTheLoopsByItself(t *testing.T) {
 	cfg := baseConfig()
 	cfg.DetailsPerCycle = 0
+	h := newHarness(t, cfg)
+	sleeps := h.parkSleeps()
 
-	store := &fakeStore{missingDetails: []string{"Z1"}}
-	zips := &fakeZips{}
-	s := New(cfg, &fakeSearch{}, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
-
-	if err := s.RunCycle(context.Background()); err != nil {
+	if err := h.s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.detailsSet) != 0 {
-		t.Errorf("enrichment ran with cap 0: %v", store.detailsSet)
+	for i := 0; i < 4; i++ {
+		recv(t, sleeps, "a loop to reach its sleep")
 	}
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		h.s.Stop()
+	}()
+	recv(t, stopped, "Stop to return without the caller cancelling anything")
 }
 
-func TestRunCycle_EnrichmentErrorHandling(t *testing.T) {
+func TestStop_BeforeStartReturnsAtOnce(t *testing.T) {
+	h := newHarness(t, baseConfig())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		h.s.Stop()
+	}()
+	recv(t, stopped, "Stop to return")
+}
+
+// Stop can only cancel a context Start has already made. Loops launched after
+// Stop returned would therefore never be ended by it, and would go on claiming
+// (and a Stop that lost the race could sit in wg.Wait on them). main is not
+// exposed to this — it always Starts, waits for the signal, then Stops — but
+// the lifecycle must hold for any caller.
+func TestStart_AfterStopIsRefusedAndLaunchesNothing(t *testing.T) {
 	cfg := baseConfig()
-	cfg.DetailsPerCycle = 10
+	cfg.DetailsPerCycle = 0
+	h := newHarness(t, cfg, "11111")
+	h.queue.put(t, listing("ZP1", "https://photos.example/a.jpg"), false)
 
-	search := &fakeSearch{detailsErr: map[string]error{
-		"DEAD":  zillow.ErrDetailsNotFound,  // definitive: mark fetched
-		"FLAKY": errors.New("500 whatever"), // transient: leave for retry
-	}}
-	store := &fakeStore{missingDetails: []string{"DEAD", "FLAKY", "OK1"}}
-	zips := &fakeZips{}
-	s := New(cfg, search, &fakeUploader{}, store, zips, &fakeRenderer{}, testLogger())
+	h.s.Stop()
+	if err := h.s.Start(context.Background()); err == nil {
+		t.Fatal("Start after Stop must be refused: Stop cannot end loops it never made")
+	}
 
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
+	// Give anything that was started a chance to reach the database.
+	time.Sleep(20 * time.Millisecond)
+	if n := len(h.queue.limits()); n != 0 {
+		t.Errorf("the media loop claimed %d time(s) after Stop", n)
 	}
-	// DEAD gets empty details recorded (no infinite retry); FLAKY is skipped;
-	// OK1 is enriched normally.
-	got := map[string]bool{}
-	for _, z := range store.detailsSet {
-		got[z] = true
+	if n := h.zips.claimCount(); n != 0 {
+		t.Errorf("discovery claimed %d ZIP(s) after Stop", n)
 	}
-	if !got["DEAD"] || !got["OK1"] || got["FLAKY"] {
-		t.Errorf("SetDetails calls = %v, want DEAD and OK1 only", store.detailsSet)
-	}
-	if d := store.detailsGot["DEAD"]; d == nil || d.PropertyType != nil {
-		t.Errorf("DEAD must be recorded with empty details, got %+v", d)
-	}
+	h.s.Stop() // still idempotent, and still returns
 }
 
-type fakeSegmenter struct{ calls atomic.Int64 }
-
-func (f *fakeSegmenter) Segment(_ context.Context, _ string, outDir string) (hls.Clip, error) {
-	f.calls.Add(1)
-	for i := 0; i < 2; i++ {
-		if err := os.WriteFile(filepath.Join(outDir, hls.SegmentName(i)), []byte("ts"), 0o644); err != nil {
-			return hls.Clip{}, err
-		}
-	}
-	if err := os.WriteFile(filepath.Join(outDir, hls.IndexName), []byte("#EXTM3U\n"), 0o644); err != nil {
-		return hls.Clip{}, err
-	}
-	return hls.Clip{SegmentMS: []int{3000, 2000}, TotalMS: 5000}, nil
-}
-
-type fakeHLSRecorder struct {
-	mu       sync.Mutex
-	recorded map[string]string // zpid → base URL
-}
-
-func (r *fakeHLSRecorder) SetVideoHLS(_ context.Context, zpid, _ string, baseURL string, _ hls.Clip) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.recorded == nil {
-		r.recorded = map[string]string{}
-	}
-	r.recorded[zpid] = baseURL
-	return nil
-}
-
-func TestRunCycle_SegmentsRenderedVideos(t *testing.T) {
-	imgSrv := jpegServer(t)
-	props := []property.Property{{
-		ZPID: "ZP1", Address: "addr",
-		ImageURLs: []string{imgSrv.URL + "/a.jpg"},
-		DetailURL: "https://www.zillow.com/x/",
-	}}
-	up := &fakeUploader{}
-	rec := &fakeHLSRecorder{}
-	seg := &fakeSegmenter{}
-	s := New(baseConfig(), &fakeSearch{props: props}, up, &fakeStore{}, &fakeZips{queue: []string{"33950"}}, &fakeRenderer{}, testLogger())
-	s.EnableHLS(seg, rec)
-
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if seg.calls.Load() != 1 {
-		t.Errorf("segmenter calls = %d, want 1", seg.calls.Load())
-	}
-	base := rec.recorded["ZP1"]
-	if !strings.HasPrefix(base, "https://cdn.example/hls/v1/ZP1/") {
-		t.Errorf("recorded base url = %q", base)
-	}
-	var segs, idx int
-	for _, p := range up.paths() {
-		switch {
-		case strings.HasPrefix(p, "hls/v1/ZP1/") && strings.HasSuffix(p, ".ts"):
-			segs++
-		case strings.HasPrefix(p, "hls/v1/ZP1/") && strings.HasSuffix(p, "/index.m3u8"):
-			idx++
-		}
-	}
-	if segs != 2 || idx != 1 {
-		t.Errorf("uploaded %d segments and %d index files, want 2 and 1: %v", segs, idx, up.paths())
-	}
-}
-
-func TestRunCycle_WithoutHLSDoesNotSegment(t *testing.T) {
-	imgSrv := jpegServer(t)
-	props := []property.Property{{ZPID: "ZP1", Address: "addr", ImageURLs: []string{imgSrv.URL + "/a.jpg"}}}
-	up := &fakeUploader{}
-	s := New(baseConfig(), &fakeSearch{props: props}, up, &fakeStore{}, &fakeZips{queue: []string{"33950"}}, &fakeRenderer{}, testLogger())
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range up.paths() {
-		if strings.HasPrefix(p, "hls/") {
-			t.Errorf("unexpected hls upload %s", p)
+// Spec 3.1: "The work done under a claim runs under a context deadline shorter
+// than the lease." That is what lets a live worker never work on an expired
+// claim, and what makes renewal unnecessary. The margin — lease minus deadline
+// — is what the bookkeeping recorded after the work runs in, so it has to be
+// longer than the bookkeeping timeout.
+func TestClaims_EveryLeaseOutlastsItsWorkDeadlineAndTheBookkeeping(t *testing.T) {
+	for _, c := range []struct {
+		what            string
+		deadline, lease time.Duration
+	}{
+		{"zip", zipDeadline, zipLease},
+		{"listing", listingDeadline, listingLease},
+		{"details", detailsDeadline, detailsLease},
+	} {
+		if c.lease <= c.deadline+bookkeepingTimeout {
+			t.Errorf("%s: lease %s leaves no room for %s of work plus %s of bookkeeping: a worker could still be holding the claim after it expired",
+				c.what, c.lease, c.deadline, bookkeepingTimeout)
 		}
 	}
 }
 
-// failingSegmenter stands in for a clip ffmpeg refuses to remux (e.g. a
-// render with no audio track).
-type failingSegmenter struct{ calls atomic.Int64 }
+// And the constants have to be the ones actually used: the lease every claim
+// is taken with, and a deadline on the context the paid or expensive work runs
+// under. Without the deadline a stuck ffmpeg or a hung HTTP call would keep
+// working on a claim the fleet has already given to somebody else.
+func TestClaims_WorkRunsUnderTheDeadlineAndTheClaimTakesTheLease(t *testing.T) {
+	t.Run("zip", func(t *testing.T) {
+		h := newHarness(t, leanConfig(10, 0), "11111")
+		start := time.Now()
 
-func (f *failingSegmenter) Segment(context.Context, string, string) (hls.Clip, error) {
-	f.calls.Add(1)
-	return hls.Clip{}, errors.New("segmenter exploded")
+		h.s.discoverStep(context.Background())
+
+		if got := h.zips.leases(); !reflect.DeepEqual(got, []time.Duration{zipLease}) {
+			t.Errorf("zip claim leases = %v, want [%s]", got, zipLease)
+		}
+		dl, ok := h.zillow.workDeadline("search")
+		assertWorkDeadline(t, "the ZIP search", dl, ok, start, zipDeadline)
+	})
+
+	t.Run("listing", func(t *testing.T) {
+		img := jpegServer(t)
+		h := newHarness(t, serialConfig())
+		start := time.Now()
+		var renderDL time.Time
+		var renderOK bool
+		h.render.setHook(func(ctx context.Context, _ *property.Property) error {
+			renderDL, renderOK = ctx.Deadline()
+			return nil
+		})
+		h.queue.put(t, listing("ZP1", img.URL+"/a.jpg"), false)
+
+		h.s.drainQueue(context.Background())
+
+		if got := h.queue.leases(); len(got) == 0 || got[0] != listingLease {
+			t.Errorf("listing claim leases = %v, want them taken with %s", got, listingLease)
+		}
+		assertWorkDeadline(t, "the listing pipeline", renderDL, renderOK, start, listingDeadline)
+	})
+
+	t.Run("details", func(t *testing.T) {
+		h := detailsHarness(t, 10, "Z1")
+		start := time.Now()
+
+		h.s.detailsStep(context.Background())
+
+		if got := h.store.detailsLeases(); !reflect.DeepEqual(got, []time.Duration{detailsLease}) {
+			t.Errorf("details claim leases = %v, want [%s]", got, detailsLease)
+		}
+		dl, ok := h.zillow.workDeadline("details")
+		assertWorkDeadline(t, "the details batch", dl, ok, start, detailsDeadline)
+	})
 }
 
-// A clip that cannot be segmented is still a perfectly good VOD render: the
-// MP4 is uploaded and the listing goes ready. Only the channels miss it, and
-// cmd/backfill-hls retries later. Marking the video failed here would drop it
-// from the Roku feed over a channels-only problem.
-func TestRunCycle_SegmentFailureLeavesTheRenderReady(t *testing.T) {
-	imgSrv := jpegServer(t)
-	props := []property.Property{{
-		ZPID: "ZP1", Address: "addr",
-		ImageURLs: []string{imgSrv.URL + "/a.jpg"},
-		DetailURL: "https://www.zillow.com/x/",
-	}}
-	up := &fakeUploader{}
-	store := &fakeStore{}
-	rec := &fakeHLSRecorder{}
-	seg := &failingSegmenter{}
-	s := New(baseConfig(), &fakeSearch{props: props}, up, store, &fakeZips{queue: []string{"33950"}}, &fakeRenderer{}, testLogger())
-	s.EnableHLS(seg, rec)
+// assertWorkDeadline checks that the work ran under a deadline, and that the
+// deadline is the intended one rather than, say, the lease itself.
+func assertWorkDeadline(t *testing.T, what string, dl time.Time, ok bool, start time.Time, want time.Duration) {
+	t.Helper()
+	if !ok {
+		t.Fatalf("%s ran without a deadline: it could still be working after its claim expired", what)
+	}
+	// start is taken just before the step, so the deadline lands a hair later
+	// than now+want. The slack is far smaller than the gap between any
+	// deadline and its lease, which is what this has to tell apart.
+	const slack = 5 * time.Second
+	if got := dl.Sub(start); got < want-slack || got > want+slack {
+		t.Errorf("%s deadline = %s after the step began, want about %s", what, got, want)
+	}
+}
 
-	if err := s.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if seg.calls.Load() != 1 {
-		t.Errorf("segmenter calls = %d, want 1", seg.calls.Load())
-	}
-	if store.ready.Load() != 1 {
-		t.Errorf("SetVideoReady calls = %d, want 1 despite the segmentation failure", store.ready.Load())
-	}
-	if store.failed.Load() != 0 {
-		t.Errorf("SetVideoFailed calls = %d, want 0: the MP4 rendered fine", store.failed.Load())
-	}
-	if len(rec.recorded) != 0 {
-		t.Errorf("recorded %v; nothing should be recorded when segmentation failed", rec.recorded)
-	}
-	for _, p := range up.paths() {
-		if strings.HasPrefix(p, "hls/") {
-			t.Errorf("unexpected hls upload %s after a segmentation failure", p)
+func TestLoop_StepsAgainAtOnceOnZeroAndSleepsOtherwise(t *testing.T) {
+	h := newHarness(t, baseConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var slept []time.Duration
+	h.s.sleep = func(_ context.Context, d time.Duration) { slept = append(slept, d) }
+
+	waits := []time.Duration{0, 0, 3 * time.Second, 0, time.Minute}
+	steps := 0
+	h.s.loop(ctx, func(context.Context) time.Duration {
+		steps++
+		if steps == len(waits) {
+			cancel()
 		}
+		return waits[steps-1]
+	})
+
+	if steps != len(waits) {
+		t.Errorf("steps = %d, want %d: the loop must end with the context", steps, len(waits))
+	}
+	if want := []time.Duration{3 * time.Second, time.Minute}; !reflect.DeepEqual(slept, want) {
+		t.Errorf("slept %v, want %v: a zero wait means go again now", slept, want)
+	}
+}
+
+func TestSleepCtx_ReturnsWhenTheContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sleepCtx(ctx, time.Hour)
+	}()
+	recv(t, done, "sleepCtx to notice the cancelled context")
+
+	sleepCtx(context.Background(), time.Nanosecond) // and when the time is up
+}
+
+func TestStatusLine(t *testing.T) {
+	h := newHarness(t, baseConfig())
+	h.queue.put(t, listing("ZP1"), false)
+	h.queue.put(t, listing("ZP2"), false)
+	h.s.completed.Add(7)
+	h.s.failed.Add(2)
+	h.s.inFlight.Add(3)
+
+	h.s.logStatus(context.Background())
+
+	recs := h.logs.find("worker status")
+	if len(recs) != 1 || recs[0].level != slog.LevelInfo {
+		t.Fatalf("want one Info status line, got %+v", recs)
+	}
+	want := map[string]any{
+		"in_flight": int64(3), "completed": int64(7), "failed": int64(2),
+		"breaker": "half-open", "queue_depth": int64(2),
+	}
+	if !reflect.DeepEqual(recs[0].attrs, want) {
+		t.Errorf("status attrs = %v\nwant %v", recs[0].attrs, want)
+	}
+}
+
+func TestStatusLoop_LogsOncePerInterval(t *testing.T) {
+	h := newHarness(t, baseConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var slept []time.Duration
+	h.s.sleep = func(_ context.Context, d time.Duration) {
+		slept = append(slept, d)
+		if len(slept) == 3 {
+			cancel() // the third sleep is cut short by the shutdown
+		}
+	}
+
+	h.s.statusLoop(ctx)
+
+	if want := []time.Duration{statusInterval, statusInterval, statusInterval}; !reflect.DeepEqual(slept, want) {
+		t.Errorf("slept %v, want %v", slept, want)
+	}
+	if got := len(h.logs.find("worker status")); got != 2 {
+		t.Errorf("status lines = %d, want 2: one per full interval, none on the way out", got)
 	}
 }

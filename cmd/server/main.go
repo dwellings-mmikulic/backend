@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/dwellingtw/backend/internal/api"
+	"github.com/dwellingtw/backend/internal/budget"
 	"github.com/dwellingtw/backend/internal/bunny"
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/db"
@@ -26,6 +31,7 @@ import (
 	"github.com/dwellingtw/backend/internal/server"
 	"github.com/dwellingtw/backend/internal/video"
 	"github.com/dwellingtw/backend/internal/viewer"
+	"github.com/dwellingtw/backend/internal/workqueue"
 	"github.com/dwellingtw/backend/internal/zillow"
 	"github.com/dwellingtw/backend/internal/zipcode"
 	"github.com/dwellingtw/backend/internal/zipseed"
@@ -50,11 +56,20 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Several instances write to one log aggregate; every line says which.
+	log = log.With("instance", cfg.InstanceID)
+
+	// CRON_SCHEDULE defines the budget windows of the whole fleet, so a bad
+	// one stops every role at startup rather than the first time it is asked.
+	windows, err := budget.ParseWindows(cfg.CronSchedule)
+	if err != nil {
+		return fmt.Errorf("CRON_SCHEDULE %q: %w", cfg.CronSchedule, err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	pool, err := db.Connect(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
 	if err != nil {
 		return err
 	}
@@ -73,11 +88,106 @@ func run(log *slog.Logger) error {
 		log.Info("zip rotation table seeded", "zips", seeded)
 	}
 
-	zillowClient := zillow.New(cfg.ZillowBaseURL, cfg.ZillowAPIKey, cfg.HTTPTimeout)
-	logZillowQuota(ctx, zillowClient, log)
+	windowStart, windowNext := windows.Current(time.Now())
+	// One greppable line per boot: the budget variables must be identical on
+	// every box, and this is how drift between them is found.
+	log.Info("effective fleet config",
+		"role", cfg.Role, "schedule", cfg.CronSchedule,
+		"window_start", windowStart, "window_next", windowNext,
+		"api_budget_per_window", cfg.APIBudgetPerCycle, "details_per_window", cfg.DetailsPerCycle,
+		"queue_high_water", cfg.QueueHighWater, "db_max_conns", cfg.DBMaxConns,
+		"listing_concurrency", cfg.Concurrency.Listings, "skip_existing", cfg.SkipExisting)
+
 	bunnyClient := bunny.New(cfg.BunnyStorageZone, cfg.BunnyAPIKey, cfg.BunnyStorageHost, cfg.BunnyCDNBaseURL, cfg.BunnyTimeout)
 	repo := property.NewRepository(pool)
 
+	var renderer *video.Renderer
+	if cfg.Video.Enabled {
+		renderer, err = video.New(cfg.Video)
+		if err != nil {
+			return err
+		}
+		log.Info("video rendering enabled", "music_tracks", renderer.TrackCount(), "seconds_per_photo", cfg.Video.SecondsPerPhoto)
+	}
+
+	var sched *scheduler.Scheduler
+	if cfg.Role.RunsWorkers() {
+		sched, err = startWorkers(ctx, cfg, pool, repo, bunnyClient, renderer, windows, log)
+		if err != nil {
+			return err
+		}
+	}
+
+	var shutdownHTTP func(context.Context) error
+	if cfg.Role.ServesAPI() {
+		shutdownHTTP = startAPI(ctx, cfg, pool, repo, bunnyClient, renderer, log)
+	} else {
+		shutdownHTTP = startHealth(cfg, sched, log)
+	}
+
+	<-ctx.Done()
+	log.Info("shutting down")
+	if sched != nil {
+		// Waits for the loops: they stop claiming, cancel their renders and
+		// hand every claim back, so other instances pick the work up at once.
+		sched.Stop()
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = shutdownHTTP(shutdownCtx)
+	return nil
+}
+
+// startWorkers wires and starts the discovery, media and details loops.
+func startWorkers(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo *property.Repository,
+	bunnyClient *bunny.Client, renderer *video.Renderer, windows *budget.Windows, log *slog.Logger) (*scheduler.Scheduler, error) {
+	zillowClient := zillow.New(cfg.ZillowBaseURL, cfg.ZillowAPIKey, cfg.HTTPTimeout)
+	logZillowQuota(ctx, zillowClient, log)
+
+	owner, err := claimOwner(cfg.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	sched := scheduler.New(cfg, scheduler.Deps{
+		Zillow:  zillowClient,
+		Bunny:   bunnyClient,
+		Repo:    repo,
+		Zips:    zipcode.NewRepository(pool),
+		Queue:   workqueue.NewRepository(pool),
+		Ledger:  budget.NewLedger(pool),
+		Windows: windows,
+		// nil-safe: a typed-nil renderer becomes an untyped nil when disabled.
+		Render: rendererOrNil(renderer),
+	}, owner, log)
+
+	// Workers segment every new render for the linear channels whether or
+	// not this instance serves them: LINEAR_ENABLED is what turns it on.
+	if cfg.Linear.Enabled && cfg.Video.Enabled {
+		sched.EnableHLS(hls.NewSegmenter(), linear.NewRepository(pool))
+	}
+	if err := sched.Start(ctx); err != nil {
+		return nil, err
+	}
+	log.Info("worker loops started", "owner", owner)
+	return sched, nil
+}
+
+// claimOwner names this process in every claim it takes. The random suffix
+// makes it unique per boot, so two boxes given the same INSTANCE_ID, or a
+// restarted process and its dead predecessor, can never pass each other's
+// ownership guards.
+func claimOwner(instanceID string) (string, error) {
+	var nonce [4]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("claim owner nonce: %w", err)
+	}
+	return instanceID + "/" + hex.EncodeToString(nonce[:]), nil
+}
+
+// startAPI starts the public HTTP server (API, Roku feed, linear channels)
+// and returns its shutdown function.
+func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo *property.Repository,
+	bunnyClient *bunny.Client, renderer *video.Renderer, log *slog.Logger) func(context.Context) error {
 	// Property maps are optional: without a LocationIQ key the service stays
 	// nil and the detail endpoint simply returns null map_image_url/map_image_dark_url.
 	var mapSvc *propertymap.Service
@@ -89,38 +199,12 @@ func run(log *slog.Logger) error {
 		log.Info("property maps enabled")
 	}
 
-	var renderer *video.Renderer
-	if cfg.Video.Enabled {
-		renderer, err = video.New(cfg.Video)
-		if err != nil {
-			return err
-		}
-		log.Info("video rendering enabled", "music_tracks", renderer.TrackCount(), "seconds_per_photo", cfg.Video.SecondsPerPhoto)
-	}
-
-	// nil-safe: pass a typed-nil renderer through as an untyped nil when disabled.
-	zipRepo := zipcode.NewRepository(pool)
-	sched := scheduler.New(cfg, zillowClient, bunnyClient, repo, zipRepo, rendererOrNil(renderer), log)
-
-	// Linear channels: segment new renders and serve the channel endpoints.
-	var linearRepo *linear.Repository
-	if cfg.Linear.Enabled {
-		linearRepo = linear.NewRepository(pool)
-		if cfg.Video.Enabled {
-			sched.EnableHLS(hls.NewSegmenter(), linearRepo)
-		}
-	}
-
-	if err := sched.Start(ctx); err != nil {
-		return err
-	}
-	log.Info("scheduler started", "schedule", cfg.CronSchedule)
-
 	publicAPI := api.New(repo, mapEnsurerOrNil(mapSvc), log)
 	publicAPI.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
 	log.Info("ad tags", "pre_roll", cfg.Ads.PrerollURL != "", "mid_roll", cfg.Ads.MidrollURL != "")
 	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
-	if linearRepo != nil {
+	if cfg.Linear.Enabled {
+		linearRepo := linear.NewRepository(pool)
 		svc := linear.New(linearRepo, linear.Options{
 			LineupHours:     cfg.Linear.LineupHours,
 			MinScopeClips:   cfg.Linear.MinScopeClips,
@@ -144,14 +228,33 @@ func run(log *slog.Logger) error {
 			log.Error("http server stopped", "error", err)
 		}
 	}()
+	return httpSrv.Shutdown
+}
 
-	<-ctx.Done()
-	log.Info("shutting down")
-	sched.Stop()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(shutdownCtx)
-	return nil
+// startHealth serves /healthz and nothing else: a worker has no public
+// surface. It answers 503 while the worker's circuit breaker is open, which
+// is how a box that cannot render shows up in `docker ps`.
+func startHealth(cfg *config.Config, sched *scheduler.Scheduler, log *slog.Logger) func(context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if sched != nil && !sched.Healthy() {
+			http.Error(w, "circuit breaker open", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	srv := &http.Server{
+		Addr:              net.JoinHostPort("", cfg.HTTPPort),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		log.Info("health server started", "port", cfg.HTTPPort)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("health server stopped", "error", err)
+		}
+	}()
+	return srv.Shutdown
 }
 
 // viewerOptions wires viewer tracking: the heartbeat recorder (flushed in

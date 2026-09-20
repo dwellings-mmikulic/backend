@@ -67,9 +67,14 @@ UPDATE properties
 	return nil
 }
 
-// SetVideoFailed marks a listing's video render as failed.
+// SetVideoFailed marks a listing's video render as failed — unless a ready
+// video is already stored. A failed re-render (a revisit, or another instance
+// working from an older claim) must not take a working video off the feed, so
+// matching no row is not an error.
 func (r *Repository) SetVideoFailed(ctx context.Context, zpid string) error {
-	const q = `UPDATE properties SET video_status = 'failed', updated_at = now() WHERE zpid = $1`
+	const q = `
+UPDATE properties SET video_status = 'failed', updated_at = now()
+ WHERE zpid = $1 AND video_status IS DISTINCT FROM 'ready'`
 	if _, err := r.pool.Exec(ctx, q, zpid); err != nil {
 		return fmt.Errorf("set video failed zpid=%s: %w", zpid, err)
 	}
@@ -252,9 +257,165 @@ SELECT zpid FROM properties
 	return out, nil
 }
 
+// VideoStates answers NeedsVideo for a whole search result in one query, so
+// the discovery loop's enqueue filter costs one round trip per ZIP instead of
+// one per listing. The map holds only the zpids that are stored, each mapped
+// to whether it still lacks a ready video; a zpid missing from the map is a
+// new listing. The predicate is NeedsVideo's, which the media worker re-checks
+// per listing, so the two must never drift apart.
+func (r *Repository) VideoStates(ctx context.Context, zpids []string) (map[string]bool, error) {
+	states := make(map[string]bool, len(zpids))
+	if len(zpids) == 0 {
+		return states, nil
+	}
+	const q = `
+SELECT zpid, video_status IS DISTINCT FROM 'ready' OR video_url IS NULL OR video_url = ''
+  FROM properties WHERE zpid = ANY($1)`
+	rows, err := r.pool.Query(ctx, q, zpids)
+	if err != nil {
+		return nil, fmt.Errorf("video states: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			zpid  string
+			needs bool
+		)
+		if err := rows.Scan(&zpid, &needs); err != nil {
+			return nil, fmt.Errorf("scan video state: %w", err)
+		}
+		states[zpid] = needs
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate video state rows: %w", err)
+	}
+	return states, nil
+}
+
+// MaxDetailsAttempts is how many row-specific failures (FailDetails) a listing
+// gets before ClaimMissingDetails stops offering it. It must equal the literal
+// in the predicate of idx_properties_details_todo (schema.sql); an integration
+// test compares the two.
+const MaxDetailsAttempts = 5
+
+// claimMissingDetailsSQL leases the oldest un-enriched rows that nobody holds.
+//
+// The attempts limit is written into the statement as a literal, not bound as
+// a parameter: PostgreSQL only uses the partial index
+// idx_properties_details_todo when it can prove the WHERE implies the index
+// predicate, and it cannot prove that about $n. Without the index every claim
+// would sort all of properties.
+//
+// SKIP LOCKED makes concurrent claimers pass over each other's rows instead
+// of queueing behind them, and under READ COMMITTED the lock step re-checks
+// the lease qual on the newest row version, so a row leased a moment ago by
+// another instance is dropped rather than claimed twice. The lease runs on
+// the database clock: the instances' own clocks never meet. RETURNING has no
+// defined order, hence the final ORDER BY.
+//
+// Neither details_attempts nor updated_at is touched: a claim is bookkeeping,
+// not a failure and not a change to the listing the API reports.
+var claimMissingDetailsSQL = fmt.Sprintf(`
+WITH picked AS MATERIALIZED (
+    SELECT id FROM properties
+     WHERE details_fetched_at IS NULL
+       AND details_attempts < %d
+       AND (details_claimed_until IS NULL OR details_claimed_until <= now())
+     ORDER BY created_at ASC
+     LIMIT $1
+       FOR UPDATE SKIP LOCKED
+), leased AS (
+    UPDATE properties p
+       SET details_claimed_until = now() + make_interval(secs => $2)
+      FROM picked
+     WHERE p.id = picked.id
+ RETURNING p.zpid, p.created_at, p.id
+)
+SELECT zpid FROM leased ORDER BY created_at ASC, id ASC`, MaxDetailsAttempts)
+
+// ClaimMissingDetails leases up to limit zpids that have never been enriched,
+// oldest first, for the given duration, and returns them. It replaces
+// ListZPIDsMissingDetails for a fleet: that one hands the same oldest rows to
+// every instance, and each would pay for the same details call.
+//
+// The claim has no owner by design. What keeps a stale holder harmless is
+// SetDetails' details_fetched_at IS NULL guard, and the caller working under
+// a deadline shorter than the lease. A crashed holder's rows free themselves
+// when the lease runs out.
+//
+// No attempt is counted here — only FailDetails does that — so a provider
+// outage or a deploy in the middle of a batch cannot use up a healthy row's
+// attempts. Every claimed row must end in SetDetails, FailDetails or
+// ReleaseDetails.
+func (r *Repository) ClaimMissingDetails(ctx context.Context, limit int, lease time.Duration) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if lease <= 0 {
+		// Such a lease has expired by the time it is written: it would claim
+		// nothing and every instance would fetch the same rows.
+		return nil, fmt.Errorf("claim missing details: lease must be positive, got %s", lease)
+	}
+	rows, err := r.pool.Query(ctx, claimMissingDetailsSQL, limit, lease.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("claim missing details: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var zpid string
+		if err := rows.Scan(&zpid); err != nil {
+			return nil, fmt.Errorf("scan claimed zpid: %w", err)
+		}
+		out = append(out, zpid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimed zpid rows: %w", err)
+	}
+	return out, nil
+}
+
+// ReleaseDetails gives claimed rows back without counting an attempt, so they
+// are claimable again at once. It is for rows whose fetch never reached a
+// verdict about the row itself: the budget ran out, the provider is down, or
+// the process is shutting down.
+func (r *Repository) ReleaseDetails(ctx context.Context, zpids []string) error {
+	if len(zpids) == 0 {
+		return nil
+	}
+	const q = `
+UPDATE properties SET details_claimed_until = NULL
+ WHERE zpid = ANY($1) AND details_fetched_at IS NULL`
+	if _, err := r.pool.Exec(ctx, q, zpids); err != nil {
+		return fmt.Errorf("release details of %d zpids: %w", len(zpids), err)
+	}
+	return nil
+}
+
+// FailDetails counts one row-specific failure (undecodable response, a 4xx
+// other than 429, a store error). The lease is deliberately left in place: it
+// is the backoff before the next try. At MaxDetailsAttempts the row drops out
+// of ClaimMissingDetails for good, so one poisonous listing cannot be paid for
+// on every pass.
+func (r *Repository) FailDetails(ctx context.Context, zpid string) error {
+	const q = `UPDATE properties SET details_attempts = details_attempts + 1 WHERE zpid = $1`
+	if _, err := r.pool.Exec(ctx, q, zpid); err != nil {
+		return fmt.Errorf("fail details zpid=%s: %w", zpid, err)
+	}
+	return nil
+}
+
 // SetDetails stores the enrichment fields and raw API response, and stamps
 // details_fetched_at so the row is never enriched again. raw may be nil
 // (e.g. a definitive not-found still marks the row as fetched).
+//
+// It only ever writes a row that has not been enriched yet. The details claim
+// has no owner, so after an expired lease two instances can hold the same
+// zpid; without the guard the later one's empty or not-found result would wipe
+// the record the first one stored. Matching no row is therefore not an error.
+// Storing also ends the claim, so details_claimed_until is cleared.
 //
 // latitude/longitude use COALESCE so a details response with no coordinates
 // (a NULL here) does not null out coordinates a map geocode already wrote
@@ -269,8 +430,9 @@ UPDATE properties SET
     listing_status = $10, agent_name = $11, agent_phone = $12,
     agent_brokerage = $13, latitude = COALESCE($14, latitude),
     longitude = COALESCE($15, longitude),
-    details_raw = $16, details_fetched_at = now(), updated_at = now()
- WHERE zpid = $1`
+    details_raw = $16, details_fetched_at = now(),
+    details_claimed_until = NULL, updated_at = now()
+ WHERE zpid = $1 AND details_fetched_at IS NULL`
 	_, err := r.pool.Exec(ctx, q, zpid,
 		d.PropertyType, d.Description, d.YearBuilt, d.Heating,
 		d.Cooling, d.Garage, d.HOAFeeMonthly, d.MLSNumber,

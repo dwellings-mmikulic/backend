@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,48 +48,49 @@ type detailsRecord struct {
 // PropertyDetails fetches the one-time enrichment record for a zpid. It
 // returns the mapped details plus the raw response body (stored as
 // details_raw so future fields never require re-fetching).
-func (c *Client) PropertyDetails(ctx context.Context, zpid string) (*property.Details, []byte, error) {
+//
+// The permit is asked before every HTTP attempt; a denial is
+// ErrBudgetExhausted with nothing sent. A 404, or an OK envelope without
+// data, is ErrDetailsNotFound and final. An envelope that reports a failure
+// and holds no record for a zpid is a transient error, never a record and
+// never not-found. Use IsTransient on anything else to tell a provider outage
+// (release the row, count no attempt) from a failure specific to this zpid.
+func (c *Client) PropertyDetails(ctx context.Context, zpid string, permit Permit) (*property.Details, []byte, error) {
 	endpoint := fmt.Sprintf("%s%s?zpid=%s", c.baseURL, detailsPath, url.QueryEscape(zpid))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	body, _, err := c.fetch(ctx, endpoint, permit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build details request: %w", err)
+		var se *StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			return nil, nil, fmt.Errorf("zpid=%s: %w", zpid, ErrDetailsNotFound)
+		}
+		return nil, nil, fmt.Errorf("details zpid=%s: %w", zpid, err)
 	}
-	req.Header.Set("X-API-Key", c.apiKey)
-	req.Header.Set("Accept", "application/json")
 
-	res, err := c.http.Do(req)
+	env, err := decodeEnvelope(body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("details request zpid=%s: %w", zpid, err)
+		return nil, nil, fmt.Errorf("details zpid=%s: %w", zpid, err)
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode == http.StatusNotFound {
-		return nil, nil, fmt.Errorf("zpid=%s: %w", zpid, ErrDetailsNotFound)
-	}
-	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
-		return nil, nil, fmt.Errorf("details API returned status %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20)) // details payloads are large; 4 MiB is ample
-	if err != nil {
-		return nil, nil, fmt.Errorf("read details body: %w", err)
-	}
-
-	var env struct {
-		Status string          `json:"status"`
-		Data   json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, nil, fmt.Errorf("decode details envelope: %w", err)
-	}
+	// Only absent/null means not-found here, as it always has: an empty
+	// object under an OK status still maps to a record with no fields.
 	if len(env.Data) == 0 || string(env.Data) == "null" {
 		return nil, nil, fmt.Errorf("zpid=%s: %w", zpid, ErrDetailsNotFound)
 	}
 
 	var rec detailsRecord
-	if err := json.Unmarshal(env.Data, &rec); err != nil {
-		return nil, nil, fmt.Errorf("decode details data: %w", err)
+	decodeErr := json.Unmarshal(env.Data, &rec)
+	// A failed envelope may carry its failure report in data, and
+	// {"message": "upstream timeout"} decodes without complaint into a record
+	// with every field empty: the caller would store it and stamp the row
+	// fetched, losing the listing's details for good. So under a failed
+	// status data only counts when it is a details record, which always names
+	// its zpid; anything else (a string or a list never yields one either) is
+	// the provider failing, not this row.
+	if env.failed() && rec.ZPID == "" {
+		return nil, nil, fmt.Errorf("details zpid=%s: %w", zpid, env.softError(body))
+	}
+	if decodeErr != nil {
+		return nil, nil, fmt.Errorf("decode details data zpid=%s: %w", zpid, decodeErr)
 	}
 	return toDetails(&rec), body, nil
 }

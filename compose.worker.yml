@@ -1,0 +1,35 @@
+# Worker compose — one per worker box, at /opt/dwellings/compose.worker.yml.
+# A worker runs the discovery, media and details loops and nothing public:
+# no ports are published, and Postgres is the shared one on the db box
+# (10.0.0.3) reached over the private network. See deploy/README.md, "Fleet".
+services:
+  app:
+    image: ghcr.io/dwellings-mmikulic/dwellings:latest
+    # .env.fleet must be byte-identical on every box (budgets, schedule, search
+    # criteria, keys): the fleet shares one API budget ledger, and its effective
+    # limit is the largest one any box passes. .env.host is this box only.
+    env_file:
+      - .env.fleet
+      - .env.host
+    environment:
+      ROLE: worker
+    restart: unless-stopped
+    # On SIGTERM a worker kills its ffmpeg children and hands its claims back
+    # so other boxes pick the work up at once. The 10 s default would SIGKILL
+    # it first, and the claims would sit out their leases instead.
+    stop_grace_period: 60s
+    # Visibility only (docker ps): Docker does not restart unhealthy
+    # containers, and should not — /healthz answers 503 while the worker's
+    # circuit breaker is open, which a restart would not fix. 127.0.0.1, not
+    # localhost: busybox wget does not fall back from ::1.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

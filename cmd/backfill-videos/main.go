@@ -1,116 +1,228 @@
-// Command backfill-videos is a one-off maintenance tool: for every property
-// that has photos but no ready video, it downloads the stored CDN photos,
-// renders the listing video, uploads it to Bunny storage, and records the
-// result on the row.
+// Command backfill-videos is a maintenance tool: it finds every property that
+// has photos but no ready video and ENQUEUES it for the workers, which render
+// it from the stored CDN photos, upload it, segment it for the linear channels
+// and record the result — the same pipeline, claims and retries as a freshly
+// discovered listing. It renders nothing itself, so at least one instance
+// with ROLE=all or ROLE=worker has to be running for the backlog to drain.
 //
-// It exists because a render failure used to be permanent. Under
-// SKIP_EXISTING=true the collection cycle returned before the render step for
-// any listing it had already stored, so a listing whose video failed once was
-// never retried. The cycle now revisits those listings by itself, but only as
-// they resurface in search results — this tool clears the existing backlog in
-// one pass.
+// It exists because a listing without a video is otherwise only revisited
+// when it resurfaces in search results, which for most of the country is a
+// full ZIP rotation away. It also revives dead queue rows (listings that used
+// up their attempts), which is how to retry them after fixing the cause.
 //
-// It uses the stored CDN URLs only — no Zillow API calls, no quota cost.
-// Reads DATABASE_URL, BUNNY_* and the VIDEO_* settings from the environment.
-// Pass -dry-run to report what would change without rendering or uploading.
+// It uses the stored rows only — no Zillow API calls, no quota cost. Reads
+// DATABASE_URL from the environment.
+//
+//	-dry-run  report what would be enqueued without touching the queue
+//	-limit N  consider at most N properties (0 = all)
+//	-status   print the queue's state and exit
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
-	"path"
-	"path/filepath"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
-	"github.com/dwellingtw/backend/internal/bunny"
-	"github.com/dwellingtw/backend/internal/config"
-	"github.com/dwellingtw/backend/internal/db"
-	"github.com/dwellingtw/backend/internal/imaging"
-	"github.com/dwellingtw/backend/internal/property"
-	"github.com/dwellingtw/backend/internal/video"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/dwellingtw/backend/internal/db"
+	"github.com/dwellingtw/backend/internal/property"
+	"github.com/dwellingtw/backend/internal/scheduler"
+	"github.com/dwellingtw/backend/internal/workqueue"
 )
 
+// toolMaxConns keeps a maintenance run small next to the fleet's pools: they
+// all share one PostgreSQL and its max_connections.
+const toolMaxConns = 4
+
+// enqueueBatch bounds one INSERT. Each payload carries a listing's photo
+// URLs, so a batch is a few hundred kilobytes.
+const enqueueBatch = 500
+
 func main() {
-	dryRun := flag.Bool("dry-run", false, "report without rendering, uploading, or updating")
-	limit := flag.Int("limit", 0, "process at most this many properties (0 = all)")
+	dryRun := flag.Bool("dry-run", false, "report without enqueuing")
+	limit := flag.Int("limit", 0, "consider at most this many properties (0 = all)")
+	status := flag.Bool("status", false, "print the queue's state and exit")
 	flag.Parse()
 
-	ctx := context.Background()
-	if err := run(ctx, *dryRun, *limit); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, *dryRun, *limit, *status); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, dryRun bool, limit int) error {
-	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"))
+func run(ctx context.Context, dryRun bool, limit int, statusOnly bool) error {
+	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"), toolMaxConns)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-
-	repo := property.NewRepository(pool)
-	up := bunny.New(
-		os.Getenv("BUNNY_STORAGE_ZONE"),
-		os.Getenv("BUNNY_API_KEY"),
-		os.Getenv("BUNNY_STORAGE_HOST"),
-		os.Getenv("BUNNY_CDN_BASE_URL"),
-		300*time.Second,
-	)
-	httpc := &http.Client{Timeout: 60 * time.Second}
-
-	vcfg := config.VideoConfig{
-		Enabled:         true,
-		SecondsPerPhoto: envInt("VIDEO_SECONDS_PER_PHOTO", 4),
-		MusicDir:        envStr("MUSIC_DIR", "assets/music"),
-		FontPath:        envStr("VIDEO_FONT_PATH", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
+	// The queue table arrives with this version's schema, and the tool may be
+	// the first thing run after an upgrade. A no-op when the schema is current.
+	if err := db.Migrate(ctx, pool); err != nil {
+		return err
 	}
-	renderer, err := video.New(vcfg)
-	if err != nil {
-		return fmt.Errorf("init renderer: %w", err)
+
+	queue := workqueue.NewRepository(pool)
+	if statusOnly {
+		return printStatus(ctx, queue)
 	}
-	log.Printf("renderer ready: %d music tracks, %ds per photo", renderer.TrackCount(), vcfg.SecondsPerPhoto)
 
 	zpids, err := listZPIDsNeedingVideo(ctx, pool, limit)
 	if err != nil {
 		return err
 	}
-	log.Printf("found %d properties without a ready video", len(zpids))
+	log.Printf("found %d properties with photos but no ready video", len(zpids))
 
-	var rendered, skipped, failed int
+	c, err := enqueueRevisits(ctx, property.NewRepository(pool), queue, zpids, dryRun)
+	if err != nil {
+		return err
+	}
+
+	// Ctrl-C must not read as a crash: what was enqueued before it is real
+	// work, and the tool is idempotent, so a rerun picks up where this left
+	// off. The counts are reported either way, and only then the interruption.
+	verb := "done"
+	if ctx.Err() != nil {
+		verb = "interrupted"
+	}
+	if dryRun {
+		log.Printf("%s (dry run): %d would be offered to the queue, %d failed to load", verb, c.offered, c.failed)
+		return ctx.Err()
+	}
+	// Enqueue leaves rows that are already waiting or being rendered alone;
+	// dead rows are revived and count as enqueued.
+	log.Printf("%s: %d enqueued (new or revived), %d already queued or not storable, %d failed to load or encode",
+		verb, c.enqueued, c.offered-c.enqueued, c.failed)
+	rctx, cancel := reportCtx(ctx)
+	defer cancel()
+	if err := printStatus(rctx, queue); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// listingLoader and revisitQueue are the two things the enqueue pass needs:
+// *property.Repository and *workqueue.Repository.
+type listingLoader interface {
+	GetByZPID(ctx context.Context, zpid string) (*property.Property, error)
+}
+
+type revisitQueue interface {
+	Enqueue(ctx context.Context, items []workqueue.NewItem) (int, error)
+}
+
+// counts is what one enqueue pass came to.
+type counts struct {
+	offered  int // listings handed to the queue (or, in a dry run, that would be)
+	enqueued int // rows the queue created or revived
+	failed   int // listings that could not be loaded or encoded
+}
+
+// reportTimeout bounds the work that still has to happen after an interrupt:
+// the last batch and the closing status query.
+const reportTimeout = 15 * time.Second
+
+// reportCtx is the context for that closing work. While the run is healthy it
+// is the caller's own; once the signal has arrived it is a detached one with a
+// short timeout, because the interrupt is exactly when it matters that the
+// batch already loaded is not thrown away and the operator gets a summary.
+func reportCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), reportTimeout)
+}
+
+// enqueueRevisits loads each listing and enqueues it with revisit: true, in
+// batches. An interrupt ends the pass but not the bookkeeping: the batch in
+// hand is still flushed, and the counts describe what really happened.
+func enqueueRevisits(ctx context.Context, repo listingLoader, queue revisitQueue, zpids []string, dryRun bool) (counts, error) {
+	var c counts
+	batch := make([]workqueue.NewItem, 0, enqueueBatch)
+	flush := func(fctx context.Context) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		n, err := queue.Enqueue(fctx, batch)
+		// ErrUnstorable: everything storable in the batch WAS enqueued and n
+		// is valid; the message names the listings PostgreSQL refused.
+		if errors.Is(err, workqueue.ErrUnstorable) {
+			log.Printf("warning: %v", err)
+			err = nil
+		}
+		if err != nil {
+			return fmt.Errorf("enqueue: %w", err)
+		}
+		c.offered += len(batch)
+		c.enqueued += n
+		batch = batch[:0]
+		return nil
+	}
+
 	for _, zpid := range zpids {
+		if ctx.Err() != nil {
+			break
+		}
 		p, err := repo.GetByZPID(ctx, zpid)
 		if err != nil {
+			if ctx.Err() != nil {
+				break // the interrupt, not this listing
+			}
 			log.Printf("zpid=%s load failed: %v", zpid, err)
-			failed++
-			continue
-		}
-		if len(p.ImageURLs) == 0 {
-			log.Printf("zpid=%s: no photos, nothing to render", zpid)
-			skipped++
+			c.failed++
 			continue
 		}
 		if dryRun {
-			log.Printf("zpid=%s: would render from %d photos", zpid, len(p.ImageURLs))
-			rendered++
+			log.Printf("zpid=%s: would enqueue (%d photos)", zpid, len(p.ImageURLs))
+			c.offered++
 			continue
 		}
-		if err := renderOne(ctx, httpc, renderer, up, repo, p, vcfg.SecondsPerPhoto); err != nil {
-			log.Printf("zpid=%s render failed: %v", zpid, err)
-			// Leave the row marked failed so a later run retries it.
-			_ = repo.SetVideoFailed(ctx, zpid)
-			failed++
+		// revisit: render only. The stored row and its CDN photos are left
+		// exactly as they are, whatever SKIP_EXISTING says on the worker.
+		payload, err := scheduler.EncodeListing(p, true)
+		if err != nil {
+			log.Printf("zpid=%s encode failed: %v", zpid, err)
+			c.failed++
 			continue
 		}
-		rendered++
+		batch = append(batch, workqueue.NewItem{ZPID: p.ZPID, Payload: payload, SourceZip: p.Zip})
+		if len(batch) < enqueueBatch {
+			continue
+		}
+		if err := flush(ctx); err != nil {
+			if ctx.Err() == nil {
+				return c, err
+			}
+			break // interrupted mid-batch: the retry below has its own context
+		}
 	}
-	log.Printf("done: %d rendered, %d skipped, %d failed (dry-run=%v)", rendered, skipped, failed, dryRun)
+	// The listings in hand are loaded and the queue is idempotent, so the last
+	// batch is worth finishing even when the signal has already arrived.
+	fctx, cancel := reportCtx(ctx)
+	defer cancel()
+	if err := flush(fctx); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+func printStatus(ctx context.Context, queue *workqueue.Repository) error {
+	st, err := queue.Stats(ctx)
+	if err != nil {
+		return fmt.Errorf("queue stats: %w", err)
+	}
+	log.Printf("queue: %d claimable, %d claimed, %d in backoff, %d dead",
+		st.Claimable, st.Claimed, st.Backoff, st.Dead)
 	return nil
 }
 
@@ -140,102 +252,4 @@ SELECT zpid FROM properties
 		out = append(out, zpid)
 	}
 	return out, rows.Err()
-}
-
-// renderOne downloads the property's photos, renders its video, uploads it,
-// and records the result.
-func renderOne(
-	ctx context.Context,
-	httpc *http.Client,
-	renderer *video.Renderer,
-	up *bunny.Client,
-	repo *property.Repository,
-	p *property.Property,
-	secondsPerPhoto int,
-) error {
-	workDir, err := os.MkdirTemp("", "backfill-"+p.ZPID+"-")
-	if err != nil {
-		return fmt.Errorf("create work dir: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
-	var photos []string
-	for i, src := range p.ImageURLs {
-		data, err := download(ctx, httpc, src)
-		if err != nil {
-			log.Printf("zpid=%s photo download failed: %s: %v", p.ZPID, src, err)
-			continue
-		}
-		data, ext, _, err := imaging.Normalize(data)
-		if err != nil {
-			log.Printf("zpid=%s photo normalize failed: %s: %v", p.ZPID, src, err)
-			continue
-		}
-		dest := filepath.Join(workDir, strconv.Itoa(i)+ext)
-		if err := os.WriteFile(dest, data, 0o644); err != nil {
-			return fmt.Errorf("write photo: %w", err)
-		}
-		photos = append(photos, dest)
-	}
-	if len(photos) == 0 {
-		return fmt.Errorf("no photos could be downloaded (%d sources)", len(p.ImageURLs))
-	}
-
-	outPath := filepath.Join(workDir, "video.mp4")
-	dur, err := renderer.Render(ctx, p, photos, workDir, outPath)
-	if err != nil {
-		return fmt.Errorf("render: %w", err)
-	}
-
-	f, err := os.Open(outPath)
-	if err != nil {
-		return fmt.Errorf("open rendered video: %w", err)
-	}
-	defer f.Close()
-
-	cdnURL, err := up.Upload(ctx, path.Join("videos", p.ZPID+".mp4"), f, "video/mp4")
-	if err != nil {
-		return fmt.Errorf("upload: %w", err)
-	}
-
-	// Same content hash the scheduler uses, so the next cycle sees this video
-	// as current and does not re-render it.
-	hash := video.ContentHash(p, secondsPerPhoto)
-	if err := repo.SetVideoReady(ctx, p.ZPID, cdnURL, hash, dur); err != nil {
-		return fmt.Errorf("record video: %w", err)
-	}
-	log.Printf("zpid=%s: video ready (%d photos, %ds) %s", p.ZPID, len(photos), dur, cdnURL)
-	return nil
-}
-
-func download(ctx context.Context, c *http.Client, src string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
-	if err != nil {
-		return nil, err
-	}
-	res, err := c.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", res.StatusCode)
-	}
-	return io.ReadAll(res.Body)
-}
-
-func envStr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
 }

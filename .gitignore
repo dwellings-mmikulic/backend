@@ -2,6 +2,8 @@
 /tmp/
 .env
 .env.local
+.env.fleet
+.env.host
 *.out
 .idea/
 .DS_Store

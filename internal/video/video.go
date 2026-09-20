@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dwellingtw/backend/internal/config"
 	"github.com/dwellingtw/backend/internal/property"
@@ -142,6 +143,8 @@ func (r *Renderer) Render(ctx context.Context, p *property.Property, imagePaths 
 
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, r.ffmpeg, args...)
+	// A killed ffmpeg must not leave Run blocked on its stderr pipe: that would hold a work slot past the claim's lease.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return 0, fmt.Errorf("ffmpeg zpid=%s: %w: %s", p.ZPID, err, tail(stderr.String(), 600))

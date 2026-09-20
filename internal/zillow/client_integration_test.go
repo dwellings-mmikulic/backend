@@ -37,14 +37,15 @@ func TestSearch_AgainstRealFixture(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "secret-key", 10*time.Second)
-	props, _, err := c.SearchPages(context.Background(), config.SearchCriteria{
+	res, err := c.SearchPages(context.Background(), config.SearchCriteria{
 		Location:   "Punta Gorda, FL",
 		HomeStatus: "FOR_SALE",
 		MaxResults: 1000,
-	})
+	}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	props := res.Properties
 
 	if gotAPIKey != "secret-key" {
 		t.Errorf("X-API-Key not sent, got %q", gotAPIKey)
@@ -89,15 +90,18 @@ func TestSearch_FilterByPrice(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "k", 10*time.Second)
-	props, _, err := c.SearchPages(context.Background(), config.SearchCriteria{
+	res, err := c.SearchPages(context.Background(), config.SearchCriteria{
 		Location:   "Punta Gorda, FL",
 		MinPrice:   300000,
 		MaxResults: 1000,
-	})
+	}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range props {
+	if len(res.Properties) == 0 {
+		t.Fatal("the price filter removed every listing; the fixture has homes above 300k")
+	}
+	for _, p := range res.Properties {
 		if p.SalePrice < 300000 {
 			t.Errorf("price filter leaked through: %d", p.SalePrice)
 		}
