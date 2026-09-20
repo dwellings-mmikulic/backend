@@ -123,11 +123,17 @@ must carry the same values.
 
 ### Rollout order (first time)
 
-1. Deploy the new image to the **existing** box first and copy the new
-   `compose.prod.yml` to it (CI only runs `pull` + `up -d`; the file on the
-   box is hand-maintained, and the `stop_grace_period` in it matters). It
-   migrates the schema. Remove `SEARCH_MAX_RESULTS=50` and the dead
-   `SEARCH_LOCATION` from its `.env` if they are still there.
+1. **Before** the deploy, add `stop_grace_period: 60s` under `services.app`
+   in the box's `/opt/dwellings/compose.prod.yml`, **editing that file in
+   place** — CI only runs `pull` + `up -d`, and the box's copy is
+   hand-maintained and may carry mounts (the GeoIP volume) that a wholesale
+   copy from this repo would drop. Compose reads the stop timeout when the
+   container is recreated, so editing it first also lets the OLD container
+   shut down gracefully. Then deploy the new image to the **existing** box:
+   it migrates the schema. Also set `INSTANCE_ID` in its `.env` (otherwise
+   claims and logs are keyed to a container id that changes every deploy),
+   and remove `SEARCH_MAX_RESULTS=50` and the dead `SEARCH_LOCATION` if they
+   are still there.
 2. Only then start workers. An image from before this change ignores claims
    and the ledger entirely.
 3. Optionally switch the web box to `ROLE=api` so it stops rendering.
