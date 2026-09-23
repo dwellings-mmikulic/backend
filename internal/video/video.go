@@ -29,6 +29,7 @@ type Renderer struct {
 	fontPath        string
 	musicTracks     []string // sorted absolute paths; may be empty
 	ffmpeg          string
+	threads         int // per-render thread cap; 0 = ffmpeg decides
 }
 
 // New creates a Renderer, loading the available music tracks from the configured
@@ -47,6 +48,7 @@ func New(cfg config.VideoConfig) (*Renderer, error) {
 		fontPath:        cfg.FontPath,
 		musicTracks:     tracks,
 		ffmpeg:          "ffmpeg",
+		threads:         cfg.Threads,
 	}, nil
 }
 
@@ -138,6 +140,7 @@ func (r *Renderer) Render(ctx context.Context, p *property.Property, imagePaths 
 		qrPath:          qrPath,
 		musicPath:       r.selectMusic(p.ZPID),
 		outPath:         outPath,
+		threads:         r.threads,
 	}
 	args := buildFFmpegArgs(spec)
 
@@ -165,6 +168,14 @@ type renderSpec struct {
 	qrPath          string // "" to skip
 	musicPath       string // "" to skip
 	outPath         string
+	// threads caps every pool one render may open: each image decoder, the
+	// filter graph and x264. 0 leaves ffmpeg's own sizing alone.
+	//
+	// It matters because ffmpeg sizes those pools from the CORE COUNT IT SEES,
+	// not from how many renders share the machine. A box running one render
+	// per core therefore opened ~700 threads per process — 25,000 on 32 cores
+	// — and lost more to context switching than it gained in parallelism.
+	threads int
 }
 
 // buildFFmpegArgs constructs the ffmpeg argument list. Pure function — no I/O —
@@ -174,7 +185,17 @@ func buildFFmpegArgs(s renderSpec) []string {
 	secs := strconv.Itoa(s.secondsPerPhoto)
 
 	args := []string{"-y"}
+	threads := ""
+	if s.threads > 0 {
+		threads = strconv.Itoa(s.threads)
+		// Global: the filter graph would otherwise open a pool per core.
+		args = append(args, "-filter_threads", threads, "-filter_complex_threads", threads)
+	}
 	for _, img := range s.imagePaths {
+		if threads != "" {
+			// Per input: one decoder pool per photo, and a listing has ~29.
+			args = append(args, "-threads", threads)
+		}
 		args = append(args, "-loop", "1", "-t", secs, "-i", img)
 	}
 	musicIdx, qrIdx := -1, -1
@@ -211,8 +232,11 @@ func buildFFmpegArgs(s renderSpec) []string {
 		"-r", "30",
 		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "20",
 		"-movflags", "+faststart",
-		s.outPath,
 	)
+	if threads != "" {
+		args = append(args, "-threads", threads) // x264
+	}
+	args = append(args, s.outPath)
 	return args
 }
 

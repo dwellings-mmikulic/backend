@@ -183,3 +183,61 @@ func filterComplexArg(t *testing.T, args []string) string {
 	t.Fatal("no -filter_complex arg")
 	return ""
 }
+
+// A render must not size its thread pools for the whole machine. ffmpeg sees
+// every core inside the container and gives each decoder, the filter graph and
+// x264 a pool of that size, so a box running one render per core ended up with
+// ~700 threads per process and 25,000 in total on 32 cores — it spent its time
+// context-switching instead of encoding (measured in production 2026-09-23:
+// a 32-vCPU worker rendered fewer listings than an 8-vCPU one).
+func TestBuildFFmpegArgs_CapsThreadsPerRender(t *testing.T) {
+	s := renderSpec{
+		imagePaths:      []string{"/w/0.jpg", "/w/1.jpg", "/w/2.jpg"},
+		secondsPerPhoto: 5,
+		outPath:         "/w/out.mp4",
+		threads:         3,
+	}
+	args := buildFFmpegArgs(s)
+	joined := strings.Join(args, " ")
+
+	// Decoding: every input is capped, or 29 photo decoders each open a pool.
+	if got := strings.Count(joined, "-threads 3 -loop 1"); got != 3 {
+		t.Errorf("each image input should carry -threads 3, got %d in: %s", got, joined)
+	}
+	// The filter graph and the encoder get the same cap.
+	mustContain(t, args, "-filter_complex_threads", "3")
+	mustContain(t, args, "-filter_threads", "3")
+	// The encoder's -threads is the one AFTER -c:v libx264 (output side).
+	enc := args[indexOf(t, args, "-c:v"):]
+	if !slices.Contains(enc, "-threads") {
+		t.Errorf("encoder should carry -threads, output args: %v", enc)
+	}
+}
+
+// Zero means "let ffmpeg decide", which is what a single-render box wants and
+// what every existing deployment did before this knob existed.
+func TestBuildFFmpegArgs_ZeroThreadsLeavesFFmpegAlone(t *testing.T) {
+	s := renderSpec{
+		imagePaths:      []string{"/w/0.jpg"},
+		secondsPerPhoto: 5,
+		outPath:         "/w/out.mp4",
+		threads:         0,
+	}
+	joined := strings.Join(buildFFmpegArgs(s), " ")
+	for _, flag := range []string{"-threads", "-filter_threads", "-filter_complex_threads"} {
+		if strings.Contains(joined, flag) {
+			t.Errorf("%s must not appear when threads is 0: %s", flag, joined)
+		}
+	}
+}
+
+func indexOf(t *testing.T, args []string, want string) int {
+	t.Helper()
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	t.Fatalf("%q not found in %v", want, args)
+	return -1
+}

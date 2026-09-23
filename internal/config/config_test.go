@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -604,4 +606,48 @@ func TestLoad_ViewerSaltByRole(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoad_VideoThreads(t *testing.T) {
+	// Unset: the machine is shared between the renders that run on it, so each
+	// gets vCPUs/LISTING_CONCURRENCY threads, never fewer than one.
+	t.Run("derived from listing concurrency", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("IMAGES_ENABLED", "false")
+		t.Setenv("LISTING_CONCURRENCY", "4")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		want := max(1, runtime.NumCPU()/4)
+		if c.Video.Threads != want {
+			t.Errorf("Video.Threads = %d, want %d", c.Video.Threads, want)
+		}
+	})
+	// More renders than cores still leaves each render one thread.
+	t.Run("never zero", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("IMAGES_ENABLED", "false")
+		t.Setenv("LISTING_CONCURRENCY", strconv.Itoa(runtime.NumCPU()*8))
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if c.Video.Threads != 1 {
+			t.Errorf("Video.Threads = %d, want 1", c.Video.Threads)
+		}
+	})
+	t.Run("explicit wins", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("IMAGES_ENABLED", "false")
+		t.Setenv("LISTING_CONCURRENCY", "4")
+		t.Setenv("VIDEO_FFMPEG_THREADS", "6")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if c.Video.Threads != 6 {
+			t.Errorf("Video.Threads = %d, want 6", c.Video.Threads)
+		}
+	})
 }

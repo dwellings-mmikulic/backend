@@ -145,6 +145,11 @@ type VideoConfig struct {
 	SecondsPerPhoto int
 	MusicDir        string
 	FontPath        string
+	// Threads caps the pools one render may open (decoders, filter graph,
+	// x264). ffmpeg sizes them from the core count it sees, which on a box
+	// running one render per core means every render asks for the whole
+	// machine. Defaults to vCPUs / LISTING_CONCURRENCY, at least 1.
+	Threads int
 }
 
 // LinearConfig controls the linear channels.
@@ -324,6 +329,7 @@ func Load() (*Config, error) {
 			SecondsPerPhoto: getenvInt("VIDEO_SECONDS_PER_PHOTO", 4),
 			MusicDir:        getenv("MUSIC_DIR", "assets/music"),
 			FontPath:        getenv("VIDEO_FONT_PATH", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
+			Threads:         getenvInt("VIDEO_FFMPEG_THREADS", 0),
 		},
 		Linear: LinearConfig{
 			Enabled:          getenvBool("LINEAR_ENABLED", true),
@@ -354,6 +360,12 @@ func Load() (*Config, error) {
 	}
 	if c.Concurrency.Listings < 1 {
 		c.Concurrency.Listings = 1
+	}
+	// Share the machine between the renders that run on it. Unset, every
+	// render would size its pools for every core, so N concurrent renders ask
+	// for N times the machine and the box thrashes.
+	if c.Video.Threads <= 0 {
+		c.Video.Threads = max(1, runtime.NumCPU()/c.Concurrency.Listings)
 	}
 	if c.Concurrency.Images < 1 {
 		c.Concurrency.Images = 1
