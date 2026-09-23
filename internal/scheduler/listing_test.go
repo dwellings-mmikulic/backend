@@ -657,7 +657,7 @@ func TestProcessListing_UnchangedReadyVideoIsNotReRendered(t *testing.T) {
 	stored := p
 	stored.ImageURLs = []string{"https://cdn.example/properties/ZP1/0.jpg"}
 	h.store.storedStatus = map[string]property.VideoStatus{"ZP1": property.VideoReady}
-	h.store.storedHash = map[string]string{"ZP1": video.ContentHash(&stored, h.cfg.Video.SecondsPerPhoto)}
+	h.store.storedHash = map[string]string{"ZP1": video.ContentHash(&stored, h.cfg.Video.SecondsPerPhoto, h.cfg.Video.FPS)}
 
 	if _, err := h.s.processListing(context.Background(), &p, false); err != nil {
 		t.Fatal(err)
@@ -681,7 +681,7 @@ func TestProcessListing_OnlyAReadyVideoWithAMatchingHashIsSkipped(t *testing.T) 
 			stored := p
 			stored.ImageURLs = []string{"https://cdn.example/properties/ZP1/0.jpg"}
 			h.store.storedStatus = map[string]property.VideoStatus{"ZP1": status}
-			h.store.storedHash = map[string]string{"ZP1": video.ContentHash(&stored, h.cfg.Video.SecondsPerPhoto)}
+			h.store.storedHash = map[string]string{"ZP1": video.ContentHash(&stored, h.cfg.Video.SecondsPerPhoto, h.cfg.Video.FPS)}
 
 			if _, err := h.s.processListing(context.Background(), &p, false); err != nil {
 				t.Fatal(err)

@@ -145,6 +145,12 @@ type VideoConfig struct {
 	SecondsPerPhoto int
 	MusicDir        string
 	FontPath        string
+	// FPS is the frame rate of the rendered video. The listings are still
+	// photographs under a static overlay, so frames beyond the first of each
+	// photo are duplicates and a lower rate is nearly free throughput:
+	// measured 97 s at 30 fps against 63 s at 15 fps for the same listing,
+	// costing 9% file size. 0 keeps the 30 fps everything was rendered at.
+	FPS int
 	// Threads caps the pools one render may open (decoders, filter graph,
 	// x264). ffmpeg sizes them from the core count it sees, which on a box
 	// running one render per core means every render asks for the whole
@@ -330,6 +336,7 @@ func Load() (*Config, error) {
 			MusicDir:        getenv("MUSIC_DIR", "assets/music"),
 			FontPath:        getenv("VIDEO_FONT_PATH", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
 			Threads:         getenvInt("VIDEO_FFMPEG_THREADS", 0),
+			FPS:             getenvInt("VIDEO_FPS", 0),
 		},
 		Linear: LinearConfig{
 			Enabled:          getenvBool("LINEAR_ENABLED", true),

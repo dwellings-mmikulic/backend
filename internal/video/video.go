@@ -30,6 +30,7 @@ type Renderer struct {
 	musicTracks     []string // sorted absolute paths; may be empty
 	ffmpeg          string
 	threads         int // per-render thread cap; 0 = ffmpeg decides
+	fps             int // frames per second; 0 = defaultFPS
 }
 
 // New creates a Renderer, loading the available music tracks from the configured
@@ -49,6 +50,7 @@ func New(cfg config.VideoConfig) (*Renderer, error) {
 		musicTracks:     tracks,
 		ffmpeg:          "ffmpeg",
 		threads:         cfg.Threads,
+		fps:             cfg.FPS,
 	}, nil
 }
 
@@ -90,9 +92,9 @@ func (r *Renderer) selectMusic(zpid string) string {
 
 // ContentHash captures the inputs that affect a rendered video, so the scheduler
 // can skip re-rendering unchanged listings.
-func ContentHash(p *property.Property, secondsPerPhoto int) string {
+func ContentHash(p *property.Property, secondsPerPhoto, fps int) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "v1|%d|%s|%s|%s|%d|%s|", secondsPerPhoto, p.ZPID, priceText(p), addressText(p), p.SalePrice, factsText(p))
+	fmt.Fprintf(h, "v2|%d|%d|%s|%s|%s|%d|%s|", secondsPerPhoto, fpsOrDefault(fps), p.ZPID, priceText(p), addressText(p), p.SalePrice, factsText(p))
 	fmt.Fprintf(h, "%s|", p.DetailURL)
 	for _, u := range p.ImageURLs {
 		fmt.Fprintf(h, "%s,", u)
@@ -141,6 +143,7 @@ func (r *Renderer) Render(ctx context.Context, p *property.Property, imagePaths 
 		musicPath:       r.selectMusic(p.ZPID),
 		outPath:         outPath,
 		threads:         r.threads,
+		fps:             r.fps,
 	}
 	args := buildFFmpegArgs(spec)
 
@@ -168,6 +171,14 @@ type renderSpec struct {
 	qrPath          string // "" to skip
 	musicPath       string // "" to skip
 	outPath         string
+	// fps is the frame rate of the finished video. 0 means defaultFPS.
+	//
+	// The listings are still photographs under a static overlay, so every
+	// frame after the first of each photo is a duplicate and the frame rate
+	// buys throughput almost for free: measured on a production box (29
+	// photos, 145 s of video, one CPU) 30 fps took 97 s and 11 MB while 15 fps
+	// took 63 s and 12 MB.
+	fps int
 	// threads caps every pool one render may open: each image decoder, the
 	// filter graph and x264. 0 leaves ffmpeg's own sizing alone.
 	//
@@ -183,6 +194,7 @@ type renderSpec struct {
 func buildFFmpegArgs(s renderSpec) []string {
 	n := len(s.imagePaths)
 	secs := strconv.Itoa(s.secondsPerPhoto)
+	fps := fpsOrDefault(s.fps)
 
 	args := []string{"-y"}
 	threads := ""
@@ -229,8 +241,11 @@ func buildFFmpegArgs(s renderSpec) []string {
 	}
 
 	args = append(args,
-		"-r", "30",
+		"-r", strconv.Itoa(fps),
 		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "20",
+		// The content is stills: this tuning is measurably cheaper (91 s
+		// against 97 s on the benchmark above) at the same file size.
+		"-tune", "stillimage",
 		"-movflags", "+faststart",
 	)
 	if threads != "" {
@@ -242,14 +257,15 @@ func buildFFmpegArgs(s renderSpec) []string {
 
 func buildFilterGraph(s renderSpec, qrIdx int) string {
 	n := len(s.imagePaths)
+	fps := fpsOrDefault(s.fps)
 	var parts []string
 
 	// 1) Each photo: scale-to-cover, center-crop to 16:9, normalize.
 	var concatInputs strings.Builder
 	for i := 0; i < n; i++ {
 		parts = append(parts, fmt.Sprintf(
-			"[%d:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30,format=yuv420p[v%d]",
-			i, i))
+			"[%d:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=%d,format=yuv420p[v%d]",
+			i, fps, i))
 		fmt.Fprintf(&concatInputs, "[v%d]", i)
 	}
 	parts = append(parts, fmt.Sprintf("%sconcat=n=%d:v=1:a=0[slide]", concatInputs.String(), n))
@@ -281,6 +297,17 @@ func buildFilterGraph(s renderSpec, qrIdx int) string {
 	}
 
 	return strings.Join(parts, ";")
+}
+
+// defaultFPS is what every listing was rendered at before the frame rate
+// became configurable; keeping it as the fallback lets the knob ship dark.
+const defaultFPS = 30
+
+func fpsOrDefault(fps int) int {
+	if fps <= 0 {
+		return defaultFPS
+	}
+	return fps
 }
 
 func tail(s string, n int) string {

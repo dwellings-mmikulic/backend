@@ -179,7 +179,7 @@ func (s *Scheduler) storeWithoutPhotos(ctx context.Context, p *property.Property
 	if !s.videoWanted() {
 		return nil
 	}
-	hash := video.ContentHash(p, s.cfg.Video.SecondsPerPhoto)
+	hash := video.ContentHash(p, s.cfg.Video.SecondsPerPhoto, s.cfg.Video.FPS)
 	if p.VideoStatus == property.VideoReady && p.VideoContentHash == hash {
 		return nil // unchanged — skip
 	}
@@ -201,7 +201,7 @@ func (s *Scheduler) storeWithoutPhotos(ctx context.Context, p *property.Property
 // Failures are returned. They also mark the video 'failed', except when the
 // process is shutting down: a render that was killed is not a failed render.
 func (s *Scheduler) renderVideo(ctx context.Context, p *property.Property, localPhotos []string, workDir string) error {
-	hash := video.ContentHash(p, s.cfg.Video.SecondsPerPhoto)
+	hash := video.ContentHash(p, s.cfg.Video.SecondsPerPhoto, s.cfg.Video.FPS)
 	if p.VideoStatus == property.VideoReady && p.VideoContentHash == hash {
 		return nil // unchanged — skip
 	}

@@ -73,27 +73,27 @@ func TestSelectMusicDeterministic(t *testing.T) {
 
 func TestContentHashChanges(t *testing.T) {
 	p := sampleProperty()
-	base := ContentHash(p, 4)
+	base := ContentHash(p, 4, 30)
 	if base == "" {
 		t.Fatal("empty hash")
 	}
-	if ContentHash(p, 4) != base {
+	if ContentHash(p, 4, 30) != base {
 		t.Error("hash not stable for same input")
 	}
 	// Price change → different hash.
 	p2 := sampleProperty()
 	p2.SalePrice = 999999
-	if ContentHash(p2, 4) == base {
+	if ContentHash(p2, 4, 30) == base {
 		t.Error("hash unchanged after price change")
 	}
 	// Photo set change → different hash.
 	p3 := sampleProperty()
 	p3.ImageURLs = append(p3.ImageURLs, "https://cdn/c.jpg")
-	if ContentHash(p3, 4) == base {
+	if ContentHash(p3, 4, 30) == base {
 		t.Error("hash unchanged after photo change")
 	}
 	// secondsPerPhoto change → different hash.
-	if ContentHash(p, 6) == base {
+	if ContentHash(p, 6, 30) == base {
 		t.Error("hash unchanged after seconds change")
 	}
 }
@@ -240,4 +240,58 @@ func indexOf(t *testing.T, args []string, want string) int {
 	}
 	t.Fatalf("%q not found in %v", want, args)
 	return -1
+}
+
+// The listings are still photographs with a static overlay: nothing moves, so
+// every frame beyond the first of each photo is a duplicate. Measured on a
+// production box (29 photos, 145 s of video, one CPU): 30 fps took 97 s and
+// 11 MB, 15 fps took 63 s and 12 MB. The frame rate is therefore the cheapest
+// throughput lever there is, and it has to reach both the scaler and the
+// encoder or the filter graph would still produce frames the encoder drops.
+func TestBuildFFmpegArgs_FrameRateReachesScalerAndEncoder(t *testing.T) {
+	s := renderSpec{
+		imagePaths:      []string{"/w/0.jpg", "/w/1.jpg"},
+		secondsPerPhoto: 5,
+		outPath:         "/w/out.mp4",
+		fps:             15,
+	}
+	args := buildFFmpegArgs(s)
+	mustContain(t, args, "-r", "15")
+	fc := filterComplexArg(t, args)
+	if got := strings.Count(fc, "fps=15"); got != 2 {
+		t.Errorf("every photo should be scaled at fps=15, got %d in: %s", got, fc)
+	}
+	if strings.Contains(fc, "fps=30") {
+		t.Errorf("no 30 fps left behind: %s", fc)
+	}
+}
+
+// Zero keeps the frame rate every existing deployment renders at, so the knob
+// can ship dark and be turned on per fleet.
+func TestBuildFFmpegArgs_ZeroFPSFallsBackToThirty(t *testing.T) {
+	s := renderSpec{imagePaths: []string{"/w/0.jpg"}, secondsPerPhoto: 5, outPath: "/w/out.mp4"}
+	args := buildFFmpegArgs(s)
+	mustContain(t, args, "-r", "30")
+	if !strings.Contains(filterComplexArg(t, args), "fps=30") {
+		t.Errorf("default should stay 30 fps")
+	}
+}
+
+// x264's still-image tuning costs nothing and suits the content exactly:
+// measured 91 s against 97 s at the same 11 MB.
+func TestBuildFFmpegArgs_TunesForStillImages(t *testing.T) {
+	args := buildFFmpegArgs(renderSpec{imagePaths: []string{"/w/0.jpg"}, secondsPerPhoto: 5, outPath: "/w/out.mp4"})
+	mustContain(t, args, "-tune", "stillimage")
+}
+
+// The frame rate changes the rendered bytes, so it belongs in the hash that
+// decides whether a stored video is still current.
+func TestContentHash_ChangesWithFrameRate(t *testing.T) {
+	p := &property.Property{ZPID: "1", Address: "a", ImageURLs: []string{"u"}}
+	if ContentHash(p, 5, 30) == ContentHash(p, 5, 15) {
+		t.Error("hash must distinguish 30 fps from 15 fps")
+	}
+	if ContentHash(p, 5, 30) != ContentHash(p, 5, 30) {
+		t.Error("hash must be stable for identical inputs")
+	}
 }
