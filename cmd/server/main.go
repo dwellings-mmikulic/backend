@@ -272,6 +272,8 @@ func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, 
 		Audience:       repo,
 		PublicBaseURL:  cfg.PublicBaseURL,
 		LastWatchedTTL: time.Duration(cfg.Viewer.RetentionDays) * 24 * time.Hour,
+		Clients:        repo,
+		AdminKey:       cfg.Viewer.AdminKey,
 	}
 	if cfg.Viewer.GeoIPDBPath != "" {
 		g, err := geo.Open(cfg.Viewer.GeoIPDBPath)
@@ -281,7 +283,7 @@ func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, 
 			o.Geo = g
 		}
 	}
-	log.Info("viewer tracking enabled", "rotate_daily", cfg.Viewer.RotateDaily, "retention_days", cfg.Viewer.RetentionDays, "geoip", o.Geo != nil)
+	log.Info("viewer tracking enabled", "rotate_daily", cfg.Viewer.RotateDaily, "retention_days", cfg.Viewer.RetentionDays, "geoip", o.Geo != nil, "admin_viewers", o.AdminKey != "")
 	return o
 }
 

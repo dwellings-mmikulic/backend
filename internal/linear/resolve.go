@@ -21,7 +21,12 @@ type Audience interface {
 
 // Tracker receives a heartbeat per live-playlist request (viewer.Recorder).
 type Tracker interface {
-	Record(id viewer.ID, channel string, t time.Time)
+	Record(id viewer.ID, channel string, t time.Time, c viewer.Client)
+}
+
+// ClientLog lists raw client addresses for /admin/viewers (viewer.Store).
+type ClientLog interface {
+	Clients(ctx context.Context, since time.Time, limit int) ([]viewer.ClientSeen, error)
 }
 
 // ViewerOptions enables viewer tracking and the resolve/stats endpoints.
@@ -34,6 +39,10 @@ type ViewerOptions struct {
 	// LastWatchedTTL bounds how old a "last watched" channel may be before
 	// it is ignored. Zero means 30 days.
 	LastWatchedTTL time.Duration
+	// Clients and AdminKey mount GET /admin/viewers, the raw client
+	// listing, when both are set.
+	Clients  ClientLog
+	AdminKey string
 }
 
 // EnableViewers turns on tracking and the /channels/resolve and
@@ -50,7 +59,7 @@ func (h *Handler) track(r *http.Request, sc Scope, now time.Time) {
 	if h.viewers == nil || h.viewers.Tracker == nil {
 		return
 	}
-	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now)
+	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, viewer.NewClient(r))
 }
 
 // resolveResponse is the body of /channels/resolve.

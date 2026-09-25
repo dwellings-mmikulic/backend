@@ -34,8 +34,8 @@ func (g fakeGeo) Locate(net.IP) (geo.Location, bool) { return g.loc, g.loc != ge
 
 type fakeTracker struct{ beats []viewer.Heartbeat }
 
-func (t *fakeTracker) Record(id viewer.ID, ch string, at time.Time) {
-	t.beats = append(t.beats, viewer.Heartbeat{Viewer: id, Channel: ch, Minute: at})
+func (t *fakeTracker) Record(id viewer.ID, ch string, at time.Time, c viewer.Client) {
+	t.beats = append(t.beats, viewer.Heartbeat{Viewer: id, Channel: ch, Minute: at, Client: c})
 }
 
 func serveViewers(t *testing.T, store Store, o ViewerOptions, path, ip string) *httptest.ResponseRecorder {
@@ -47,6 +47,21 @@ func serveViewers(t *testing.T, store Store, o ViewerOptions, path, ip string) *
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set("X-Real-IP", ip)
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func serveViewersAuth(t *testing.T, o ViewerOptions, path, auth string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := NewHandler(testService(newMemStore(), t0), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.EnableViewers(o)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
 	mux.ServeHTTP(rec, req)
 	return rec
 }

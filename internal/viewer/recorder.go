@@ -12,6 +12,22 @@ type Heartbeat struct {
 	Viewer  ID
 	Channel string // linear channel key, e.g. "us", "zip:77494"
 	Minute  time.Time
+	Client  Client
+}
+
+// Client is where a heartbeat came from, stored raw for /admin/viewers.
+type Client struct {
+	IP        string // public client address; "" is not stored
+	UserAgent string
+}
+
+// ClientSeen is one client address seen on a channel.
+type ClientSeen struct {
+	IP        string    `json:"ip"`
+	UserAgent string    `json:"user_agent"`
+	Channel   string    `json:"channel"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 // Stats summarises a channel's audience.
@@ -30,7 +46,9 @@ type Store interface {
 	LastChannel(ctx context.Context, id ID, since time.Time) (channel string, ok bool, err error)
 	// Stats is the audience of a channel at now.
 	Stats(ctx context.Context, channel string, now time.Time) (Stats, error)
-	// Purge deletes heartbeats older than before.
+	// Clients lists the client addresses seen since, most recent first.
+	Clients(ctx context.Context, since time.Time, limit int) ([]ClientSeen, error)
+	// Purge deletes heartbeats and client rows older than before.
 	Purge(ctx context.Context, before time.Time) (int64, error)
 }
 
@@ -77,11 +95,12 @@ func NewRecorder(store Store, opts Options, log *slog.Logger) *Recorder {
 	return &Recorder{store: store, opts: opts.withDefaults(), log: log, pending: map[Heartbeat]struct{}{}}
 }
 
-// Record notes that id polled channel at t. Repeats within the same minute
-// collapse into one row. When the buffer is full (the store is unreachable
-// for a long time) new beats are dropped rather than growing memory.
-func (r *Recorder) Record(id ID, channel string, t time.Time) {
-	hb := Heartbeat{Viewer: id, Channel: channel, Minute: t.UTC().Truncate(time.Minute)}
+// Record notes that id polled channel at t from c. Repeats within the same
+// minute collapse into one row. When the buffer is full (the store is
+// unreachable for a long time) new beats are dropped rather than growing
+// memory.
+func (r *Recorder) Record(id ID, channel string, t time.Time, c Client) {
+	hb := Heartbeat{Viewer: id, Channel: channel, Minute: t.UTC().Truncate(time.Minute), Client: c}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.pending[hb]; ok {

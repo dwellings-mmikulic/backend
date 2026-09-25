@@ -121,7 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_channel_lineups_key_ends
 -- Viewer tracking (see docs/superpowers/specs/2026-08-26-viewer-tracking-design.md).
 -- viewer_heartbeats: one row per (pseudonymous viewer, channel, minute) in
 -- which the viewer polled the live playlist. viewer_hash is a salted hash;
--- no raw address is ever stored. Rows are purged after the retention period.
+-- the raw address is kept only in viewer_clients. Rows are purged after the
+-- retention period.
 CREATE TABLE IF NOT EXISTS viewer_heartbeats (
     viewer_hash BYTEA NOT NULL,
     channel_key TEXT NOT NULL,
@@ -140,6 +141,20 @@ CREATE TABLE IF NOT EXISTS viewer_last_channel (
     channel_key TEXT NOT NULL,
     seen_at     TIMESTAMPTZ NOT NULL
 );
+
+-- viewer_clients: the raw public client address and user agent behind the
+-- heartbeats, one row per (ip, user agent, channel), listed by the
+-- key-protected /admin/viewers. Purged on the heartbeats' retention.
+CREATE TABLE IF NOT EXISTS viewer_clients (
+    ip          TEXT NOT NULL,
+    user_agent  TEXT NOT NULL,
+    channel_key TEXT NOT NULL,
+    first_seen  TIMESTAMPTZ NOT NULL,
+    last_seen   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (ip, user_agent, channel_key)
+);
+CREATE INDEX IF NOT EXISTS idx_viewer_clients_last_seen
+    ON viewer_clients (last_seen);
 
 -- Multi-instance workers (see
 -- docs/superpowers/specs/2026-09-19-multi-instance-workers-design.md).
