@@ -46,19 +46,27 @@ const maxSIDLen = 64
 
 // SID is the sid query parameter when it looks like a device or session id
 // (1–64 of A–Z a–z 0–9 . _ : -), else "". A platform macro the player did
-// not fill, such as {RIDA}, is not one. Playlists echo it, so it must not be
-// able to carry anything else.
+// not fill is not one: neither {RIDA} nor a bare macro name such as
+// ROKU_ADS_TRACKING_ID (only capitals and underscores), which would merge
+// every device that sent it into one viewer. Playlists echo it, so it must
+// not be able to carry anything else.
 func SID(q url.Values) string {
 	s := strings.TrimSpace(q.Get("sid"))
 	if s == "" || len(s) > maxSIDLen {
 		return ""
 	}
+	macroName := true
 	for _, c := range s {
-		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
-			c == '.' || c == '_' || c == ':' || c == '-'
+		upper := c >= 'A' && c <= 'Z' || c == '_'
+		ok := upper || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
+			c == '.' || c == ':' || c == '-'
 		if !ok {
 			return ""
 		}
+		macroName = macroName && upper
+	}
+	if macroName {
+		return ""
 	}
 	return s
 }
