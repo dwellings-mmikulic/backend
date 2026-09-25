@@ -108,9 +108,13 @@ func TestSID(t *testing.T) {
 		"abc":                                    "abc",
 		" 5f1c2e9a-0b3d-4c1e-9a7f-2b6d8e4c1a00 ": "5f1c2e9a-0b3d-4c1e-9a7f-2b6d8e4c1a00",
 		"{RIDA}":                                 "",
-		"a b":                                    "",
-		"<x>":                                    "",
-		strings.Repeat("a", 65):                  "",
+		// An unfilled macro name would merge every such device into one viewer.
+		"ROKU_ADS_TRACKING_ID":                 "",
+		"RIDA":                                 "",
+		"5F1C2E9A-0B3D-4C1E-9A7F-2B6D8E4C1A00": "5F1C2E9A-0B3D-4C1E-9A7F-2B6D8E4C1A00",
+		"a b":                                  "",
+		"<x>":                                  "",
+		strings.Repeat("a", 65):                "",
 	} {
 		if got := SID(url.Values{"sid": {in}}); got != want {
 			t.Errorf("SID(%q) = %q, want %q", in, got, want)
