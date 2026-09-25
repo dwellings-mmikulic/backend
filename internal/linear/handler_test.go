@@ -60,6 +60,16 @@ func TestHandler_Master(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "\nlive.m3u8?city=katy&state=tx\n") {
 		t.Errorf("master must re-encode the scope:\n%s", rec.Body.String())
 	}
+	// Viewer parameters ride along to the media playlist, which is the
+	// request that is tracked; invalid ones (an unfilled macro) are dropped.
+	rec = serve(t, newMemStore(), t0, "/channels/master.m3u8?state=TX&ip=203.0.113.5&sid=roku-1")
+	if !strings.Contains(rec.Body.String(), "\nlive.m3u8?ip=203.0.113.5&sid=roku-1&state=tx\n") {
+		t.Errorf("master must carry sid and ip:\n%s", rec.Body.String())
+	}
+	rec = serve(t, newMemStore(), t0, "/channels/master.m3u8?ip=%7BRokuIP%7D&sid=%3Cx%3E")
+	if !strings.Contains(rec.Body.String(), "\nlive.m3u8\n") {
+		t.Errorf("master must drop invalid sid and ip:\n%s", rec.Body.String())
+	}
 }
 
 func TestHandler_BadFilterIs400(t *testing.T) {

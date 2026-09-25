@@ -178,8 +178,13 @@ the segmenter), or no segmented clip in the database (run the backfill).
 ### Viewer tracking and channel resolve
 
 A viewer is a salted SHA-256 of the `sid` query parameter if present — an
-app sends its device/advertising id (Roku RIDA) — else of the client IP;
-the raw value is never stored. Viewers are recorded once per minute per
+app sends its device/advertising id (Roku RIDA) — else of the `ip` query
+parameter, else of the client IP; the raw value is never stored. `ip` is for
+platforms that fill a macro (`master.m3u8?ip={RokuIP}`) because a server of
+theirs, not the device, may fetch the stream. A `sid` outside 1–64 of
+`A-Za-z0-9._:-` or an `ip` that is not an address (an unfilled macro) is
+ignored. `master.m3u8` carries both on to its `live.m3u8` reference, so a
+player given only the master URL is still identified. Viewers are recorded once per minute per
 channel in `viewer_heartbeats`, batched every 30 s and purged after
 `VIEWER_RETENTION_DAYS`.
 
@@ -192,7 +197,9 @@ GET /channels/stats?state=TX      → {"scope","concurrent","unique_24h","unique
 Playlists are cached per scope at the edge, so audience size never reaches
 the app; players report themselves with `beat` (same filters as the
 playlist they are on). Polls of `live.m3u8` that do reach the app are
-counted too, so anonymous third-party players still show up as a sample.
+counted too, so anonymous third-party players still show up as a sample;
+with `sid` or `ip` in the URL each viewer has its own cache entry, so every
+one of their polls is counted.
 
 `resolve` picks a channel for the caller: the one they last watched (within
 the retention period), else the ZIP/city/state of their IP (MaxMind

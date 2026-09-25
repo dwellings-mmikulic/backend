@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -33,10 +34,52 @@ func NewHasher(salt string, rotateDaily bool) *Hasher {
 	return &Hasher{salt: salt, rotateDaily: rotateDaily, now: time.Now}
 }
 
-// ID identifies the request's viewer: by the sid query parameter when
-// present, else by client IP.
+// ID identifies the request's viewer: by a valid sid query parameter, else
+// by a valid ip query parameter, else by client IP.
 func (h *Hasher) ID(r *http.Request) ID {
-	return h.IDAt(strings.TrimSpace(r.URL.Query().Get("sid")), ClientIP(r), h.now())
+	return h.IDAt(SID(r.URL.Query()), RequestIP(r), h.now())
+}
+
+// maxSIDLen caps a session id; a Roku RIDA is a 36-character UUID.
+const maxSIDLen = 64
+
+// SID is the sid query parameter when it looks like a device or session id
+// (1–64 of A–Z a–z 0–9 . _ : -), else "". A platform macro the player did
+// not fill, such as {RIDA}, is not one. Playlists echo it, so it must not be
+// able to carry anything else.
+func SID(q url.Values) string {
+	s := strings.TrimSpace(q.Get("sid"))
+	if s == "" || len(s) > maxSIDLen {
+		return ""
+	}
+	for _, c := range s {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '_' || c == ':' || c == '-'
+		if !ok {
+			return ""
+		}
+	}
+	return s
+}
+
+// QueryIP is the ip query parameter in canonical form when it is an IP
+// address, else "". Streaming platforms fill it through a macro (e.g.
+// ip={RokuIP}) so the viewer is known even when a server of theirs, not the
+// device, makes the request; an unfilled macro is ignored.
+func QueryIP(q url.Values) string {
+	ip := net.ParseIP(strings.TrimSpace(q.Get("ip")))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+// RequestIP is the viewer's address: QueryIP when set, else ClientIP.
+func RequestIP(r *http.Request) string {
+	if ip := QueryIP(r.URL.Query()); ip != "" {
+		return ip
+	}
+	return ClientIP(r)
 }
 
 // IDAt is ID with explicit inputs. sid wins over ip when non-empty; the two
