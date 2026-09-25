@@ -2,6 +2,8 @@ package viewer
 
 import (
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,5 +75,58 @@ func TestHasher_SaltAndRotation(t *testing.T) {
 	}
 	if fixed.IDAt("", ip, day1).String() == "" || len(fixed.IDAt("", ip, day1).String()) != 32 {
 		t.Error("String should be 32 hex chars")
+	}
+}
+
+func TestHasher_IPParam(t *testing.T) {
+	h := NewHasher("salt", false)
+	req := func(target, realIP string) ID {
+		r := httptest.NewRequest("GET", target, nil)
+		r.Header.Set("X-Real-IP", realIP)
+		return h.ID(r)
+	}
+	// A platform macro such as ip={RokuIP} names the viewer when the request
+	// itself comes from a server in between.
+	if req("/channels/live.m3u8?ip=203.0.113.5", "198.51.100.1") != req("/channels/live.m3u8", "203.0.113.5") {
+		t.Error("a valid ip parameter must identify the viewer like the client IP")
+	}
+	// An unfilled or garbled macro falls back to the client IP.
+	for _, bad := range []string{"%7BRokuIP%7D", "", "999.1.1.1", "localhost"} {
+		if req("/channels/live.m3u8?ip="+bad, "198.51.100.1") != req("/channels/live.m3u8", "198.51.100.1") {
+			t.Errorf("ip=%q must be ignored", bad)
+		}
+	}
+	// sid still wins over the ip parameter.
+	if req("/channels/live.m3u8?sid=abc&ip=203.0.113.5", "1.1.1.1") != req("/channels/live.m3u8?sid=abc", "2.2.2.2") {
+		t.Error("sid must win over the ip parameter")
+	}
+}
+
+func TestSID(t *testing.T) {
+	for in, want := range map[string]string{
+		"abc":                                    "abc",
+		" 5f1c2e9a-0b3d-4c1e-9a7f-2b6d8e4c1a00 ": "5f1c2e9a-0b3d-4c1e-9a7f-2b6d8e4c1a00",
+		"{RIDA}":                                 "",
+		"a b":                                    "",
+		"<x>":                                    "",
+		strings.Repeat("a", 65):                  "",
+	} {
+		if got := SID(url.Values{"sid": {in}}); got != want {
+			t.Errorf("SID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestQueryIP(t *testing.T) {
+	for in, want := range map[string]string{
+		"203.0.113.5":      "203.0.113.5",
+		" 2001:DB8::1 ":    "2001:db8::1",
+		"{RokuIP}":         "",
+		"203.0.113.5:8080": "",
+		"":                 "",
+	} {
+		if got := QueryIP(url.Values{"ip": {in}}); got != want {
+			t.Errorf("QueryIP(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -97,7 +97,7 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if o.Geo != nil {
-		if loc, ok := o.Geo.Locate(net.ParseIP(viewer.ClientIP(r))); ok {
+		if loc, ok := o.Geo.Locate(net.ParseIP(viewer.RequestIP(r))); ok {
 			// A candidate that fell all the way back to national is not a
 			// geo answer; a less specific candidate (the city when the ZIP
 			// is unknown) may still be.
@@ -161,6 +161,17 @@ func (h *Handler) writeResolve(w http.ResponseWriter, sc Scope, source string) {
 // scopeQuery is the canonical query string of sc ("" for national),
 // rebuilt from the parsed scope so nothing from a request is reflected.
 func scopeQuery(sc Scope) string {
+	return encodeQuery(scopeValues(sc))
+}
+
+func encodeQuery(q url.Values) string {
+	if len(q) == 0 {
+		return ""
+	}
+	return "?" + q.Encode()
+}
+
+func scopeValues(sc Scope) url.Values {
 	q := url.Values{}
 	switch {
 	case sc.Zip != "":
@@ -170,10 +181,8 @@ func scopeQuery(sc Scope) string {
 		q.Set("state", sc.State)
 	case sc.State != "":
 		q.Set("state", sc.State)
-	default:
-		return ""
 	}
-	return "?" + q.Encode()
+	return q
 }
 
 // beat is the viewer heartbeat for players that do not reach the origin on

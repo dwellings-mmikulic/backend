@@ -5,6 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+
+	"github.com/dwellingtw/backend/internal/viewer"
 )
 
 const playlistContentType = "application/vnd.apple.mpegurl"
@@ -55,14 +58,25 @@ func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	playlistHeaders(w)
-	writeMaster(w, mediaURI(sc))
+	writeMaster(w, mediaURI(sc, r.URL.Query()))
 }
 
 // mediaURI is the media playlist reference of sc. It is rebuilt from the
 // parsed scope rather than echoing the request's raw query, so unknown or
 // duplicated parameters, odd casing and stray whitespace cannot be reflected
-// into the playlist body.
-func mediaURI(sc Scope) string { return "live.m3u8" + scopeQuery(sc) }
+// into the playlist body. A valid sid and ip are carried along: the media
+// playlist is the request that is tracked, and a player given only a master
+// URL (a third-party app) would otherwise drop them.
+func mediaURI(sc Scope, q url.Values) string {
+	v := scopeValues(sc)
+	if sid := viewer.SID(q); sid != "" {
+		v.Set("sid", sid)
+	}
+	if ip := viewer.QueryIP(q); ip != "" {
+		v.Set("ip", ip)
+	}
+	return "live.m3u8" + encodeQuery(v)
+}
 
 func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 	sc, err := ParseScope(r.URL.Query())
