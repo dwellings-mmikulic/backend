@@ -242,27 +242,33 @@ func indexOf(t *testing.T, args []string, want string) int {
 	return -1
 }
 
-// The listings are still photographs with a static overlay: nothing moves, so
-// every frame beyond the first of each photo is a duplicate. Measured on a
-// production box (29 photos, 145 s of video, one CPU): 30 fps took 97 s and
-// 11 MB, 15 fps took 63 s and 12 MB. The frame rate is therefore the cheapest
-// throughput lever there is, and it has to reach both the scaler and the
-// encoder or the filter graph would still produce frames the encoder drops.
+// The frame rate has to reach both the scaler and the encoder, or the filter
+// graph would produce frames at one rate and the encoder output another.
 func TestBuildFFmpegArgs_FrameRateReachesScalerAndEncoder(t *testing.T) {
 	s := renderSpec{
 		imagePaths:      []string{"/w/0.jpg", "/w/1.jpg"},
 		secondsPerPhoto: 5,
 		outPath:         "/w/out.mp4",
-		fps:             15,
+		fps:             60,
 	}
 	args := buildFFmpegArgs(s)
-	mustContain(t, args, "-r", "15")
+	mustContain(t, args, "-r", "60")
 	fc := filterComplexArg(t, args)
-	if got := strings.Count(fc, "fps=15"); got != 2 {
-		t.Errorf("every photo should be scaled at fps=15, got %d in: %s", got, fc)
+	if got := strings.Count(fc, "fps=60"); got != 2 {
+		t.Errorf("every photo should be scaled at fps=60, got %d in: %s", got, fc)
 	}
 	if strings.Contains(fc, "fps=30") {
 		t.Errorf("no 30 fps left behind: %s", fc)
+	}
+}
+
+// Videos are never rendered below 30 fps, whatever the caller asks for.
+func TestBuildFFmpegArgs_FrameRateNeverBelowThirty(t *testing.T) {
+	s := renderSpec{imagePaths: []string{"/w/0.jpg"}, secondsPerPhoto: 5, outPath: "/w/out.mp4", fps: 15}
+	args := buildFFmpegArgs(s)
+	mustContain(t, args, "-r", "30")
+	if fc := filterComplexArg(t, args); !strings.Contains(fc, "fps=30") || strings.Contains(fc, "fps=15") {
+		t.Errorf("15 fps must be raised to 30: %s", fc)
 	}
 }
 
@@ -288,8 +294,8 @@ func TestBuildFFmpegArgs_TunesForStillImages(t *testing.T) {
 // decides whether a stored video is still current.
 func TestContentHash_ChangesWithFrameRate(t *testing.T) {
 	p := &property.Property{ZPID: "1", Address: "a", ImageURLs: []string{"u"}}
-	if ContentHash(p, 5, 30) == ContentHash(p, 5, 15) {
-		t.Error("hash must distinguish 30 fps from 15 fps")
+	if ContentHash(p, 5, 30) == ContentHash(p, 5, 60) {
+		t.Error("hash must distinguish 30 fps from 60 fps")
 	}
 	if ContentHash(p, 5, 30) != ContentHash(p, 5, 30) {
 		t.Error("hash must be stable for identical inputs")

@@ -651,3 +651,35 @@ func TestLoad_VideoThreads(t *testing.T) {
 		}
 	})
 }
+
+func TestLoad_VideoFPS(t *testing.T) {
+	for _, tc := range []struct {
+		env     string
+		want    int
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"30", 30, false},
+		{"60", 60, false},
+		{"29", 0, true},
+		{"15", 0, true},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			minimalEnv(t)
+			t.Setenv("VIDEO_FPS", tc.env)
+			c, err := Load()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "VIDEO_FPS") {
+					t.Errorf("Load() error = %v, want one naming VIDEO_FPS", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Video.FPS != tc.want {
+				t.Errorf("Video.FPS = %d, want %d", c.Video.FPS, tc.want)
+			}
+		})
+	}
+}

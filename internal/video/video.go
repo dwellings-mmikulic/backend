@@ -30,7 +30,7 @@ type Renderer struct {
 	musicTracks     []string // sorted absolute paths; may be empty
 	ffmpeg          string
 	threads         int // per-render thread cap; 0 = ffmpeg decides
-	fps             int // frames per second; 0 = defaultFPS
+	fps             int // frames per second; floored at config.MinVideoFPS
 }
 
 // New creates a Renderer, loading the available music tracks from the configured
@@ -171,13 +171,8 @@ type renderSpec struct {
 	qrPath          string // "" to skip
 	musicPath       string // "" to skip
 	outPath         string
-	// fps is the frame rate of the finished video. 0 means defaultFPS.
-	//
-	// The listings are still photographs under a static overlay, so every
-	// frame after the first of each photo is a duplicate and the frame rate
-	// buys throughput almost for free: measured on a production box (29
-	// photos, 145 s of video, one CPU) 30 fps took 97 s and 11 MB while 15 fps
-	// took 63 s and 12 MB.
+	// fps is the frame rate of the finished video, floored at
+	// config.MinVideoFPS (so 0 means 30).
 	fps int
 	// threads caps every pool one render may open: each image decoder, the
 	// filter graph and x264. 0 leaves ffmpeg's own sizing alone.
@@ -299,15 +294,10 @@ func buildFilterGraph(s renderSpec, qrIdx int) string {
 	return strings.Join(parts, ";")
 }
 
-// defaultFPS is what every listing was rendered at before the frame rate
-// became configurable; keeping it as the fallback lets the knob ship dark.
-const defaultFPS = 30
-
+// fpsOrDefault never lets a render drop below config.MinVideoFPS. Load
+// already rejects a lower VIDEO_FPS; this covers any other caller.
 func fpsOrDefault(fps int) int {
-	if fps <= 0 {
-		return defaultFPS
-	}
-	return fps
+	return max(fps, config.MinVideoFPS)
 }
 
 func tail(s string, n int) string {

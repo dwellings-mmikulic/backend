@@ -145,11 +145,8 @@ type VideoConfig struct {
 	SecondsPerPhoto int
 	MusicDir        string
 	FontPath        string
-	// FPS is the frame rate of the rendered video. The listings are still
-	// photographs under a static overlay, so frames beyond the first of each
-	// photo are duplicates and a lower rate is nearly free throughput:
-	// measured 97 s at 30 fps against 63 s at 15 fps for the same listing,
-	// costing 9% file size. 0 keeps the 30 fps everything was rendered at.
+	// FPS is the frame rate of the rendered video. 0 means MinVideoFPS;
+	// anything lower than that is rejected by Load.
 	FPS int
 	// Threads caps the pools one render may open (decoders, filter graph,
 	// x264). ffmpeg sizes them from the core count it sees, which on a box
@@ -421,12 +418,19 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("%s must be an absolute http(s) URL, got %q", key, v)
 		}
 	}
+	if c.Video.FPS != 0 && c.Video.FPS < MinVideoFPS {
+		return nil, fmt.Errorf("VIDEO_FPS must be at least %d, got %d", MinVideoFPS, c.Video.FPS)
+	}
 	if c.Viewer.RetentionDays < 1 {
 		c.Viewer.RetentionDays = 1
 	}
 
 	return c, nil
 }
+
+// MinVideoFPS is the lowest frame rate a listing video is rendered at. Lower
+// rates render faster (the content is stills), but the product floor is 30.
+const MinVideoFPS = 30
 
 // isHTTPURL reports whether s is an absolute http(s) URL with a host. Ad tags
 // carry macros like [CACHEBUSTER] in the query, which url.Parse tolerates.
