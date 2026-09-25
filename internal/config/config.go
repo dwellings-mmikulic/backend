@@ -182,6 +182,9 @@ type ViewerConfig struct {
 	// GeoIPDBPath is a MaxMind GeoLite2-City .mmdb; empty disables the IP
 	// geo default in /channels/resolve.
 	GeoIPDBPath string
+	// AdminKey protects GET /admin/viewers, the listing of raw client
+	// addresses. Empty leaves the route unmounted.
+	AdminKey string
 }
 
 // AdsConfig holds the VAST ad tag URLs from the ad server. The backend never
@@ -347,6 +350,7 @@ func Load() (*Config, error) {
 			Salt:          strings.TrimSpace(getenv("VIEWER_SALT", "")),
 			RotateDaily:   getenvBool("VIEWER_SALT_ROTATE_DAILY", false),
 			RetentionDays: getenvInt("VIEWER_RETENTION_DAYS", 30),
+			AdminKey:      strings.TrimSpace(getenv("VIEWER_ADMIN_KEY", "")),
 			GeoIPDBPath:   strings.TrimSpace(getenv("GEOIP_DB_PATH", "")),
 		},
 		Ads: AdsConfig{

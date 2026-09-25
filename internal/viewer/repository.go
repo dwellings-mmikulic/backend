@@ -17,9 +17,9 @@ type Repository struct {
 // NewRepository creates a Repository.
 func NewRepository(pool *pgxpool.Pool) *Repository { return &Repository{pool: pool} }
 
-// InsertHeartbeats implements Store. Heartbeats and the last-channel upsert
-// go in one transaction so a viewer's "last channel" never points at a
-// minute that was not recorded.
+// InsertHeartbeats implements Store. Heartbeats, the last-channel upsert and
+// the client rows go in one transaction so a viewer's "last channel" never
+// points at a minute that was not recorded.
 func (r *Repository) InsertHeartbeats(ctx context.Context, hb []Heartbeat) error {
 	if len(hb) == 0 {
 		return nil
@@ -33,10 +33,14 @@ func (r *Repository) InsertHeartbeats(ctx context.Context, hb []Heartbeat) error
 	hashes := make([][]byte, len(hb))
 	channels := make([]string, len(hb))
 	minutes := make([]time.Time, len(hb))
+	ips := make([]string, len(hb))
+	agents := make([]string, len(hb))
 	for i, b := range hb {
 		hashes[i] = b.Viewer[:]
 		channels[i] = b.Channel
 		minutes[i] = b.Minute
+		ips[i] = b.Client.IP
+		agents[i] = b.Client.UserAgent
 	}
 	const ins = `
 INSERT INTO viewer_heartbeats (viewer_hash, channel_key, minute)
@@ -57,6 +61,20 @@ ON CONFLICT (viewer_hash) DO UPDATE
  WHERE EXCLUDED.seen_at >= viewer_last_channel.seen_at`
 	if _, err := tx.Exec(ctx, last, hashes, channels, minutes); err != nil {
 		return fmt.Errorf("upsert last channel: %w", err)
+	}
+	// Only the seen range is kept, so a batch replayed after a failed flush
+	// changes nothing.
+	const clients = `
+INSERT INTO viewer_clients (ip, user_agent, channel_key, first_seen, last_seen)
+SELECT ip, ua, c, min(m), max(m)
+  FROM unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[]) AS t(ip, ua, c, m)
+ WHERE ip <> ''
+ GROUP BY ip, ua, c
+ON CONFLICT (ip, user_agent, channel_key) DO UPDATE
+   SET first_seen = LEAST(viewer_clients.first_seen, EXCLUDED.first_seen),
+       last_seen  = GREATEST(viewer_clients.last_seen, EXCLUDED.last_seen)`
+	if _, err := tx.Exec(ctx, clients, ips, agents, channels, minutes); err != nil {
+		return fmt.Errorf("upsert clients: %w", err)
 	}
 	return tx.Commit(ctx)
 }
@@ -90,8 +108,32 @@ SELECT count(DISTINCT viewer_hash) FILTER (WHERE minute >= $2::timestamptz - int
 	return s, nil
 }
 
-// Purge implements Store. viewer_last_channel is trimmed on the same cutoff
-// so a stale default cannot outlive the evidence for it.
+// Clients implements Store.
+func (r *Repository) Clients(ctx context.Context, since time.Time, limit int) ([]ClientSeen, error) {
+	const q = `
+SELECT ip, user_agent, channel_key, first_seen, last_seen
+  FROM viewer_clients
+ WHERE last_seen >= $1
+ ORDER BY last_seen DESC, ip, channel_key
+ LIMIT $2`
+	rows, err := r.pool.Query(ctx, q, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("clients: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ClientSeen, error) {
+		var c ClientSeen
+		err := row.Scan(&c.IP, &c.UserAgent, &c.Channel, &c.FirstSeen, &c.LastSeen)
+		return c, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("clients: %w", err)
+	}
+	return out, nil
+}
+
+// Purge implements Store. viewer_last_channel and viewer_clients are trimmed
+// on the same cutoff so neither a stale default nor a raw address outlives
+// the evidence for it.
 func (r *Repository) Purge(ctx context.Context, before time.Time) (int64, error) {
 	tag, err := r.pool.Exec(ctx, `DELETE FROM viewer_heartbeats WHERE minute < $1`, before)
 	if err != nil {
@@ -99,6 +141,9 @@ func (r *Repository) Purge(ctx context.Context, before time.Time) (int64, error)
 	}
 	if _, err := r.pool.Exec(ctx, `DELETE FROM viewer_last_channel WHERE seen_at < $1`, before); err != nil {
 		return tag.RowsAffected(), fmt.Errorf("purge last channel: %w", err)
+	}
+	if _, err := r.pool.Exec(ctx, `DELETE FROM viewer_clients WHERE last_seen < $1`, before); err != nil {
+		return tag.RowsAffected(), fmt.Errorf("purge clients: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }

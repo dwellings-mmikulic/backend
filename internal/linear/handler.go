@@ -48,6 +48,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		mux.HandleFunc("GET /channels/resolve", h.resolve)
 		mux.HandleFunc("GET /channels/stats", h.stats)
 		mux.HandleFunc("GET /channels/beat", h.beat)
+		if h.viewers.Clients != nil && h.viewers.AdminKey != "" {
+			mux.HandleFunc("GET /admin/viewers", h.adminViewers)
+		}
 	}
 }
 

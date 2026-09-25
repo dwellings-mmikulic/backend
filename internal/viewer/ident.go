@@ -1,6 +1,7 @@
-// Package viewer identifies who is watching the linear channels without
-// storing anything that names them: a salted hash of a session id or of the
-// client IP, recorded once per minute per channel.
+// Package viewer identifies who is watching the linear channels: a salted
+// hash of a session id or of the client IP, recorded once per minute per
+// channel, plus the raw client address and user agent behind those
+// heartbeats for the key-protected /admin/viewers listing.
 // See docs/superpowers/specs/2026-08-26-viewer-tracking-design.md.
 package viewer
 
@@ -62,16 +63,29 @@ func SID(q url.Values) string {
 	return s
 }
 
-// QueryIP is the ip query parameter in canonical form when it is an IP
-// address, else "". Streaming platforms fill it through a macro (e.g.
+// QueryIP is the ip query parameter in canonical form when it is a public
+// IP address, else "". Streaming platforms fill it through a macro (e.g.
 // ip={RokuIP}) so the viewer is known even when a server of theirs, not the
-// device, makes the request; an unfilled macro is ignored.
+// device, makes the request. An unfilled macro is ignored, and so is a
+// private address: Roku fills its macro with the device's LAN address
+// (10.0.0.90), which thousands of homes share and which would hide the
+// public address the request really came from.
 func QueryIP(q url.Values) string {
 	ip := net.ParseIP(strings.TrimSpace(q.Get("ip")))
-	if ip == nil {
+	if ip == nil || !isPublic(ip) {
 		return ""
 	}
 	return ip.String()
+}
+
+// cgnat is 100.64.0.0/10, carrier-grade NAT space, which net.IP.IsPrivate
+// does not cover.
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+func isPublic(ip net.IP) bool {
+	return !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() &&
+		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() &&
+		!ip.IsInterfaceLocalMulticast() && !ip.IsMulticast() && !cgnat.Contains(ip)
 }
 
 // RequestIP is the viewer's address: QueryIP when set, else ClientIP.
@@ -102,6 +116,20 @@ func (h *Hasher) IDAt(sid, ip string, t time.Time) ID {
 	var id ID
 	copy(id[:], sum.Sum(nil))
 	return id
+}
+
+// maxUserAgentLen caps the stored user agent.
+const maxUserAgentLen = 256
+
+// NewClient is the raw client behind r: RequestIP and the User-Agent,
+// trimmed to maxUserAgentLen and made safe for a PostgreSQL text column.
+func NewClient(r *http.Request) Client {
+	ua := strings.TrimSpace(r.UserAgent())
+	if len(ua) > maxUserAgentLen {
+		ua = ua[:maxUserAgentLen]
+	}
+	ua = strings.ToValidUTF8(strings.ReplaceAll(ua, "\x00", ""), "")
+	return Client{IP: RequestIP(r), UserAgent: ua}
 }
 
 // ClientIP is the address the request came from as seen by the edge:

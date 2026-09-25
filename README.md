@@ -179,14 +179,30 @@ the segmenter), or no segmented clip in the database (run the backfill).
 
 A viewer is a salted SHA-256 of the `sid` query parameter if present — an
 app sends its device/advertising id (Roku RIDA) — else of the `ip` query
-parameter, else of the client IP; the raw value is never stored. `ip` is for
-platforms that fill a macro (`master.m3u8?ip={RokuIP}`) because a server of
-theirs, not the device, may fetch the stream. A `sid` outside 1–64 of
-`A-Za-z0-9._:-` or an `ip` that is not an address (an unfilled macro) is
-ignored. `master.m3u8` carries both on to its `live.m3u8` reference, so a
+parameter, else of the client IP. `ip` is for platforms that fill a macro
+(`master.m3u8?ip={RokuIP}`) because a server of theirs, not the device, may
+fetch the stream. A `sid` outside 1–64 of `A-Za-z0-9._:-`, or an `ip` that is
+not a public address, is ignored: an unfilled macro, and the LAN address
+Roku puts in its macro (`10.0.0.90`), which would hide the public address the
+request came from. `master.m3u8` carries both on to its `live.m3u8` reference, so a
 player given only the master URL is still identified. Viewers are recorded once per minute per
 channel in `viewer_heartbeats`, batched every 30 s and purged after
 `VIEWER_RETENTION_DAYS`.
+
+The raw public client address and user agent behind the heartbeats are kept
+in `viewer_clients` (one row per ip, user agent and channel, with first and
+last seen), purged on the same retention, and listed by an admin endpoint
+mounted only when `VIEWER_ADMIN_KEY` is set:
+
+```
+GET /admin/viewers?key=…&hours=24&limit=500   (or Authorization: Bearer …)
+→ {"since","count","viewers":[{"ip","user_agent","channel","first_seen","last_seen"}]}
+```
+
+It lives outside `/channels/` so nginx never caches it. A viewer only shows
+up when one of their polls reaches the app: rarely a problem with `sid`/`ip`
+in the URL (own cache entry), but at large audiences most scope-only polls
+are served from the edge cache.
 
 ```
 GET /channels/beat?state=TX&sid=… → 204   (heartbeat; call every ~60 s while playing)
@@ -327,7 +343,8 @@ channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 the poster of the Roku live entry; see [Linear channels](#linear-channels)).
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
-`VIEWER_RETENTION_DAYS` (`30`) and `GEOIP_DB_PATH` (empty = no geo).
+`VIEWER_RETENTION_DAYS` (`30`), `GEOIP_DB_PATH` (empty = no geo) and
+`VIEWER_ADMIN_KEY` (empty = no `/admin/viewers`).
 
 `AD_PREROLL_URL` and `AD_MIDROLL_URL` (both empty) are the VAST ad tags from
 the ad server. The backend never calls them: `/api/v1/properties`,

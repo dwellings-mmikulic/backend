@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestHasher_IPSources(t *testing.T) {
@@ -124,9 +125,50 @@ func TestQueryIP(t *testing.T) {
 		"{RokuIP}":         "",
 		"203.0.113.5:8080": "",
 		"":                 "",
+		// Roku fills its macro with the LAN address; private, loopback,
+		// link-local and CGNAT addresses never name a viewer.
+		"10.0.0.90":   "",
+		"192.168.1.5": "",
+		"172.16.0.1":  "",
+		"127.0.0.1":   "",
+		"169.254.1.1": "",
+		"100.64.0.1":  "",
+		"0.0.0.0":     "",
+		"fd00::1":     "",
+		"::1":         "",
 	} {
 		if got := QueryIP(url.Values{"ip": {in}}); got != want {
 			t.Errorf("QueryIP(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestHasher_PrivateIPParamFallsBackToClientIP(t *testing.T) {
+	h := NewHasher("salt", false)
+	r1 := httptest.NewRequest("GET", "/channels/live.m3u8?ip=10.0.0.90", nil)
+	r1.Header.Set("X-Real-IP", "99.178.140.144")
+	r2 := httptest.NewRequest("GET", "/channels/live.m3u8", nil)
+	r2.Header.Set("X-Real-IP", "99.178.140.144")
+	if h.ID(r1) != h.ID(r2) {
+		t.Error("a private ip parameter must not replace the client IP")
+	}
+}
+
+func TestNewClient(t *testing.T) {
+	r := httptest.NewRequest("GET", "/channels/live.m3u8?ip=10.0.0.90", nil)
+	r.Header.Set("X-Real-IP", "99.178.140.144")
+	r.Header.Set("User-Agent", "Roku/DVP-15.3 (15.3.4.2402-CU)")
+	if c := NewClient(r); c.IP != "99.178.140.144" || c.UserAgent != "Roku/DVP-15.3 (15.3.4.2402-CU)" {
+		t.Errorf("client = %+v", c)
+	}
+	r = httptest.NewRequest("GET", "/channels/live.m3u8?ip=198.51.100.7", nil)
+	r.Header.Set("X-Real-IP", "34.1.1.1")
+	r.Header.Set("User-Agent", strings.Repeat("é", 200)+"\x00")
+	c := NewClient(r)
+	if c.IP != "198.51.100.7" {
+		t.Errorf("a public ip parameter names the client: %+v", c)
+	}
+	if len(c.UserAgent) > maxUserAgentLen || !utf8.ValidString(c.UserAgent) || strings.Contains(c.UserAgent, "\x00") {
+		t.Errorf("user agent not sanitised: len %d", len(c.UserAgent))
 	}
 }

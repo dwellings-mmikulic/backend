@@ -34,16 +34,19 @@ func (f *fakeStore) LastChannel(context.Context, ID, time.Time) (string, bool, e
 	return "", false, nil
 }
 func (f *fakeStore) Stats(context.Context, string, time.Time) (Stats, error) { return Stats{}, nil }
+func (f *fakeStore) Clients(context.Context, time.Time, int) ([]ClientSeen, error) {
+	return nil, nil
+}
 
 func TestRecorder_DedupesPerMinuteAndFlushes(t *testing.T) {
 	st := &fakeStore{}
 	rec := NewRecorder(st, Options{}, nil)
 	t0 := time.Date(2026, 8, 26, 12, 0, 5, 0, time.UTC)
 	id := ID{1}
-	rec.Record(id, "us", t0)
-	rec.Record(id, "us", t0.Add(20*time.Second)) // same minute → one row
-	rec.Record(id, "us", t0.Add(70*time.Second)) // next minute
-	rec.Record(ID{2}, "state:tx", t0)
+	rec.Record(id, "us", t0, Client{})
+	rec.Record(id, "us", t0.Add(20*time.Second), Client{}) // same minute → one row
+	rec.Record(id, "us", t0.Add(70*time.Second), Client{}) // next minute
+	rec.Record(ID{2}, "state:tx", t0, Client{})
 	if n := rec.Pending(); n != 3 {
 		t.Fatalf("pending = %d, want 3", n)
 	}
@@ -63,7 +66,7 @@ func TestRecorder_DedupesPerMinuteAndFlushes(t *testing.T) {
 func TestRecorder_FlushFailureKeepsPending(t *testing.T) {
 	st := &fakeStore{fail: errors.New("db down")}
 	rec := NewRecorder(st, Options{}, nil)
-	rec.Record(ID{1}, "us", time.Now())
+	rec.Record(ID{1}, "us", time.Now(), Client{})
 	if err := rec.Flush(context.Background()); err == nil {
 		t.Fatal("expected error")
 	}
@@ -81,9 +84,9 @@ func TestRecorder_FlushFailureKeepsPending(t *testing.T) {
 func TestRecorder_PendingCap(t *testing.T) {
 	rec := NewRecorder(&fakeStore{}, Options{MaxPending: 2}, nil)
 	now := time.Now()
-	rec.Record(ID{1}, "us", now)
-	rec.Record(ID{2}, "us", now)
-	rec.Record(ID{3}, "us", now) // dropped, not grown without bound
+	rec.Record(ID{1}, "us", now, Client{})
+	rec.Record(ID{2}, "us", now, Client{})
+	rec.Record(ID{3}, "us", now, Client{}) // dropped, not grown without bound
 	if rec.Pending() != 2 {
 		t.Errorf("pending = %d, want 2", rec.Pending())
 	}
@@ -95,7 +98,7 @@ func TestRecorder_RunFlushesAndPurges(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { rec.Run(ctx); close(done) }()
-	rec.Record(ID{1}, "us", time.Now())
+	rec.Record(ID{1}, "us", time.Now(), Client{})
 	time.Sleep(60 * time.Millisecond)
 	cancel()
 	<-done
@@ -108,5 +111,18 @@ func TestRecorder_RunFlushesAndPurges(t *testing.T) {
 		t.Error("run did not purge")
 	} else if d := time.Since(st.purged[0]); d < 23*time.Hour || d > 25*time.Hour {
 		t.Errorf("purge cutoff off: %v ago", d)
+	}
+}
+
+func TestRecorder_KeepsClient(t *testing.T) {
+	st := &fakeStore{}
+	rec := NewRecorder(st, Options{}, nil)
+	c := Client{IP: "99.178.140.144", UserAgent: "Roku/DVP-15.3"}
+	rec.Record(ID{1}, "us", time.Now(), c)
+	if err := rec.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.beats) != 1 || st.beats[0].Client != c {
+		t.Errorf("beats = %+v, want client %+v", st.beats, c)
 	}
 }
