@@ -181,8 +181,9 @@ A viewer is a salted SHA-256 of the `sid` query parameter if present — an
 app sends its device/advertising id (Roku RIDA) — else of the `ip` query
 parameter, else of the client IP. `ip` is for platforms that fill a macro
 (`master.m3u8?ip={RokuIP}`) because a server of theirs, not the device, may
-fetch the stream. A `sid` outside 1–64 of `A-Za-z0-9._:-`, or an `ip` that is
-not a public address, is ignored: an unfilled macro, and the LAN address
+fetch the stream. A `sid` outside 1–64 of `A-Za-z0-9._:-` or made only of capitals
+and underscores, or an `ip` that is not a public address, is ignored: an
+unfilled macro (`{RIDA}`, `ROKU_ADS_TRACKING_ID`), and the LAN address
 Roku puts in its macro (`10.0.0.90`), which would hide the public address the
 request came from. `master.m3u8` carries both on to its `live.m3u8` reference, so a
 player given only the master URL is still identified. Viewers are recorded once per minute per
