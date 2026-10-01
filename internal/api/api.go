@@ -10,10 +10,11 @@ import (
 	"github.com/dwellingtw/backend/internal/property"
 )
 
-// Repo is the data access the public API needs.
+// Repo is the data access the public API needs. Both methods serve published
+// listings only: a listing whose video is not ready is not public yet.
 type Repo interface {
 	List(ctx context.Context, f property.Filter) ([]property.Property, int, bool, error)
-	GetByZPID(ctx context.Context, zpid string) (*property.Property, error)
+	GetPublishedByZPID(ctx context.Context, zpid string) (*property.Property, error)
 }
 
 // MapEnsurer returns a property's static map URLs, generating missing ones on
@@ -62,6 +63,7 @@ func (a *API) public(h http.HandlerFunc) http.Handler {
 //
 //	@Summary		List properties
 //	@Description	Browse active listings with filters, sorting, and cursor pagination. Pass the returned next_cursor to fetch the following page.
+//	@Description	Only listings whose video is ready are returned (and counted in total); a listing still being processed is not visible until its video is done.
 //	@Tags			properties
 //	@Produce		json
 //	@Param			zip				query		string	false	"Filter by ZIP code"
@@ -109,7 +111,7 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 // handleDetail serves the detail endpoint.
 //
 //	@Summary		Get property detail
-//	@Description	Full detail-screen payload for one listing, addressed by its Zillow property ID.
+//	@Description	Full detail-screen payload for one listing, addressed by its Zillow property ID. video_url is always set: a listing whose video is still being processed answers 404 until it is ready.
 //	@Description	map_image_url (light) and map_image_dark_url (dark) are generated on first view; either may be null on the very first request for a listing and populated shortly after.
 //	@Tags			properties
 //	@Produce		json
@@ -119,7 +121,7 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 //	@Failure		500		{object}	errorResponse
 //	@Router			/api/v1/properties/{zpid} [get]
 func (a *API) handleDetail(w http.ResponseWriter, r *http.Request) {
-	p, err := a.repo.GetByZPID(r.Context(), r.PathValue("zpid"))
+	p, err := a.repo.GetPublishedByZPID(r.Context(), r.PathValue("zpid"))
 	if errors.Is(err, property.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
 		return

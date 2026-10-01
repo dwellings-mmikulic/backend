@@ -2,6 +2,7 @@ package property
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -503,6 +504,46 @@ func TestRepository_Integration(t *testing.T) {
 		for zpid, want := range map[string]string{ready: "ready", pending: "failed", failed: "failed"} {
 			if got := f.videoStatus(zpid); got != want {
 				t.Errorf("video_status of %s = %q, want %q", zpid, got, want)
+			}
+		}
+	})
+
+	t.Run("the public API sees only listings with a ready video", func(t *testing.T) {
+		f := newFixture(t, pool, suffix)
+		zpids := f.insert("p-ready", "p-pending", "p-failed", "p-ready-null-url")
+		ready, pending, failed, nullURL := zpids[0], zpids[1], zpids[2], zpids[3]
+		f.exec(`UPDATE properties SET video_status = 'ready', video_url = 'https://cdn.example/v.mp4' WHERE zpid = $1`, ready)
+		f.exec(`UPDATE properties SET video_status = 'failed' WHERE zpid = $1`, failed)
+		f.exec(`UPDATE properties SET video_status = 'ready', video_url = NULL WHERE zpid = $1`, nullURL)
+		// Only this fixture's rows: the dev database may hold real listings.
+		f.exec(`UPDATE properties SET zip = $2 WHERE zpid = ANY($1)`, zpids, f.prefix)
+
+		got, total, hasMore, err := f.repo.List(f.ctx, Filter{Zip: f.prefix, Sort: SortNewest, Limit: 10})
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(got) != 1 || got[0].ZPID != ready {
+			t.Errorf("List = %v, want only %s", got, ready)
+		}
+		if total != 1 || hasMore {
+			t.Errorf("List total, hasMore = %d, %v; want 1, false", total, hasMore)
+		}
+		if !strings.Contains(got[0].VideoURL, "cdn.example") {
+			t.Errorf("List must carry the video URL, got %q", got[0].VideoURL)
+		}
+
+		p, err := f.repo.GetPublishedByZPID(f.ctx, ready)
+		if err != nil || p.VideoURL != "https://cdn.example/v.mp4" {
+			t.Errorf("GetPublishedByZPID(ready) = %v, %v; want the row with its video", p, err)
+		}
+		for _, zpid := range []string{pending, failed, nullURL} {
+			if _, err := f.repo.GetPublishedByZPID(f.ctx, zpid); !errors.Is(err, ErrNotFound) {
+				t.Errorf("GetPublishedByZPID(%s) err = %v, want ErrNotFound", zpid, err)
+			}
+			// The internal lookup still finds it: backfill-videos revives
+			// exactly these rows.
+			if _, err := f.repo.GetByZPID(f.ctx, zpid); err != nil {
+				t.Errorf("GetByZPID(%s) = %v, want the row", zpid, err)
 			}
 		}
 	})
