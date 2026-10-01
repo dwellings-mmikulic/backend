@@ -207,3 +207,17 @@ ALTER TABLE properties ADD COLUMN IF NOT EXISTS details_claimed_until TIMESTAMPT
 ALTER TABLE properties ADD COLUMN IF NOT EXISTS details_attempts      INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_properties_details_todo
     ON properties (created_at) WHERE details_fetched_at IS NULL AND details_attempts < 5;
+
+-- Platform subscribers: email addresses handed over by viewers (Roku app,
+-- landing page) via PUT /api/v1/platform_subscriber. Same table as the
+-- Cineplex backend; metadata is whatever the client sent, replaced on every
+-- call.
+CREATE TABLE IF NOT EXISTS platform_subscribers (
+    id         BIGSERIAL PRIMARY KEY,
+    email      TEXT NOT NULL UNIQUE,
+    metadata   JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_platform_subscribers_metadata
+    ON platform_subscribers USING GIN (metadata);

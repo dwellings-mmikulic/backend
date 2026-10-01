@@ -29,6 +29,7 @@ import (
 	"github.com/dwellingtw/backend/internal/propertymap"
 	"github.com/dwellingtw/backend/internal/scheduler"
 	"github.com/dwellingtw/backend/internal/server"
+	"github.com/dwellingtw/backend/internal/subscriber"
 	"github.com/dwellingtw/backend/internal/video"
 	"github.com/dwellingtw/backend/internal/viewer"
 	"github.com/dwellingtw/backend/internal/workqueue"
@@ -203,6 +204,7 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 	publicAPI.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
 	log.Info("ad tags", "pre_roll", cfg.Ads.PrerollURL != "", "mid_roll", cfg.Ads.MidrollURL != "")
 	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
+	httpSrv.Mount(subscriber.NewHandler(subscriber.NewRepository(pool), log))
 	if cfg.Linear.Enabled {
 		linearRepo := linear.NewRepository(pool)
 		svc := linear.New(linearRepo, linear.Options{
