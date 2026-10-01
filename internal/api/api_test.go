@@ -35,7 +35,7 @@ func (f *fakeRepo) List(_ context.Context, flt property.Filter) ([]property.Prop
 	return f.props, f.total, f.hasMore, f.listErr
 }
 
-func (f *fakeRepo) GetByZPID(_ context.Context, zpid string) (*property.Property, error) {
+func (f *fakeRepo) GetPublishedByZPID(_ context.Context, zpid string) (*property.Property, error) {
 	f.gotZPID = zpid
 	if f.detailErr != nil {
 		return nil, f.detailErr
@@ -239,7 +239,7 @@ func TestDetail_NullsPreEnrichment(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"description", "year_built", "agent", "video_url", "property_type"} {
+	for _, key := range []string{"description", "year_built", "agent", "property_type"} {
 		v, present := d[key]
 		if !present {
 			t.Errorf("%s must be present (as null), not omitted", key)

@@ -49,18 +49,26 @@ type Filter struct {
 	After        *PageKey
 }
 
+// publishedPredicate is what makes a stored listing public: its video has
+// been rendered and uploaded. A listing is upserted before its video exists
+// (video_status 'pending' while the media worker renders it, 'failed' when
+// the render failed), and until then it belongs to no viewer-facing surface:
+// the browse list, the detail endpoint and the Roku feed all share this one
+// predicate, so they can never disagree about what is public.
+const publishedPredicate = "video_status = 'ready' AND video_url IS NOT NULL"
+
 // listColumns are the columns the browse endpoint needs; id and created_at
 // feed the next-page cursor. COALESCE guards pre-enrichment NULLs on columns
 // that scan into non-pointer Go fields.
 const listColumns = `id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
        COALESCE(state,''), COALESCE(zip,''), COALESCE(bedrooms,0),
        COALESCE(bathrooms,0), COALESCE(home_size_sqft,0), property_type,
-       image_urls, created_at`
+       image_urls, COALESCE(video_url,''), created_at`
 
-// buildWhere renders the filter (and optionally the keyset predicate) as a
-// WHERE clause with 1-based positional args.
+// buildWhere renders the published predicate, the filter and optionally the
+// keyset predicate as a WHERE clause with 1-based positional args.
 func buildWhere(f Filter, includeKeyset bool) (string, []any) {
-	var conds []string
+	conds := []string{publishedPredicate}
 	var args []any
 	add := func(format string, val any) {
 		args = append(args, val)
@@ -113,9 +121,6 @@ func buildWhere(f Filter, includeKeyset bool) (string, []any) {
 		}
 	}
 
-	if len(conds) == 0 {
-		return "", args
-	}
 	return " WHERE " + strings.Join(conds, " AND "), args
 }
 

@@ -63,7 +63,7 @@ const docTemplate = `{
         },
         "/api/v1/properties": {
             "get": {
-                "description": "Browse active listings with filters, sorting, and cursor pagination. Pass the returned next_cursor to fetch the following page.",
+                "description": "Browse active listings with filters, sorting, and cursor pagination. Pass the returned next_cursor to fetch the following page.\nOnly listings whose video is ready are returned (and counted in total); a listing still being processed is not visible until its video is done.",
                 "produces": [
                     "application/json"
                 ],
@@ -182,7 +182,7 @@ const docTemplate = `{
         },
         "/api/v1/properties/{zpid}": {
             "get": {
-                "description": "Full detail-screen payload for one listing, addressed by its Zillow property ID.\nmap_image_url (light) and map_image_dark_url (dark) are generated on first view; either may be null on the very first request for a listing and populated shortly after.",
+                "description": "Full detail-screen payload for one listing, addressed by its Zillow property ID. video_url is always set: a listing whose video is still being processed answers 404 until it is ready.\nmap_image_url (light) and map_image_dark_url (dark) are generated on first view; either may be null on the very first request for a listing and populated shortly after.",
                 "produces": [
                     "application/json"
                 ],

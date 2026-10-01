@@ -17,8 +17,33 @@ func TestBuildListQuery_NoFilters(t *testing.T) {
 	if !strings.Contains(q, "LIMIT 25") { // limit+1 to detect next page
 		t.Errorf("want LIMIT 25 (limit+1): %s", q)
 	}
-	if strings.Contains(q, "WHERE") {
-		t.Errorf("unexpected WHERE with no filters: %s", q)
+	if !strings.Contains(q, " WHERE "+publishedPredicate) {
+		t.Errorf("no-filter query must still restrict to published listings: %s", q)
+	}
+}
+
+// Listings reach the public API only once their video is ready. The predicate
+// is a literal, so user filters keep numbering from $1.
+func TestBuildListQuery_OnlyPublishedListings(t *testing.T) {
+	want := "video_status = 'ready' AND video_url IS NOT NULL"
+	if publishedPredicate != want {
+		t.Fatalf("publishedPredicate = %q, want %q", publishedPredicate, want)
+	}
+
+	q, args := buildListQuery(Filter{Zip: "78746", Sort: SortNewest, Limit: 24})
+	if !strings.Contains(q, " WHERE "+want+" AND zip = $1") {
+		t.Errorf("list query must start its WHERE with the published predicate: %s", q)
+	}
+	if len(args) != 1 {
+		t.Errorf("args = %v, want just zip", args)
+	}
+
+	cq, cargs := buildCountQuery(Filter{Zip: "78746"})
+	if !strings.Contains(cq, " WHERE "+want+" AND zip = $1") {
+		t.Errorf("count query must restrict to published listings too: %s", cq)
+	}
+	if len(cargs) != 1 {
+		t.Errorf("count args = %v, want just zip", cargs)
 	}
 }
 

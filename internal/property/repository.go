@@ -81,8 +81,8 @@ UPDATE properties SET video_status = 'failed', updated_at = now()
 	return nil
 }
 
-// ListReadyForFeed returns listings whose video is ready, newest first, for the
-// Roku feed.
+// ListReadyForFeed returns the published listings (see publishedPredicate),
+// newest video first, for the Roku feed.
 func (r *Repository) ListReadyForFeed(ctx context.Context) ([]Property, error) {
 	const q = `
 SELECT zpid, sale_price, address, city, state, zip,
@@ -90,7 +90,7 @@ SELECT zpid, sale_price, address, city, state, zip,
        image_urls, COALESCE(video_url,''), COALESCE(video_duration_secs,0),
        video_rendered_at
   FROM properties
- WHERE video_status = 'ready' AND video_url IS NOT NULL
+ WHERE ` + publishedPredicate + `
  ORDER BY video_rendered_at DESC NULLS LAST`
 
 	rows, err := r.pool.Query(ctx, q)
@@ -133,8 +133,11 @@ func (r *Repository) Exists(ctx context.Context, zpid string) (bool, error) {
 // ErrNotFound is returned when a requested property does not exist.
 var ErrNotFound = errors.New("property not found")
 
-// List returns one page of properties matching f, the total number of rows
-// matching the filter (ignoring pagination), and whether another page exists.
+// List returns one page of published properties (see publishedPredicate)
+// matching f, the total number of published rows matching the filter
+// (ignoring pagination), and whether another page exists. It serves the
+// public browse endpoint, so a listing whose video is not ready yet is not in
+// it and not in the total.
 func (r *Repository) List(ctx context.Context, f Filter) ([]Property, int, bool, error) {
 	countQ, countArgs := buildCountQuery(f)
 	var total int
@@ -155,10 +158,11 @@ func (r *Repository) List(ctx context.Context, f Filter) ([]Property, int, bool,
 		if err := rows.Scan(
 			&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 			&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft, &p.PropertyType,
-			&p.ImageURLs, &p.CreatedAt,
+			&p.ImageURLs, &p.VideoURL, &p.CreatedAt,
 		); err != nil {
 			return nil, 0, false, fmt.Errorf("scan property row: %w", err)
 		}
+		p.VideoStatus = VideoReady
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -173,27 +177,43 @@ func (r *Repository) List(ctx context.Context, f Filter) ([]Property, int, bool,
 	return out, total, hasMore, nil
 }
 
-// GetByZPID returns the full property record, or ErrNotFound.
-func (r *Repository) GetByZPID(ctx context.Context, zpid string) (*Property, error) {
-	const q = `
+// detailColumns is the full record, as GetByZPID and GetPublishedByZPID
+// return it.
+const detailColumns = `
 SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
        COALESCE(state,''), COALESCE(zip,''), COALESCE(bedrooms,0),
        COALESCE(bathrooms,0), COALESCE(home_size_sqft,0),
        COALESCE(lot_size_sqft,0), COALESCE(detail_url,''), image_urls,
-       COALESCE(video_url,''),
+       COALESCE(video_url,''), video_status,
        property_type, description, year_built, heating, cooling, garage,
        hoa_fee_monthly, mls_number, listing_status,
        agent_name, agent_phone, agent_brokerage, latitude, longitude,
        details_fetched_at, COALESCE(map_image_url,''), COALESCE(map_image_dark_url,''),
        map_generated_at, created_at, updated_at
-  FROM properties WHERE zpid = $1`
+  FROM properties`
 
+// GetByZPID returns the full property record whatever its video state, or
+// ErrNotFound. It is the internal lookup (cmd/backfill-videos loads the rows
+// without a video through it); the public API uses GetPublishedByZPID.
+func (r *Repository) GetByZPID(ctx context.Context, zpid string) (*Property, error) {
+	return r.getOne(ctx, detailColumns+` WHERE zpid = $1`, zpid)
+}
+
+// GetPublishedByZPID returns the full record of a published listing (see
+// publishedPredicate), or ErrNotFound. A stored listing whose video is still
+// rendering, or failed to render, does not exist as far as the public API is
+// concerned: it is neither listed nor addressable until the video is ready.
+func (r *Repository) GetPublishedByZPID(ctx context.Context, zpid string) (*Property, error) {
+	return r.getOne(ctx, detailColumns+` WHERE zpid = $1 AND `+publishedPredicate, zpid)
+}
+
+func (r *Repository) getOne(ctx context.Context, q, zpid string) (*Property, error) {
 	var p Property
 	err := r.pool.QueryRow(ctx, q, zpid).Scan(
 		&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 		&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft,
 		&p.LotSizeSqft, &p.DetailURL, &p.ImageURLs,
-		&p.VideoURL,
+		&p.VideoURL, &p.VideoStatus,
 		&p.PropertyType, &p.Description, &p.YearBuilt, &p.Heating, &p.Cooling, &p.Garage,
 		&p.HOAFeeMonthly, &p.MLSNumber, &p.ListingStatus,
 		&p.AgentName, &p.AgentPhone, &p.AgentBrokerage, &p.Latitude, &p.Longitude,
