@@ -127,6 +127,36 @@ definitions:
       total:
         type: integer
     type: object
+  subscriber.errorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+  subscriber.subscribeRequest:
+    properties:
+      email:
+        description: Email is required.
+        example: viewer@example.com
+        type: string
+      metadata:
+        description: |-
+          Metadata is any JSON value describing the subscriber (device, source,
+          ...). Optional; stored as given and replaced on every call.
+        type: object
+    type: object
+  subscriber.subscribeResponse:
+    properties:
+      message:
+        example: Platform subscriber updated successfully
+        type: string
+    type: object
+  subscriber.validationResponse:
+    properties:
+      errors:
+        additionalProperties:
+          type: string
+        type: object
+    type: object
 host: api.dwellings.tv
 info:
   contact: {}
@@ -134,6 +164,37 @@ info:
   title: Dwellings API
   version: "1.0"
 paths:
+  /api/v1/platform_subscriber:
+    put:
+      consumes:
+      - application/json
+      description: Registers an email address as a platform subscriber. Calling it
+        again for the same email replaces the stored metadata.
+      parameters:
+      - description: Subscriber
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/subscriber.subscribeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/subscriber.subscribeResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/subscriber.validationResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/subscriber.errorResponse'
+      summary: Subscribe to the platform
+      tags:
+      - subscribers
   /api/v1/properties:
     get:
       description: Browse active listings with filters, sorting, and cursor pagination.

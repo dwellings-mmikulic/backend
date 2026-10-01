@@ -9,6 +9,52 @@
     "host": "api.dwellings.tv",
     "basePath": "/",
     "paths": {
+        "/api/v1/platform_subscriber": {
+            "put": {
+                "description": "Registers an email address as a platform subscriber. Calling it again for the same email replaces the stored metadata.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subscribers"
+                ],
+                "summary": "Subscribe to the platform",
+                "parameters": [
+                    {
+                        "description": "Subscriber",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/subscriber.subscribeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/subscriber.subscribeResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/subscriber.validationResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/subscriber.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/properties": {
             "get": {
                 "description": "Browse active listings with filters, sorting, and cursor pagination. Pass the returned next_cursor to fetch the following page.",
@@ -359,6 +405,48 @@
                 },
                 "total": {
                     "type": "integer"
+                }
+            }
+        },
+        "subscriber.errorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
+        "subscriber.subscribeRequest": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "description": "Email is required.",
+                    "type": "string",
+                    "example": "viewer@example.com"
+                },
+                "metadata": {
+                    "description": "Metadata is any JSON value describing the subscriber (device, source,\n...). Optional; stored as given and replaced on every call.",
+                    "type": "object"
+                }
+            }
+        },
+        "subscriber.subscribeResponse": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "example": "Platform subscriber updated successfully"
+                }
+            }
+        },
+        "subscriber.validationResponse": {
+            "type": "object",
+            "properties": {
+                "errors": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
                 }
             }
         }
