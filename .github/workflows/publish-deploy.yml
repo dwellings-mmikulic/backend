@@ -3,6 +3,11 @@ name: Publish & Deploy
 on:
   push:
     branches: [main]
+    # Docs-only commits must not rebuild the image and restart the render fleet.
+    paths-ignore:
+      - '.claude/**'
+      - 'docs/superpowers/**'
+      - '**/*.md'
   workflow_dispatch:
 
 concurrency:
