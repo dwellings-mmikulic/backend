@@ -99,16 +99,20 @@
     return null;
   }
   function update() { $("go").disabled = !choice() || !id; }
+  // hls.js first: Chrome on macOS claims it can play HLS natively ("maybe")
+  // and then cannot demux it. The native player is only for browsers without
+  // MSE, i.e. Safari on iOS, where hls.js reports itself unsupported.
   function play(url) {
     var v = $("player");
-    if (v.canPlayType("application/vnd.apple.mpegurl")) { v.src = url; return; }
     if (window.Hls && Hls.isSupported()) {
       if (v._hls) v._hls.destroy();
       var h = new Hls({ liveSyncDurationCount: 3 });
       v._hls = h;
       h.loadSource(url);
       h.attachMedia(v);
+      return;
     }
+    if (v.canPlayType("application/vnd.apple.mpegurl")) v.src = url;
   }
   $("zip").addEventListener("input", function () { picked = null; $("city").value = ""; renderCities(""); update(); });
   $("city").addEventListener("input", function () { picked = null; renderCities($("city").value); update(); });

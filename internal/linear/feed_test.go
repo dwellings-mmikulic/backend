@@ -237,3 +237,15 @@ func TestFeed_TVPage(t *testing.T) {
 		}
 	}
 }
+
+// Chrome on macOS answers "maybe" to canPlayType for HLS and then fails to
+// demux it, so the page must try hls.js first and fall back to the native
+// player only where hls.js cannot run (Safari on iOS).
+func TestFeed_TVPagePrefersHlsJSOverNativePlayback(t *testing.T) {
+	_, mux := feedMux(newMemStore(), t0)
+	body := do(mux, "GET", "/tv/", "203.0.113.5", "").Body.String()
+	hls, native := strings.Index(body, "Hls.isSupported()"), strings.Index(body, "canPlayType(")
+	if hls < 0 || native < 0 || hls > native {
+		t.Errorf("play() must check Hls.isSupported() (at %d) before canPlayType (at %d)", hls, native)
+	}
+}
