@@ -157,8 +157,39 @@ func (s *Scheduler) processListing(ctx context.Context, p *property.Property, re
 		if err := s.renderVideo(ctx, p, localPhotos, workDir); err != nil {
 			return false, err
 		}
+		s.purgePhotos(ctx, p.ZPID)
 	}
 	return false, nil
+}
+
+// purgePhotos removes the listing's CDN photos but the first, now that its
+// video is ready and the rest serve no purpose. It is housekeeping: a failure
+// is logged, never returned — the listing is stored, rendered and on the feed,
+// and failing the item would re-render it for nothing. cmd/purge-photos sweeps
+// up what is left behind.
+//
+// It runs detached from ctx, like the bookkeeping: a shutdown that landed
+// between the first delete and the trim would otherwise leave a row listing
+// objects that are gone, and under SkipExisting nothing visits the listing
+// again — the public would read dead links until a manual sweep. Stop waits
+// for the item goroutine, and purgeTimeout fits inside the stop grace period.
+func (s *Scheduler) purgePhotos(ctx context.Context, zpid string) {
+	if s.purger == nil {
+		return
+	}
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), purgeTimeout)
+	defer cancel()
+	deleted, err := s.purger.Purge(pctx, zpid)
+	switch {
+	case err == nil:
+		s.log.Info("photos purged", "zpid", zpid, "deleted", deleted)
+	case errors.Is(err, property.ErrGalleryChanged):
+		// Someone else (the sweep, another box) trimmed the row meanwhile:
+		// the photos are gone either way.
+		s.log.Info("photos purged elsewhere meanwhile", "zpid", zpid)
+	default:
+		s.log.Warn("photo purge failed", "zpid", zpid, "error", err)
+	}
 }
 
 // storeWithoutPhotos is the terminal path of a listing the provider has no

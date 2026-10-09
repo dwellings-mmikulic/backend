@@ -151,6 +151,88 @@ func (c *Client) put(ctx context.Context, endpoint string, body io.Reader, size 
 	return retryable, fmt.Errorf("bunny upload returned status %d: %s", res.StatusCode, strings.TrimSpace(string(answer)))
 }
 
+// Delete removes the object at path from the storage zone. path names an
+// object, never a directory: Bunny deletes a directory recursively, and the
+// zone root is one, so an empty path or one ending in a slash is refused
+// before any request is made.
+//
+// An object that is already gone (404) counts as deleted: a purge that is
+// retried after a crash must not fail on the half it already did. A network
+// error, a 429 or a 5xx is retried on the same schedule as an upload; any
+// other refusal is returned as it is — Bunny refusing the request will refuse
+// it again.
+func (c *Client) Delete(ctx context.Context, path string) error {
+	path = strings.TrimLeft(path, "/")
+	if path == "" || strings.HasSuffix(path, "/") {
+		return fmt.Errorf("bunny delete: %q is a directory, not an object", path)
+	}
+	endpoint := fmt.Sprintf("%s/%s/%s", c.endpointBase, c.storageZone, path)
+
+	attempts := len(c.backoff) + 1
+	for attempt := 1; ; attempt++ {
+		retryable, err := c.del(ctx, endpoint)
+		if err == nil {
+			return nil
+		}
+		if !retryable {
+			return err
+		}
+		if attempt == attempts {
+			return fmt.Errorf("gave up after %d attempts: %w", attempts, err)
+		}
+		if waitErr := wait(ctx, c.backoff[attempt-1]); waitErr != nil {
+			return fmt.Errorf("bunny delete abandoned after attempt %d of %d (%v): %w", attempt, attempts, err, waitErr)
+		}
+	}
+}
+
+// del makes one DELETE attempt; retryable is as for put.
+func (c *Client) del(ctx context.Context, endpoint string) (retryable bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return false, fmt.Errorf("build delete request: %w", err)
+	}
+	req.Header.Set("AccessKey", c.apiKey)
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		// A dead context is the caller's decision, not a transient failure.
+		return ctx.Err() == nil, fmt.Errorf("bunny delete: %w", err)
+	}
+	defer res.Body.Close()
+	answer, _ := io.ReadAll(io.LimitReader(res.Body, maxDrain))
+
+	if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if len(answer) > maxErrorBody {
+		answer = answer[:maxErrorBody]
+	}
+	retryable = res.StatusCode == http.StatusTooManyRequests || res.StatusCode >= http.StatusInternalServerError
+	return retryable, fmt.Errorf("bunny delete returned status %d: %s", res.StatusCode, strings.TrimSpace(string(answer)))
+}
+
+// ObjectPath turns a CDN URL this client handed out back into the storage
+// path behind it, ready for Delete. It refuses anything that is not exactly
+// one object of this zone — another host (a Zillow source URL left in a row),
+// the CDN root, a directory, a traversal, a query or fragment — so a caller
+// that deletes by URL can never reach past the objects it stored.
+func (c *Client) ObjectPath(cdnURL string) (string, error) {
+	rest, ok := strings.CutPrefix(cdnURL, c.cdnBaseURL+"/")
+	if !ok {
+		return "", fmt.Errorf("bunny: %q is not an object of %s", cdnURL, c.cdnBaseURL)
+	}
+	if strings.ContainsAny(rest, "?#") {
+		return "", fmt.Errorf("bunny: %q is not a plain object URL", cdnURL)
+	}
+	for _, seg := range strings.Split(rest, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("bunny: %q is not an object path", cdnURL)
+		}
+	}
+	return rest, nil
+}
+
 // rewindable reports whether content can be sent more than once and, if so,
 // how long it is. A Seek method alone does not prove it — an *os.File that is
 // a pipe has one that always fails — so the length probe doubles as the test;

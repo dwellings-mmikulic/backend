@@ -426,6 +426,43 @@ func (u *fakeUploader) pathsWithPrefix(prefix string) []string {
 	return out
 }
 
+// --- photo purger ---
+
+// fakePurger records every listing whose photos the pipeline asked to purge.
+type fakePurger struct {
+	mu      sync.Mutex
+	zpids   []string
+	err     error             // returned by every Purge
+	onPurge func(zpid string) // runs inside Purge, before it records
+}
+
+func (p *fakePurger) Purge(ctx context.Context, zpid string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if p.onPurge != nil {
+		p.onPurge(zpid)
+	}
+	// Again: the real purge is a series of deletes and a trim, each of which
+	// checks its context, so what onPurge did to it is seen.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if p.err != nil {
+		return 0, p.err
+	}
+	p.mu.Lock()
+	p.zpids = append(p.zpids, zpid)
+	p.mu.Unlock()
+	return 1, nil
+}
+
+func (p *fakePurger) purged() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.zpids...)
+}
+
 // --- store ---
 
 // fakeStore is property.Repository in memory. Like every fake here it refuses
@@ -1363,6 +1400,7 @@ type harness struct {
 	ledger  *fakeLedger
 	windows *fakeWindows
 	render  *fakeRenderer
+	purger  *fakePurger
 	logs    *logRecorder
 	events  *eventLog
 	s       *Scheduler
@@ -1408,12 +1446,14 @@ func newHarness(t *testing.T, cfg *config.Config, zips ...string) *harness {
 		ledger:  newFakeLedger(),
 		windows: &fakeWindows{base: clock.now(), length: testWindow},
 		render:  &fakeRenderer{},
+		purger:  &fakePurger{},
 		logs:    &logRecorder{},
 		events:  events,
 	}
 	h.s = New(cfg, Deps{
 		Zillow: h.zillow, Bunny: h.bunny, Repo: h.store, Zips: h.zips,
 		Queue: h.queue, Ledger: h.ledger, Windows: h.windows, Render: h.render,
+		Purger: h.purger,
 	}, testOwner, slog.New(h.logs))
 	h.s.now = clock.now
 	h.s.sleep = func(_ context.Context, d time.Duration) {

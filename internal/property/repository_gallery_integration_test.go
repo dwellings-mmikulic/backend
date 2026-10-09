@@ -1,0 +1,169 @@
+package property
+
+import (
+	"context"
+	"os"
+	"reflect"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/dwellingtw/backend/internal/db"
+)
+
+// TestRepository_GalleryIntegration covers the two gallery methods the photo
+// purge uses. Skipped unless TEST_DATABASE_URL points at a database it may
+// write to (see TestRepository_Integration). Rows are namespaced per run and
+// removed again.
+func TestRepository_GalleryIntegration(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set TEST_DATABASE_URL to run the property repository integration test")
+	}
+	ctx := context.Background()
+	pool, err := db.Connect(ctx, url, 4)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	repo := NewRepository(pool)
+	zpid := "gallery-test-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM properties WHERE zpid = $1`, zpid)
+	})
+	full := []string{"https://cdn.example/p/0.jpg", "https://cdn.example/p/1.jpg", "https://cdn.example/p/2.jpg"}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO properties (zpid, address, image_urls) VALUES ($1, 'x', $2)`, zpid, full); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	t.Run("ImageURLs reads the stored gallery", func(t *testing.T) {
+		got, err := repo.ImageURLs(ctx, zpid)
+		if err != nil {
+			t.Fatalf("ImageURLs: %v", err)
+		}
+		if !reflect.DeepEqual(got, full) {
+			t.Errorf("ImageURLs = %v, want %v", got, full)
+		}
+	})
+
+	t.Run("ImageURLs of an unknown listing is an error", func(t *testing.T) {
+		if _, err := repo.ImageURLs(ctx, zpid+"-missing"); err == nil {
+			t.Error("ImageURLs of a missing row = nil error, want one")
+		}
+	})
+
+	t.Run("TrimImageURLs refuses a row that has changed", func(t *testing.T) {
+		stale := []string{"https://cdn.example/p/0.jpg", "https://cdn.example/p/9.jpg"}
+		if err := repo.TrimImageURLs(ctx, zpid, stale, stale[:1]); err == nil {
+			t.Fatal("TrimImageURLs with a stale gallery = nil, want an error")
+		}
+		got, _ := repo.ImageURLs(ctx, zpid)
+		if !reflect.DeepEqual(got, full) {
+			t.Errorf("gallery after refused trim = %v, want untouched %v", got, full)
+		}
+	})
+
+	t.Run("TrimImageURLs replaces the gallery it was shown", func(t *testing.T) {
+		if err := repo.TrimImageURLs(ctx, zpid, full, full[:1]); err != nil {
+			t.Fatalf("TrimImageURLs: %v", err)
+		}
+		got, err := repo.ImageURLs(ctx, zpid)
+		if err != nil {
+			t.Fatalf("ImageURLs: %v", err)
+		}
+		if !reflect.DeepEqual(got, full[:1]) {
+			t.Errorf("gallery after trim = %v, want %v", got, full[:1])
+		}
+		var updatedAfterInsert bool
+		if err := pool.QueryRow(ctx, `SELECT updated_at > created_at FROM properties WHERE zpid = $1`, zpid).Scan(&updatedAfterInsert); err != nil {
+			t.Fatal(err)
+		}
+		if !updatedAfterInsert {
+			t.Error("updated_at not bumped by the trim")
+		}
+	})
+}
+
+// TestRepository_ListGalleriesToPurgeIntegration covers the sweep's query:
+// ready listings that still hold more than one photo, in zpid order, after a
+// cursor.
+func TestRepository_ListGalleriesToPurgeIntegration(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set TEST_DATABASE_URL to run the property repository integration test")
+	}
+	ctx := context.Background()
+	pool, err := db.Connect(ctx, url, 4)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	repo := NewRepository(pool)
+	// The prefix sorts after every real zpid (digits), so the test rows are
+	// the tail of the zpid order whatever else the database holds, and the
+	// cursor tests below are exact.
+	prefix := "zz-purge-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "-"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM properties WHERE zpid LIKE $1`, prefix+"%")
+	})
+	insert := func(suffix, status string, photos int) string {
+		zpid := prefix + suffix
+		urls := make([]string, photos)
+		for i := range urls {
+			urls[i] = "https://cdn.example/properties/" + zpid + "/" + strconv.Itoa(i) + ".jpg"
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO properties (zpid, address, image_urls, video_status) VALUES ($1, 'x', $2, $3)`,
+			zpid, urls, status); err != nil {
+			t.Fatalf("insert %s: %v", zpid, err)
+		}
+		return zpid
+	}
+	a := insert("a", "ready", 3)
+	insert("b", "ready", 1)   // already purged
+	insert("c", "pending", 3) // no video yet: photos still needed for the render
+	insert("d", "failed", 3)  // no video yet: photos still needed for the retry
+	e := insert("e", "ready", 2)
+	f := insert("f", "ready", 5)
+
+	zpids := func(gs []Gallery) []string {
+		out := make([]string, len(gs))
+		for i, g := range gs {
+			out[i] = g.ZPID
+		}
+		return out
+	}
+
+	got, err := repo.ListGalleriesToPurge(ctx, prefix, 10)
+	if err != nil {
+		t.Fatalf("ListGalleriesToPurge: %v", err)
+	}
+	if want := []string{a, e, f}; !reflect.DeepEqual(zpids(got), want) {
+		t.Errorf("purgeable = %v, want %v", zpids(got), want)
+	}
+	if len(got) > 0 && len(got[0].URLs) != 3 {
+		t.Errorf("gallery of %s = %v, want its 3 photos", a, got[0].URLs)
+	}
+
+	got, err = repo.ListGalleriesToPurge(ctx, prefix, 2)
+	if err != nil {
+		t.Fatalf("ListGalleriesToPurge(limit 2): %v", err)
+	}
+	if want := []string{a, e}; !reflect.DeepEqual(zpids(got), want) {
+		t.Errorf("first page = %v, want %v", zpids(got), want)
+	}
+	got, err = repo.ListGalleriesToPurge(ctx, e, 2)
+	if err != nil {
+		t.Fatalf("ListGalleriesToPurge(after e): %v", err)
+	}
+	if want := []string{f}; !reflect.DeepEqual(zpids(got), want) {
+		t.Errorf("page after %s = %v, want %v", e, zpids(got), want)
+	}
+}

@@ -76,6 +76,35 @@ Bunny → store video_url + status.
   Workers render from the stored CDN photos and segment the result for the
   linear channels, so it costs no Zillow API quota.
 - Needs the `ffmpeg` binary + a TTF font (both in the Docker image).
+- **Photo purge.** Once a listing's video is ready, the worker deletes its CDN
+  photos but the first (`PHOTO_PURGE`, default `true`) and trims `image_urls`
+  to it. The video is rendered from the photos on the worker's disk, and only
+  the first photo is used afterwards — the Roku feed thumbnail, the live
+  channel's poster and the API's `image_url` — so at ~29 photos per listing
+  the rest were most of the objects in the storage zone. Listings whose video
+  is not ready keep every photo (a retry renders from them). The purge is
+  housekeeping: a failure is logged and the item still completes. To purge
+  the library rendered before this existed, and whatever a worker left
+  behind, run `cmd/purge-photos` (same image, same env as the server):
+
+  ```bash
+  docker compose -f compose.prod.yml run --rm --entrypoint /app/purge-photos app -dry-run
+  docker compose -f compose.prod.yml run --rm --entrypoint /app/purge-photos app -limit 100
+  docker compose -f compose.prod.yml run --rm --entrypoint /app/purge-photos app
+  ```
+
+  It is resumable and idempotent (a row is trimmed only once all of its
+  objects are gone; a missing object counts as deleted), pages through the
+  listings in zpid order, logs progress per page, and exits non-zero if any
+  listing could not be purged — run it again to retry those. `-workers`
+  (8) listings are purged side by side, `-concurrency` (4) objects each.
+  It is safe to run while the fleet renders: prod runs `SKIP_EXISTING=true`,
+  so no worker refreshes an existing row, and a listing a worker purges in
+  the meantime is counted as such, not as a failure. The first full run is a
+  matter of hours (some 18M deletes); start it under `tmux` or `nohup`, since
+  `docker compose run` ends with the SSH session. A row that still lists an
+  object that is gone (the worker's purge was cut short) is what a later run
+  of the sweep repairs, so run it again after the first pass.
 
 ### Property maps
 
@@ -306,6 +335,11 @@ All configuration is via environment variables — see `.env.example`. Required:
 `DATABASE_URL`, `ZILLOW_API_KEY`, `BUNNY_STORAGE_ZONE`, `BUNNY_API_KEY`,
 `BUNNY_CDN_BASE_URL`.
 
+`PHOTO_PURGE` (default `true`) has workers delete a listing's CDN photos but
+the first once its video is ready (see [Listing videos](#listing-videos)).
+Set it to `false` to stop the purge quickly; photos already removed stay
+removed.
+
 `CRON_SCHEDULE` is a standard 5-field cron expression (default `0 */12 * * *`,
 every 12 hours; `@every 12h` also works), evaluated in UTC. It does not
 trigger anything: it defines the **budget windows**. A new window — and a
@@ -378,6 +412,10 @@ http(s) URL fails startup.
   (Bunny uploads are retried up to three times first). A listing none of whose
   photos could be stored fails and is retried: an empty gallery is never
   persisted.
+- After the render, `image_urls` of a listing with a ready video holds one
+  photo (see the photo purge under [Listing videos](#listing-videos)); the
+  detail endpoint's `image_urls` is therefore a one-element array for
+  published listings.
 
 ## Commands
 
