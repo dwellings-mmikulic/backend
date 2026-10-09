@@ -72,6 +72,18 @@ type resolveResponse struct {
 
 	PreRollAd *string `json:"pre_roll_ad"` // VAST tag; null = no ads
 	MidRollAd *string `json:"mid_roll_ad"`
+
+	// Personal feed (set when feeds are enabled): the master the app should
+	// play, and how to show the QR that opens the mobile page.
+	Feed string  `json:"feed,omitempty"`
+	QR   *qrInfo `json:"qr,omitempty"`
+}
+
+// qrInfo tells the app where the QR image is and on what cadence to show it.
+type qrInfo struct {
+	URL          string `json:"url"`
+	ShowSeconds  int    `json:"show_seconds"`
+	EverySeconds int    `json:"every_seconds"`
 }
 
 // resolve picks the channel for this viewer: what they watched last, else
@@ -155,7 +167,7 @@ func (h *Handler) writeResolve(w http.ResponseWriter, sc Scope, source string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_ = json.NewEncoder(w).Encode(resolveResponse{
+	res := resolveResponse{
 		Scope:  sc.Key(),
 		Name:   sc.Name(),
 		Master: base + "master.m3u8" + q,
@@ -164,7 +176,12 @@ func (h *Handler) writeResolve(w http.ResponseWriter, sc Scope, source string) {
 
 		PreRollAd: h.preRollAd,
 		MidRollAd: h.midRollAd,
-	})
+	}
+	if h.feeds != nil {
+		res.Feed = h.viewers.PublicBaseURL + "/feed/master.m3u8"
+		res.QR = &qrInfo{URL: h.viewers.PublicBaseURL + "/feed/qr.png", ShowSeconds: h.feeds.QRShowSeconds, EverySeconds: h.feeds.QREverySeconds}
+	}
+	_ = json.NewEncoder(w).Encode(res)
 }
 
 // scopeQuery is the canonical query string of sc ("" for national),

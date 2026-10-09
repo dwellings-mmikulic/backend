@@ -140,6 +140,22 @@ func (s Scope) Name() string {
 	return "Homes for sale across the US"
 }
 
+// areaName is the bare place name ("Katy, TX", "Texas", "77494", "the US").
+func (s Scope) areaName() string {
+	switch {
+	case s.Zip != "":
+		return s.Zip
+	case s.City != "":
+		return titleCase(s.City) + ", " + strings.ToUpper(s.State)
+	case s.State != "":
+		if n, ok := stateNames[s.State]; ok {
+			return n
+		}
+		return strings.ToUpper(s.State)
+	}
+	return "the US"
+}
+
 func titleCase(s string) string {
 	words := strings.Fields(s)
 	for i, w := range words {

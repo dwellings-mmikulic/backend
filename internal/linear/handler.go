@@ -17,6 +17,7 @@ type Handler struct {
 	svc     *Service
 	log     *slog.Logger
 	viewers *ViewerOptions // nil until EnableViewers
+	feeds   *FeedOptions   // nil until EnableFeeds
 
 	preRollAd, midRollAd *string // VAST tags for /channels/resolve; nil = none
 }
@@ -50,6 +51,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		mux.HandleFunc("GET /channels/beat", h.beat)
 		if h.viewers.Clients != nil && h.viewers.AdminKey != "" {
 			mux.HandleFunc("GET /admin/viewers", h.adminViewers)
+		}
+		if h.feeds != nil {
+			h.registerFeeds(mux)
 		}
 	}
 }
