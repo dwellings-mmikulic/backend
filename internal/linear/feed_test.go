@@ -217,3 +217,23 @@ func TestFeed_NotMountedWithoutEnableFeeds(t *testing.T) {
 		t.Errorf("status %d", rec.Code)
 	}
 }
+
+func TestFeed_TVPage(t *testing.T) {
+	_, mux := feedMux(newMemStore(), t0)
+	for _, p := range []string{"/tv/", "/tv/" + strings.Repeat("a", 32)} {
+		rec := do(mux, "GET", p, "203.0.113.5", "")
+		body := rec.Body.String()
+		if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+			t.Errorf("%s: %d %q", p, rec.Code, rec.Header().Get("Content-Type"))
+		}
+		if !strings.Contains(body, `"https://api.example.test"`) || strings.Contains(body, "__API_BASE__") {
+			t.Errorf("%s: API base not injected", p)
+		}
+		if !strings.Contains(body, "hls.js/1.5.13/hls.min.js") || !strings.Contains(body, "/feed/areas") {
+			t.Errorf("%s: page is missing the player or the areas call", p)
+		}
+		if rec.Header().Get("Cache-Control") != "no-cache" {
+			t.Errorf("%s: cache control %q", p, rec.Header().Get("Cache-Control"))
+		}
+	}
+}

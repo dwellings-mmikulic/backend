@@ -1,6 +1,7 @@
 package linear
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dwellingtw/backend/internal/qrcode"
@@ -248,6 +250,14 @@ func (h *Handler) feedAreas(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+//go:embed tv.html
+var tvHTML string
+
+// tvPage serves the mobile page. The page talks to this API from whatever
+// origin nginx exposes it on, so the API origin is baked in here.
 func (h *Handler) tvPage(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "not yet", http.StatusNotFound)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = io.WriteString(w, strings.ReplaceAll(tvHTML, "__API_BASE__", h.viewers.PublicBaseURL))
 }

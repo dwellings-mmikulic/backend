@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dwellings TV</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --text:#f3f4f6; --muted:#9aa3b2; --accent:#2f80ed; --ok:#2ecc71; --err:#eb5757; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:480px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .card { background:var(--card); border-radius:14px; padding:16px; margin:16px 0; }
+  .big { font-size:20px; font-weight:600; }
+  label { display:block; font-size:14px; color:var(--muted); margin:12px 0 6px; }
+  input { width:100%; font-size:18px; padding:12px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  button { width:100%; font-size:18px; padding:14px; border:0; border-radius:10px; background:var(--accent); color:#fff; margin-top:16px; }
+  button:disabled { opacity:.5; }
+  .list { max-height:230px; overflow:auto; margin-top:6px; }
+  .list div { padding:10px 12px; border-radius:8px; }
+  .list div.sel, .list div:active { background:#232836; }
+  .status { font-size:15px; margin-top:12px; min-height:1.5em; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+  video { width:100%; border-radius:10px; background:#000; margin-top:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Dwellings TV</h1>
+  <div class="muted">Pick the area your TV shows homes from.</div>
+
+  <div class="card">
+    <div class="muted">Your TV is showing homes in</div>
+    <div id="current" class="big">…</div>
+  </div>
+
+  <div class="card">
+    <label for="zip">ZIP code</label>
+    <input id="zip" inputmode="numeric" pattern="[0-9]*" maxlength="5" placeholder="e.g. 90025" autocomplete="postal-code">
+    <label for="city">or search a city</label>
+    <input id="city" placeholder="e.g. Los Angeles" autocomplete="off">
+    <div id="cities" class="list"></div>
+    <button id="go" disabled>Show this area on my TV</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="card" id="watch" hidden>
+    <div class="muted">No TV nearby? Watch your feed here.</div>
+    <video id="player" controls playsinline></video>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script>
+(function () {
+  var API = "__API_BASE__";
+  var id = location.pathname.replace(/\/+$/, "").split("/").pop();
+  if (!/^[0-9a-f]{32}$/.test(id)) id = "";
+  var $ = function (s) { return document.getElementById(s); };
+  var cities = [], picked = null;
+
+  function areaOf(f) { return f.name.replace(/^Homes for sale (in |across )?/, ""); }
+  function setStatus(msg, cls) { $("status").textContent = msg; $("status").className = "status " + (cls || ""); }
+  function show(f) {
+    id = f.id;
+    $("current").textContent = areaOf(f);
+    if (history.replaceState && location.pathname.indexOf(f.id) < 0) history.replaceState(null, "", "/tv/" + f.id);
+    $("watch").hidden = false;
+    play(f.live);
+    update();
+  }
+  function load() {
+    fetch(API + (id ? "/feed/" + id : "/feed/me"), { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.status === 404 ? "We could not find your TV. Scan the code on the screen again." : "Something went wrong. Please try again.");
+        return r.json();
+      })
+      .then(show)
+      .catch(function (e) { $("current").textContent = "—"; setStatus(e.message, "err"); });
+    fetch(API + "/feed/areas").then(function (r) { return r.json(); }).then(function (cs) { cities = cs; }).catch(function () {});
+  }
+  function renderCities(q) {
+    q = q.trim().toLowerCase();
+    var box = $("cities");
+    box.innerHTML = "";
+    if (!q) return;
+    cities.filter(function (c) { return c.name.toLowerCase().indexOf(q) >= 0; }).slice(0, 8).forEach(function (c) {
+      var d = document.createElement("div");
+      d.textContent = c.name + " · " + c.clips + " homes";
+      if (picked && picked.city === c.city && picked.state === c.state) d.className = "sel";
+      d.onclick = function () { picked = c; $("zip").value = ""; $("city").value = c.name; renderCities(c.name); update(); };
+      box.appendChild(d);
+    });
+  }
+  function choice() {
+    var z = $("zip").value.trim();
+    if (/^\d{5}$/.test(z)) return { zip: z };
+    if (picked) return { city: picked.city, state: picked.state };
+    return null;
+  }
+  function update() { $("go").disabled = !choice() || !id; }
+  function play(url) {
+    var v = $("player");
+    if (v.canPlayType("application/vnd.apple.mpegurl")) { v.src = url; return; }
+    if (window.Hls && Hls.isSupported()) {
+      if (v._hls) v._hls.destroy();
+      var h = new Hls({ liveSyncDurationCount: 3 });
+      v._hls = h;
+      h.loadSource(url);
+      h.attachMedia(v);
+    }
+  }
+  $("zip").addEventListener("input", function () { picked = null; $("city").value = ""; renderCities(""); update(); });
+  $("city").addEventListener("input", function () { picked = null; renderCities($("city").value); update(); });
+  $("go").addEventListener("click", function () {
+    var c = choice();
+    if (!c || !id) return;
+    $("go").disabled = true;
+    setStatus("Switching your TV…");
+    fetch(API + "/feed/" + id, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c) })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          setStatus(res.status === 404 && res.body.error === "unknown area" ? "We don't have that area yet." : (res.body.error || "Something went wrong."), "err");
+          update();
+          return;
+        }
+        var f = res.body, want = c.zip ? "zip:" + c.zip : "city:" + c.city + "|" + c.state;
+        setStatus(f.scope === want
+          ? "Done. Your TV switches in a few seconds."
+          : "Done. Not enough homes there yet, so your TV shows " + areaOf(f) + ".", "ok");
+        show(f);
+      })
+      .catch(function () { setStatus("Something went wrong. Please try again.", "err"); update(); });
+  });
+  load();
+})();
+</script>
+</body>
+</html>
