@@ -8,6 +8,7 @@ package viewer
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -124,6 +125,25 @@ func (h *Hasher) IDAt(sid, ip string, t time.Time) ID {
 	var id ID
 	copy(id[:], sum.Sum(nil))
 	return id
+}
+
+// Household identifies the home a request comes from: the ip-kind hash of
+// its public address, whatever sid it carries. A TV and a phone on the same
+// home network share it, which is how the mobile page finds the TV's feed.
+func (h *Hasher) Household(ip string) ID { return h.IDAt("", ip, h.now()) }
+
+// ParseID reads the hex form ID.String produces.
+func ParseID(s string) (ID, error) {
+	var id ID
+	if len(s) != 2*len(id) {
+		return id, fmt.Errorf("viewer: id must be %d hex characters", 2*len(id))
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return id, fmt.Errorf("viewer: bad id: %w", err)
+	}
+	copy(id[:], b)
+	return id, nil
 }
 
 // maxUserAgentLen caps the stored user agent.
