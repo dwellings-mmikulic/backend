@@ -50,20 +50,38 @@ func (s *fakeSource) ListGalleriesToPurge(ctx context.Context, after string, lim
 
 // fakePurger trims the source's gallery like the real one trims the row.
 type fakePurger struct {
-	mu     sync.Mutex
-	src    *fakeSource
-	purged []string
-	fail   map[string]bool
+	mu      sync.Mutex
+	src     *fakeSource
+	purged  []string
+	fail    map[string]bool // PurgeURLs of these fails on a delete
+	changed map[string]bool // PurgeURLs of these finds the row changed underneath
+}
+
+// Check refuses a gallery with a URL that is not one of this listing's photos,
+// as the real purger does.
+func (p *fakePurger) Check(zpid string, urls []string) error {
+	for _, u := range urls {
+		if !strings.HasPrefix(u, "https://cdn.example/properties/"+zpid+"/") {
+			return fmt.Errorf("gallery zpid=%s left alone: %q is not one of its photos", zpid, u)
+		}
+	}
+	return nil
 }
 
 func (p *fakePurger) PurgeURLs(ctx context.Context, zpid string, urls []string) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	if err := p.Check(zpid, urls); err != nil {
+		return 0, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.fail[zpid] {
 		return 0, fmt.Errorf("bunny delete returned status 400 for %s", zpid)
+	}
+	if p.changed[zpid] {
+		return 0, fmt.Errorf("trim gallery zpid=%s: %w", zpid, property.ErrGalleryChanged)
 	}
 	p.purged = append(p.purged, zpid)
 	p.src.mu.Lock()
@@ -174,6 +192,36 @@ func TestSweep_AFailedListingIsCountedAndTheRestGoOn(t *testing.T) {
 	}
 }
 
+// A worker can purge a listing between the sweep reading its page and
+// purging it: both delete (a missing object is a success), one trims, and the
+// other finds the gallery changed. That listing is done, not failed, and must
+// not make the run exit non-zero.
+func TestSweep_AListingPurgedByAWorkerMeanwhileIsNotAFailure(t *testing.T) {
+	src := &fakeSource{galleries: galleries(4, 3)}
+	pg := &fakePurger{src: src, changed: map[string]bool{"0002": true}}
+
+	c := sweep(context.Background(), src, pg, options{batch: 4, workers: 1}, quiet)
+
+	if c.failed != 0 || c.raced != 1 || c.listings != 3 {
+		t.Errorf("counts = %+v, want 3 listings, 1 raced, 0 failed", c)
+	}
+}
+
+// Dry-run reports what a real run would do, so a gallery the purger would
+// refuse is not counted as one that would go.
+func TestSweep_DryRunLeavesOutGalleriesThePurgerWouldRefuse(t *testing.T) {
+	gs := galleries(3, 3)
+	gs[1].URLs[2] = "https://photos.zillowstatic.com/a.jpg"
+	src := &fakeSource{galleries: gs}
+	pg := &fakePurger{src: src}
+
+	c := sweep(context.Background(), src, pg, options{dryRun: true, batch: 4, workers: 1}, quiet)
+
+	if c.listings != 2 || c.photos != 4 || c.failed != 1 {
+		t.Errorf("counts = %+v, want 2 listings, 4 photos, 1 refused", c)
+	}
+}
+
 func TestSweep_InterruptStopsAndReports(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	src := &fakeSource{galleries: galleries(9, 2)}
@@ -188,6 +236,9 @@ func TestSweep_InterruptStopsAndReports(t *testing.T) {
 
 	if !c.interrupted {
 		t.Error("interrupted = false after a cancelled context")
+	}
+	if !errors.Is(c.err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled: an interrupted run must not exit 0", c.err)
 	}
 	if n := len(pg.sorted()); n != 3 {
 		t.Errorf("purged %d listings, want the 3 of the first batch", n)

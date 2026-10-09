@@ -68,6 +68,27 @@ func TestProcessListing_APurgeFailureDoesNotFailTheListing(t *testing.T) {
 	}
 }
 
+// A shutdown that lands between the first delete and the trim must not leave
+// a row that lists objects that are gone: under SKIP_EXISTING nothing ever
+// visits the listing again, and the public would read dead links until a
+// manual sweep. The purge therefore runs detached from the shutdown, and
+// Stop waits for it like for every item goroutine.
+func TestProcessListing_ThePurgeOutlivesAShutdown(t *testing.T) {
+	img := jpegServer(t)
+	h := newHarness(t, baseConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.purger.onPurge = func(string) { cancel() } // SIGTERM while purging
+	p := listing("ZP1", img.URL+"/a.jpg", img.URL+"/b.jpg")
+
+	if _, err := h.s.processListing(ctx, &p, false); err != nil {
+		t.Fatalf("processListing: %v", err)
+	}
+	if got := h.purger.purged(); !reflect.DeepEqual(got, []string{"ZP1"}) {
+		t.Errorf("purged = %v, want [ZP1]: the purge was abandoned on shutdown", got)
+	}
+}
+
 // A revisit (render only) purges too: the worker holds the provider's source
 // URLs, but the purger reads the row, where the CDN gallery is.
 func TestProcessListing_ARevisitPurgesTheStoredGallery(t *testing.T) {

@@ -443,6 +443,11 @@ func (p *fakePurger) Purge(ctx context.Context, zpid string) (int, error) {
 	if p.onPurge != nil {
 		p.onPurge(zpid)
 	}
+	// Again: the real purge is a series of deletes and a trim, each of which
+	// checks its context, so what onPurge did to it is seen.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if p.err != nil {
 		return 0, p.err
 	}

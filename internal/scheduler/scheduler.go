@@ -48,6 +48,11 @@ const (
 	// detailsBatch is how many rows one details claim takes: small, so a
 	// shutdown or an outage hands few rows back and the fleet shares the work.
 	detailsBatch = 10
+	// purgeTimeout bounds the photo purge that follows a render: some thirty
+	// deletes with retries. Like the bookkeeping it runs detached from the
+	// work's context, so it must end well inside the 60 s stop grace period
+	// of the compose files.
+	purgeTimeout = 45 * time.Second
 	// bookkeepingTimeout bounds every transition recorded after the work
 	// (enqueue, mark, fail, complete, release…). Those run detached from the
 	// work's context, so a deadline or a SIGTERM never loses them.

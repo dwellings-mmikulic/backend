@@ -98,6 +98,13 @@ Bunny → store video_url + status.
   listings in zpid order, logs progress per page, and exits non-zero if any
   listing could not be purged — run it again to retry those. `-workers`
   (8) listings are purged side by side, `-concurrency` (4) objects each.
+  It is safe to run while the fleet renders: prod runs `SKIP_EXISTING=true`,
+  so no worker refreshes an existing row, and a listing a worker purges in
+  the meantime is counted as such, not as a failure. The first full run is a
+  matter of hours (some 18M deletes); start it under `tmux` or `nohup`, since
+  `docker compose run` ends with the SSH session. A row that still lists an
+  object that is gone (the worker's purge was cut short) is what a later run
+  of the sweep repairs, so run it again after the first pass.
 
 ### Property maps
 

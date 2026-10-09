@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -67,22 +68,16 @@ func (p *Purger) Purge(ctx context.Context, zpid string) (int, error) {
 // PurgeURLs deletes every photo of the gallery but the first and trims the row
 // to it. A gallery of one or none is left alone.
 //
-// Every URL must be an object of our CDN, or nothing is touched: a source URL
-// in the row means it was never moved to the CDN (or has just been refreshed
-// with new sources), and deleting around it would leave a mixed row. A failed
-// delete leaves the row untrimmed and is returned; the objects that did go are
-// gone, and the next attempt has only the rest to do.
+// Every URL must pass Check, or nothing is touched. A failed delete leaves the
+// row untrimmed and is returned; the objects that did go are gone, and the
+// next attempt has only the rest to do.
 func (p *Purger) PurgeURLs(ctx context.Context, zpid string, urls []string) (int, error) {
 	if len(urls) < 2 {
 		return 0, nil
 	}
-	paths := make([]string, len(urls))
-	for i, u := range urls {
-		path, err := p.storage.ObjectPath(u)
-		if err != nil {
-			return 0, fmt.Errorf("gallery zpid=%s left alone: %w", zpid, err)
-		}
-		paths[i] = path
+	paths, err := p.paths(zpid, urls)
+	if err != nil {
+		return 0, err
 	}
 
 	// No WithContext: one refused object must not abandon the others, which
@@ -106,4 +101,37 @@ func (p *Purger) PurgeURLs(ctx context.Context, zpid string, urls []string) (int
 	}
 	p.log.Debug("photos purged", "zpid", zpid, "deleted", len(paths)-1, "kept", urls[0])
 	return len(paths) - 1, nil
+}
+
+// Check reports whether PurgeURLs would touch the gallery: every URL must be
+// one object in the listing's own folder on our CDN, properties/<zpid>/<file>.
+// A dry run uses it to report what a real run would do.
+//
+// The column holds the listing's photos by convention only. A source URL
+// means the row was never moved to the CDN (or has just been refreshed with
+// new sources); a video, a map or another listing's photo would be a manual
+// fix or a later feature reusing the column. None of it is deleted on the
+// strength of the convention, and a gallery with one such URL is left alone
+// whole, so a mixed row is never made.
+func (p *Purger) Check(zpid string, urls []string) error {
+	_, err := p.paths(zpid, urls)
+	return err
+}
+
+// paths maps the gallery to storage paths, refusing what Check refuses.
+func (p *Purger) paths(zpid string, urls []string) ([]string, error) {
+	folder := "properties/" + zpid + "/"
+	paths := make([]string, len(urls))
+	for i, u := range urls {
+		path, err := p.storage.ObjectPath(u)
+		if err != nil {
+			return nil, fmt.Errorf("gallery zpid=%s left alone: %w", zpid, err)
+		}
+		file, ok := strings.CutPrefix(path, folder)
+		if !ok || file == "" || strings.Contains(file, "/") {
+			return nil, fmt.Errorf("gallery zpid=%s left alone: %q is not one of its photos", zpid, u)
+		}
+		paths[i] = path
+	}
+	return paths, nil
 }

@@ -25,6 +25,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -84,8 +85,8 @@ func run(ctx context.Context, o options, concurrency int) error {
 	purger := photopurge.New(storage, repo, concurrency, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	c := sweep(ctx, repo, purger, o, log.Printf)
-	log.Printf("done: %d listings purged, %d photos deleted, %d listings failed (dry-run=%v, interrupted=%v)",
-		c.listings, c.photos, c.failed, o.dryRun, c.interrupted)
+	log.Printf("done: %d listings purged, %d photos deleted, %d purged by a worker meanwhile, %d listings failed (dry-run=%v, interrupted=%v)",
+		c.listings, c.photos, c.raced, c.failed, o.dryRun, c.interrupted)
 	if c.err != nil {
 		return c.err
 	}
@@ -100,8 +101,10 @@ type gallerySource interface {
 	ListGalleriesToPurge(ctx context.Context, after string, limit int) ([]property.Gallery, error)
 }
 
-// galleryPurger purges one listing's gallery (photopurge.Purger).
+// galleryPurger purges one listing's gallery (photopurge.Purger). Check is
+// the refusal without the deletes.
 type galleryPurger interface {
+	Check(zpid string, urls []string) error
 	PurgeURLs(ctx context.Context, zpid string, urls []string) (int, error)
 }
 
@@ -115,6 +118,7 @@ type options struct {
 type counts struct {
 	listings    int // purged (or, in a dry run, that would be)
 	photos      int // objects deleted (or that would be)
+	raced       int // purged by a worker between the page read and the purge
 	failed      int // listings left for the next run
 	interrupted bool
 	err         error // a failure of the sweep itself, not of one listing
@@ -124,7 +128,7 @@ type counts struct {
 // time. Pages are keyed on the last zpid seen, never re-read from the top, so
 // a listing that fails is reported once and the sweep moves on; a listing
 // that succeeds drops out of the query by itself. logf gets one line per
-// failed listing and one per page.
+// failed listing and one per page. An interrupted sweep reports ctx's error.
 func sweep(ctx context.Context, src gallerySource, pg galleryPurger, o options, logf func(string, ...any)) counts {
 	batch, workers := max(o.batch, 1), max(o.workers, 1)
 	var (
@@ -133,14 +137,17 @@ func sweep(ctx context.Context, src gallerySource, pg galleryPurger, o options, 
 		after string
 		start = time.Now()
 	)
+	interrupted := func() counts {
+		c.interrupted, c.err = true, ctx.Err()
+		return c
+	}
 	for {
 		if ctx.Err() != nil {
-			c.interrupted = true
-			return c
+			return interrupted()
 		}
 		want := batch
 		if o.limit > 0 {
-			remaining := o.limit - c.listings - c.failed
+			remaining := o.limit - c.listings - c.raced - c.failed
 			if remaining <= 0 {
 				return c
 			}
@@ -149,8 +156,7 @@ func sweep(ctx context.Context, src gallerySource, pg galleryPurger, o options, 
 		page, err := src.ListGalleriesToPurge(ctx, after, want)
 		if err != nil {
 			if ctx.Err() != nil {
-				c.interrupted = true
-				return c
+				return interrupted()
 			}
 			c.err = fmt.Errorf("list galleries: %w", err)
 			return c
@@ -162,6 +168,11 @@ func sweep(ctx context.Context, src gallerySource, pg galleryPurger, o options, 
 
 		if o.dryRun {
 			for _, g := range page {
+				if err := pg.Check(g.ZPID, g.URLs); err != nil {
+					c.failed++
+					logf("zpid=%s: %v", g.ZPID, err)
+					continue
+				}
 				c.listings++
 				c.photos += len(g.URLs) - 1
 			}
@@ -180,6 +191,11 @@ func sweep(ctx context.Context, src gallerySource, pg galleryPurger, o options, 
 					case err == nil:
 						c.listings++
 						c.photos += n
+					case errors.Is(err, property.ErrGalleryChanged):
+						// A worker rendered and purged it between the page
+						// read and now: both deleted (a missing object is
+						// a success), it trimmed first. Done, not failed.
+						c.raced++
 					case ctx.Err() != nil:
 						// Interrupted, not failed: the next run gets it.
 					default:
@@ -192,7 +208,7 @@ func sweep(ctx context.Context, src gallerySource, pg galleryPurger, o options, 
 		}
 
 		elapsed := time.Since(start).Seconds()
-		logf("progress: %d listings, %d photos, %d failed, %.0f photos/s, through zpid %s",
-			c.listings, c.photos, c.failed, float64(c.photos)/max(elapsed, 1), after)
+		logf("progress: %d listings, %d photos, %d raced, %d failed, %.0f photos/s, through zpid %s",
+			c.listings, c.photos, c.raced, c.failed, float64(c.photos)/max(elapsed, 1), after)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const cdn = "https://cdn.example"
@@ -206,6 +207,49 @@ func TestPurgeURLs_RefusesAGalleryWithAForeignURL(t *testing.T) {
 	}
 }
 
+// Only objects of the listing's own folder are ever deleted. The column holds
+// photo URLs by convention; a video, a map or another listing's photo that
+// found its way into it (a manual fix, a later feature) must not be deleted
+// on the strength of that convention.
+func TestPurgeURLs_RefusesAnythingOutsideTheListingsOwnFolder(t *testing.T) {
+	own := func(i int) string { return fmt.Sprintf("%s/properties/42/%d.jpg", cdn, i) }
+	cases := map[string][]string{
+		"a video":                 {own(0), own(1), cdn + "/videos/42.mp4"},
+		"a map":                   {own(0), cdn + "/maps/v1/42.png", own(2)},
+		"another listing's photo": {own(0), own(1), cdn + "/properties/43/1.jpg"},
+		"a nested path":           {own(0), own(1), cdn + "/properties/42/x/1.jpg"},
+		"a folder prefix":         {own(0), own(1), cdn + "/properties/420/1.jpg"},
+		"the folder itself":       {own(0), own(1), cdn + "/properties/42"},
+	}
+	for name, urls := range cases {
+		storage := &fakeStorage{}
+		store := &fakeStore{}
+
+		_, err := newPurger(storage, store, 4).PurgeURLs(context.Background(), "42", urls)
+		if err == nil {
+			t.Errorf("%s: err = nil, want a refusal", name)
+		}
+		if len(storage.deletedPaths()) != 0 || len(store.trims) != 0 {
+			t.Errorf("%s: deleted %v and trimmed %v; want nothing", name, storage.deletedPaths(), store.trims)
+		}
+	}
+}
+
+// Check is the same refusal without the deletes, for a dry run that wants
+// to report what a real run would actually do.
+func TestCheck(t *testing.T) {
+	p := newPurger(&fakeStorage{}, &fakeStore{}, 4)
+	if err := p.Check("42", gallery("42", 3)); err != nil {
+		t.Errorf("Check of a good gallery: %v", err)
+	}
+	if err := p.Check("42", []string{cdn + "/properties/42/0.jpg", cdn + "/videos/42.mp4"}); err == nil {
+		t.Error("Check of a gallery with a video = nil, want a refusal")
+	}
+	if err := p.Check("42", []string{"https://photos.zillowstatic.com/a.jpg", cdn + "/properties/42/1.jpg"}); err == nil {
+		t.Error("Check of a gallery with a source URL = nil, want a refusal")
+	}
+}
+
 func TestPurgeURLs_ATrimFailureIsReturned(t *testing.T) {
 	storage := &fakeStorage{}
 	store := &fakeStore{trimErr: errors.New("image_urls changed underneath")}
@@ -226,6 +270,7 @@ func TestPurgeURLs_DeletesAtMostConcurrencyAtOnce(t *testing.T) {
 	}()
 	// Let the goroutines pile up against the block, then release them.
 	for storage.cur.Load() < 3 {
+		time.Sleep(time.Millisecond)
 	}
 	close(storage.block)
 	if err := <-done; err != nil {
