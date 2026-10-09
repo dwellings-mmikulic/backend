@@ -49,6 +49,33 @@ nginx -t && systemctl reload nginx
 curl -sI https://api.dwellings.tv/channels/live.m3u8 | grep -i x-cache-status
 ```
 
+## Personal feeds (2026-10)
+
+Every TV gets its own feed (`/feed/master.m3u8`) and the Roku app shows a
+QR that opens `https://dwellings.tv/tv/<household>` where the viewer picks a
+ZIP or city; the server then reroutes that feed. Spec:
+`docs/superpowers/specs/2026-10-09-personal-feeds-qr-design.md`. Rollout:
+
+1. Reinstall `deploy/nginx-dwellings.conf` (it adds `/feed/live.m3u8` to the
+   playlist cache on the api host and proxies `/tv/` on the apex), then
+   `nginx -t && systemctl reload nginx`.
+2. `/opt/dwellings/.env`: `MOBILE_BASE_URL` defaults to
+   `https://dwellings.tv`, which is right for prod; `QR_SHOW_SECONDS` (60)
+   and `QR_EVERY_SECONDS` (300) tune the cadence the app reads from
+   `/channels/resolve` without an app release. Feeds are on whenever
+   `LINEAR_ENABLED` and `VIEWER_TRACKING_ENABLED` are.
+3. The `household_spans` table applies on restart (schema.sql).
+4. The IP-city default needs the GeoLite2 file (`GEOIP_DB_PATH`); until it is
+   on the box every household starts national and picks its area by QR.
+5. Roku app: play `resolve.feed` instead of a channel master, and every
+   `resolve.qr.every_seconds` overlay `resolve.qr.url` (fetched fresh each
+   time) for `resolve.qr.show_seconds`. Keep calling `/channels/beat`.
+
+Smoke: `curl -s https://api.dwellings.tv/feed/me` returns your household's
+JSON; open `https://dwellings.tv/tv/` on a phone on the same network, pick
+an area, and `/feed/live.m3u8?hh=<id>` lists that channel's segments within
+~20 s.
+
 ## Bunny CDN (HLS segments)
 
 Bunny fronts **only the segments** (`hls/v1/<zpid>/<hash8>/seg-NNN.ts` and

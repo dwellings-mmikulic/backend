@@ -43,8 +43,8 @@ All under `/feed/`, served by the API process, CORS `*`.
 | `GET /feed/master.m3u8` | Personal master. Household from the connection IP (or a public `ip=` param, same precedence as today). Creates the household's first span if none. Points at `live.m3u8?hh=<id>`. `Cache-Control: no-store`. |
 | `GET /feed/live.m3u8?hh=<id>` | Personal media playlist (below). Cached 2 s per URL like other playlists. Records a viewer heartbeat on the effective scope so `/channels/stats` keeps counting. |
 | `GET /feed/qr.png` | QR PNG of `<MOBILE_BASE_URL>/tv/<id>` for the connecting household, built on the fly with `internal/qrcode`. `no-store`. Optional `size` (default 400, max 1000). |
-| `GET /feed/me` | 302 to `/feed/<id>` for the connecting household (creates span 0 if needed). Lets a typed-in `/tv/` URL find its feed by IP alone. `no-store`. |
-| `GET /feed/{id}` | JSON for the mobile page: `{scope, name, requested, source, updated_at}`. `source` is `choice`, `geo` or `default`. |
+| `GET /feed/me` | Same JSON as `GET /feed/{id}` for the connecting household (creates span 0 if needed), so a typed-in `/tv/` URL finds its feed by IP alone. `no-store`. |
+| `GET /feed/{id}` | JSON for the mobile page: `{id, scope, name, requested, source, updated_at, live}`. `source` is `choice`, `geo` or `default`; `live` is the personal media playlist URL for an in-page player. |
 | `POST /feed/{id}` | Body `{zip}` or `{city, state}`. Validated with `ParseScope` + `AreaExists` (400/404 as `/channels/`). Resolves the thin-scope fallback, appends a span, returns the same JSON as GET. 404 for an unknown household id. |
 | `GET /feed/areas` | `[{city, state, name, clips}]` for every city with at least `MinScopeClips` current clips, cached 10 min. Feeds the mobile page's city picker. |
 | `GET /tv/` and `GET /tv/{id}` | The mobile page (one embedded HTML file). |
@@ -141,8 +141,8 @@ posts, then shows the effective area ("Showing homes around Katy, TX" when
 a ZIP fell back) and a "Watch here" button that plays
 `/feed/live.m3u8?hh=<id>` in-page with hls.js (cdnjs, pinned), so the
 demo works with no Roku in the room. `/tv/` with no id uses the phone's own
-household (`/feed/me` ⇒ redirect to `/tv/<id>`), which is Daniel's
-pure-IP path for a typed-in URL.
+household (the page calls `/feed/me` and rewrites its URL to `/tv/<id>`),
+which is Daniel's pure-IP path for a typed-in URL.
 
 nginx on `dwellings.tv` proxies `/tv/` to the API box so the QR URL is
 short; `api.dwellings.tv` serves `/feed/` with `/feed/live.m3u8` cached 2 s
