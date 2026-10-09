@@ -3,6 +3,8 @@ package linear
 import (
 	"context"
 	"time"
+
+	"github.com/dwellingtw/backend/internal/viewer"
 )
 
 // ClipRef is what lineup building needs to know about a clip.
@@ -26,6 +28,38 @@ type Listing struct {
 	Price  int64
 	City   string
 	State  string
+}
+
+// Span is one stretch of a household's personal feed (see
+// docs/superpowers/specs/2026-10-09-personal-feeds-qr-design.md): from
+// StartsAt the household airs channel Scope. Spans chain the way versions
+// do: the offsets relabel the channel's segment and item counters so the
+// personal playlist's MEDIA-SEQUENCE and DISCONTINUITY-SEQUENCE keep
+// climbing across a switch.
+type Span struct {
+	Household  viewer.ID
+	N          int       // 0, 1, 2… in order; the latest is the current choice
+	Scope      string    // effective channel key after fallback
+	Requested  string    // the key the viewer asked for; "" when none
+	Source     string    // SourceChoice, SourceGeo or SourceDefault
+	StartsAt   time.Time // when this span starts airing
+	SeqOffset  int64     // personal seq = channel seq + SeqOffset
+	ItemOffset int64     // personal item = channel item + ItemOffset
+	CreatedAt  time.Time
+}
+
+// Span sources.
+const (
+	SourceChoice  = "choice"  // the viewer picked it on the mobile page
+	SourceGeo     = "geo"     // the IP's location
+	SourceDefault = "default" // national, nothing better known
+)
+
+// City is an area the mobile page can offer.
+type City struct {
+	City  string // lowercase, as in properties.city
+	State string // lowercase 2-letter code
+	Clips int    // current clips
 }
 
 // Version is one materialised lineup of a channel. Versions form a chain:
@@ -95,4 +129,16 @@ type Store interface {
 	ListingsByClipID(ctx context.Context, ids []int64) ([]Listing, error)
 	// CountCurrentClips counts the current clips across the whole library.
 	CountCurrentClips(ctx context.Context) (int, error)
+	// Spans returns a household's spans oldest first; nil for an unknown
+	// household.
+	Spans(ctx context.Context, h viewer.ID) ([]Span, error)
+	// InsertSpan stores sp unless (household, n) exists; ok reports whether
+	// it was stored.
+	InsertSpan(ctx context.Context, sp *Span) (ok bool, err error)
+	// ReplaceSpan overwrites the stored (household, n) with sp. It is only
+	// ever used on a span that has not started airing.
+	ReplaceSpan(ctx context.Context, sp *Span) error
+	// ListCities returns every city with at least min current clips, ordered
+	// by state then city.
+	ListCities(ctx context.Context, min int) ([]City, error)
 }
