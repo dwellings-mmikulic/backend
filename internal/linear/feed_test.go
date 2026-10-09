@@ -170,6 +170,60 @@ func TestFeed_GetAndChoose(t *testing.T) {
 	}
 }
 
+// The page lives on dwellings.tv and calls api.dwellings.tv, so an error
+// without the CORS header is a fetch rejection: the page could never show
+// "We don't have that area yet" or "We could not find your TV".
+func TestFeed_ErrorsCarryCORS(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	_, mux := feedMux(m, t0)
+	id := hhRe.FindStringSubmatch(do(mux, "GET", "/feed/master.m3u8", "203.0.113.5", "").Body.String())[1]
+	for _, c := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"GET", "/feed/live.m3u8?hh=" + strings.Repeat("0", 32), "", 404},
+		{"GET", "/feed/" + strings.Repeat("0", 32), "", 404},
+		{"POST", "/feed/" + id, `{"zip":"12345"}`, 404},
+		{"POST", "/feed/" + id, `{"zip":"1234"}`, 400},
+	} {
+		rec := do(mux, c.method, c.path, "203.0.113.5", c.body)
+		if rec.Code != c.want || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+			t.Errorf("%s %s: status %d (want %d), ACAO %q", c.method, c.path, rec.Code, c.want, rec.Header().Get("Access-Control-Allow-Origin"))
+		}
+	}
+}
+
+func TestFeed_ChoiceBodyTooLargeNamesTheProblem(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	_, mux := feedMux(m, t0)
+	id := hhRe.FindStringSubmatch(do(mux, "GET", "/feed/master.m3u8", "203.0.113.5", "").Body.String())[1]
+	rec := do(mux, "POST", "/feed/"+id, "203.0.113.5", `{"zip":"`+strings.Repeat("7", 2000)+`"}`)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "1 KB") {
+		t.Errorf("status %d body %s", rec.Code, rec.Body)
+	}
+}
+
+// The household is the connection's address only. Honouring a public ip=
+// parameter would let anyone who knows a home's address read its feed id
+// (and so change its TV) — the property the spec promises the id has.
+func TestFeed_HouseholdIgnoresIPParam(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	_, mux := feedMux(m, t0)
+	var me, spoofed map[string]any
+	_ = json.Unmarshal(do(mux, "GET", "/feed/me", "203.0.113.5", "").Body.Bytes(), &me)
+	_ = json.Unmarshal(do(mux, "GET", "/feed/me?ip=203.0.113.9", "203.0.113.5", "").Body.Bytes(), &spoofed)
+	if me["id"] != spoofed["id"] {
+		t.Errorf("/feed/me honoured ip=: %v vs %v", me["id"], spoofed["id"])
+	}
+	master := hhRe.FindStringSubmatch(do(mux, "GET", "/feed/master.m3u8?ip=203.0.113.9", "203.0.113.5", "").Body.String())
+	if master == nil || master[1] != me["id"] {
+		t.Errorf("/feed/master.m3u8 honoured ip=: %v vs %v", master, me["id"])
+	}
+}
+
 func TestFeed_Areas(t *testing.T) {
 	m := newMemStore()
 	addClips(m, katy, 1, 40)

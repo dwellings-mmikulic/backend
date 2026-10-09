@@ -47,9 +47,12 @@ const (
 	maxChoiceBody = 1024
 )
 
-// household is the home the request comes from.
+// household is the home the request comes from: the connection's address
+// only. A public ip= parameter (which the channel routes honour) is ignored
+// here on purpose: it would let anyone who knows a home's address learn its
+// feed id, and the id is the capability to change that TV's feed.
 func (h *Handler) household(r *http.Request) viewer.ID {
-	return h.viewers.Hasher.Household(viewer.RequestIP(r))
+	return h.viewers.Hasher.Household(viewer.ClientIP(r))
 }
 
 // ensure creates the household's feed on first contact, defaulting to the
@@ -57,7 +60,7 @@ func (h *Handler) household(r *http.Request) viewer.ID {
 func (h *Handler) ensure(r *http.Request, id viewer.ID) ([]Span, error) {
 	var cands []Scope
 	if h.viewers.Geo != nil {
-		if loc, ok := h.viewers.Geo.Locate(net.ParseIP(viewer.RequestIP(r))); ok {
+		if loc, ok := h.viewers.Geo.Locate(net.ParseIP(viewer.ClientIP(r))); ok {
 			cands = geoCandidates(loc)
 		}
 	}
@@ -201,7 +204,12 @@ func (h *Handler) feedChoose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body choiceBody
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxChoiceBody+1)).Decode(&body); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChoiceBody)).Decode(&body); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusBadRequest, "body larger than 1 KB")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "body must be JSON with zip, or city and state")
 		return
 	}

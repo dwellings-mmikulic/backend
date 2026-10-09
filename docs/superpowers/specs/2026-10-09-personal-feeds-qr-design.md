@@ -40,7 +40,7 @@ All under `/feed/`, served by the API process, CORS `*`.
 
 | Route | Purpose |
 |---|---|
-| `GET /feed/master.m3u8` | Personal master. Household from the connection IP (or a public `ip=` param, same precedence as today). Creates the household's first span if none. Points at `live.m3u8?hh=<id>`. `Cache-Control: no-store`. |
+| `GET /feed/master.m3u8` | Personal master. Household from the connection IP only: unlike the channel routes, a public `ip=` param is ignored on every `/feed/` route, or anyone who knows a home's address could read its feed id. Creates the household's first span if none. Points at `live.m3u8?hh=<id>`. `Cache-Control: no-store`. |
 | `GET /feed/live.m3u8?hh=<id>` | Personal media playlist (below). Cached 2 s per URL like other playlists. Records a viewer heartbeat on the effective scope so `/channels/stats` keeps counting. |
 | `GET /feed/qr.png` | QR PNG of `<MOBILE_BASE_URL>/tv/<id>` for the connecting household, built on the fly with `internal/qrcode`. `no-store`. Optional `size` (default 400, max 1000). |
 | `GET /feed/me` | Same JSON as `GET /feed/{id}` for the connecting household (creates span 0 if needed), so a typed-in `/tv/` URL finds its feed by IP alone. `no-store`. |
