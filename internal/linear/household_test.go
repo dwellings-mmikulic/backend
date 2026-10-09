@@ -312,6 +312,79 @@ func TestChoose_ThinOrUnknownAreas(t *testing.T) {
 	}
 }
 
+// A second submit decides "replace in place" from the segments aired at the
+// request's start, then spends time resolving scopes before writing. If a
+// poll listed the pending span's first segment in between, replacing would
+// hand that sequence number to a different segment; the write must notice
+// and chain instead. The fake clock models it: the request's now is before
+// the first new segment ends, the clock at write time is after.
+func TestChoose_ReplaceRacesWithAPollThatListedTheFirstSegment(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	addClips(m, austin, 101, 40)
+	s := testService(m, t0)
+	hh := viewer.ID{1}
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+		t.Fatal(err)
+	}
+	first := t0.Add(61 * time.Second) // S = t0+63s; austin's first segment is [t0+63s, t0+66s)
+	s.now = func() time.Time { return first }
+	if _, err := s.Choose(context.Background(), hh, Scope{Zip: "78701"}, first); err != nil {
+		t.Fatal(err)
+	}
+	second := t0.Add(62 * time.Second)
+	atWrite := t0.Add(67 * time.Second)
+	s.now = func() time.Time { return atWrite }
+	spans, err := s.Choose(context.Background(), hh, Scope{State: "tx"}, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spans) != 3 || spans[2].Scope != "state:tx" || !spans[2].StartsAt.Equal(t0.Add(69*time.Second)) {
+		t.Fatalf("expected a third span chained after austin's aired segment: %+v", spans)
+	}
+	pollMonotonic(t, s, hh, atWrite, 2*time.Minute, func(int64) bool { return false })
+}
+
+// The retention purge can remove every span but a pending latest one (the
+// predecessor was old, the latest was just created). A submit in that state
+// must still replace, keeping the personal counters the pending span was
+// going to start with, rather than reaching for a predecessor that is gone.
+func TestChoose_ReplaceWithoutPredecessorKeepsTheCounters(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	addClips(m, austin, 101, 40)
+	s := testService(m, t0)
+	hh := viewer.ID{1}
+	S := t0.Add(63 * time.Second)
+	pending := &Span{Household: hh, N: 1, Scope: "zip:77494", Requested: "zip:77494", Source: SourceChoice, StartsAt: S, SeqOffset: 5, ItemOffset: 2, CreatedAt: t0}
+	if ok, _ := m.InsertSpan(context.Background(), pending); !ok {
+		t.Fatal("seed")
+	}
+	now := t0.Add(62 * time.Second)
+	s.now = func() time.Time { return now }
+	spans, err := s.Choose(context.Background(), hh, Scope{Zip: "78701"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spans) != 1 || spans[0].N != 1 || spans[0].Scope != "zip:78701" || !spans[0].StartsAt.Equal(S) {
+		t.Fatalf("spans = %+v", spans)
+	}
+	oldFirst, err := s.firstAtOrAfter(context.Background(), "zip:77494", S)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newFirst, err := s.firstAtOrAfter(context.Background(), "zip:78701", S)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := newFirst.Seq+spans[0].SeqOffset, oldFirst.Seq+pending.SeqOffset; got != want {
+		t.Errorf("first personal seq = %d, want %d (unchanged by the replace)", got, want)
+	}
+	if got, want := newFirst.Item+spans[0].ItemOffset, oldFirst.Item+pending.ItemOffset; got != want {
+		t.Errorf("first personal item = %d, want %d (unchanged by the replace)", got, want)
+	}
+}
+
 // S can fall inside the last segment of the new channel's current lineup
 // version: the first segment at or after S is then the next version's
 // first, which must be found (and created if need be) rather than failing.

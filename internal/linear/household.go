@@ -235,24 +235,49 @@ func (s *Service) firstAtOrAfter(ctx context.Context, key string, t time.Time) (
 	}
 }
 
-// splice builds span n of a feed: channel eff from S on, chained after prev
-// so the personal counters continue from prev's last segment.
-func (s *Service) splice(ctx context.Context, prev Span, eff, requested Scope, S time.Time, n int, now time.Time) (*Span, error) {
-	tail, err := s.contribution(ctx, prev, S)
-	if err != nil {
-		return nil, err
-	}
+// splice builds span n of household h: channel eff from S on, with offsets
+// such that its first segment carries the personal counters seq and item.
+func (s *Service) splice(ctx context.Context, h viewer.ID, eff, requested Scope, S time.Time, n int, seq, item int64, now time.Time) (*Span, error) {
 	first, err := s.firstAtOrAfter(ctx, eff.Key(), S)
 	if err != nil {
 		return nil, err
 	}
-	sp := &Span{Household: prev.Household, N: n, Scope: eff.Key(), Requested: requested.Key(), Source: SourceChoice, StartsAt: S, CreatedAt: now}
-	if len(tail) > 0 {
-		last := tail[len(tail)-1]
-		sp.SeqOffset = last.Seq + 1 - first.Seq
-		sp.ItemOffset = last.Item + 1 - first.Item
+	return &Span{
+		Household: h, N: n, Scope: eff.Key(), Requested: requested.Key(), Source: SourceChoice, StartsAt: S,
+		SeqOffset: seq - first.Seq, ItemOffset: item - first.Item, CreatedAt: now,
+	}, nil
+}
+
+// chained builds the span after latest: it starts when the segment of
+// latest's channel airing at now ends, and its counters continue from
+// latest's last segment before that.
+func (s *Service) chained(ctx context.Context, latest Span, eff, requested Scope, now time.Time) (*Span, error) {
+	S, err := s.endOfAiring(ctx, latest.Scope, now)
+	if err != nil {
+		return nil, err
 	}
-	return sp, nil
+	tail, err := s.contribution(ctx, latest, S)
+	if err != nil {
+		return nil, err
+	}
+	if len(tail) == 0 {
+		return nil, fmt.Errorf("household %s: span %d (%s) aired nothing before %s", latest.Household, latest.N, latest.Scope, S)
+	}
+	last := tail[len(tail)-1]
+	return s.splice(ctx, latest.Household, eff, requested, S, latest.N+1, last.Seq+1, last.Item+1, now)
+}
+
+// replacement builds the span that takes the place of a pending latest: same
+// start, and the same personal counters its first segment was going to
+// carry, so nothing before it is affected and no predecessor is needed (the
+// retention purge may have removed it).
+func (s *Service) replacement(ctx context.Context, latest Span, eff, requested Scope, now time.Time) (*Span, error) {
+	first, err := s.firstAtOrAfter(ctx, latest.Scope, latest.StartsAt)
+	if err != nil {
+		return nil, err
+	}
+	return s.splice(ctx, latest.Household, eff, requested, latest.StartsAt, latest.N,
+		first.Seq+latest.SeqOffset, first.Item+latest.ItemOffset, now)
 }
 
 // Choose points household h's feed at the channel for requested (after the
@@ -280,19 +305,27 @@ func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now 
 	if err != nil {
 		return nil, err
 	}
-	prev, n := latest, latest.N+1
-	var S time.Time
-	if len(aired) == 0 && latest.N > 0 {
-		prev, n, S = spans[len(spans)-2], latest.N, latest.StartsAt
-	} else if S, err = s.endOfAiring(ctx, latest.Scope, now); err != nil {
-		return nil, err
+	replace := len(aired) == 0 && latest.N > 0
+	var sp *Span
+	if replace {
+		sp, err = s.replacement(ctx, latest, eff, requested, now)
+	} else {
+		sp, err = s.chained(ctx, latest, eff, requested, now)
 	}
-	sp, err := s.splice(ctx, prev, eff, requested, S, n, now)
 	if err != nil {
 		return nil, err
 	}
-	sp.Household = h
-	if n == latest.N {
+	if replace {
+		// Re-check right before writing: a poll may have listed the pending
+		// span's first segment while this request resolved scopes, and that
+		// sequence number must never change hands. If so, chain instead.
+		again, err := s.contribution(ctx, latest, s.now())
+		if err != nil {
+			return nil, err
+		}
+		if len(again) > 0 {
+			return s.Choose(ctx, h, requested, s.now())
+		}
 		err = s.store.ReplaceSpan(ctx, sp)
 	} else {
 		_, err = s.store.InsertSpan(ctx, sp) // a lost race means the other submit's span wins
