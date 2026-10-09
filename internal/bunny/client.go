@@ -21,6 +21,11 @@ const maxErrorBody = 512
 // TLS handshake per object.
 const maxDrain = 4 << 10
 
+// maxIdleConns is how many connections to the storage host are kept open
+// between requests: enough for the purge sweep's workers × per-listing
+// concurrency and a worker box's parallel uploads.
+const maxIdleConns = 128
+
 // errAttemptOver is what a transport goroutine gets when it reads an attempt's
 // body after that attempt has ended. See attemptBody.
 var errAttemptOver = errors.New("bunny: upload attempt is over")
@@ -45,11 +50,18 @@ type Client struct {
 //   - storageHost: e.g. "storage.bunnycdn.com" or a regional host like "la.storage.bunnycdn.com"
 //   - cdnBaseURL:  the public pull-zone base, e.g. "https://dwellings.b-cdn.net"
 func New(storageZone, apiKey, storageHost, cdnBaseURL string, timeout time.Duration) *Client {
+	// Every request goes to the one storage host. The default transport
+	// keeps two idle connections per host, so anything beyond two concurrent
+	// requests pays a TLS handshake each: the photo purge measured 27
+	// deletes/s fleet-wide at 32 in flight because of it.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = maxIdleConns
+	transport.MaxIdleConns = maxIdleConns
 	return &Client{
 		storageZone: storageZone,
 		apiKey:      apiKey,
 		cdnBaseURL:  strings.TrimRight(cdnBaseURL, "/"),
-		http:        &http.Client{Timeout: timeout},
+		http:        &http.Client{Timeout: timeout, Transport: transport},
 
 		endpointBase: "https://" + strings.TrimRight(storageHost, "/"),
 		// Three attempts, 1 s then 4 s apart: long enough to ride out a

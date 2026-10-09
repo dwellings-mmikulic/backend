@@ -117,6 +117,20 @@ func TestNew_ProductionDefaults(t *testing.T) {
 	if c.http.Timeout != time.Minute {
 		t.Errorf("http timeout = %v, want 1m", c.http.Timeout)
 	}
+	// Every request goes to the one storage host. The default transport keeps
+	// two idle connections per host, so anything beyond two concurrent
+	// requests pays a TLS handshake each — the photo purge measured 27
+	// deletes/s fleet-wide at 32 in flight because of it.
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, want *http.Transport", c.http.Transport)
+	}
+	if tr.MaxIdleConnsPerHost < 64 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want at least 64", tr.MaxIdleConnsPerHost)
+	}
+	if tr.MaxIdleConns < tr.MaxIdleConnsPerHost {
+		t.Errorf("MaxIdleConns = %d, want at least MaxIdleConnsPerHost (%d)", tr.MaxIdleConns, tr.MaxIdleConnsPerHost)
+	}
 }
 
 // The case the retry exists for, with the body type production uses. Without
