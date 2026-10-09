@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS viewer_clients (
 CREATE INDEX IF NOT EXISTS idx_viewer_clients_last_seen
     ON viewer_clients (last_seen);
 
+-- Personal feeds (see docs/superpowers/specs/2026-10-09-personal-feeds-qr-design.md).
+-- household_spans: a household's feed as a chain of spans. household is the
+-- ip-kind viewer hash; the highest n is the household's current channel.
+-- Superseded spans are purged on the viewer retention.
+CREATE TABLE IF NOT EXISTS household_spans (
+    household   BYTEA       NOT NULL,
+    n           INTEGER     NOT NULL,
+    scope       TEXT        NOT NULL,
+    requested   TEXT        NOT NULL,
+    source      TEXT        NOT NULL,
+    starts_at   TIMESTAMPTZ NOT NULL,
+    seq_offset  BIGINT      NOT NULL,
+    item_offset BIGINT      NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (household, n)
+);
+
 -- Multi-instance workers (see
 -- docs/superpowers/specs/2026-09-19-multi-instance-workers-design.md).
 -- schema_meta: the hash of this file as last applied, so Migrate can skip the

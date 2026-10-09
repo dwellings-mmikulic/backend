@@ -117,6 +117,8 @@ type Config struct {
 
 	// Ads — VAST ad tags handed to the Roku app.
 	Ads AdsConfig
+	// Feed is the personal feed + QR configuration.
+	Feed FeedConfig
 
 	// PublicBaseURL is this server's public origin (e.g. https://api.dwellings.tv)
 	// for absolute URLs in the Roku feed. Empty disables the feed's live entry.
@@ -202,6 +204,17 @@ type ViewerConfig struct {
 type AdsConfig struct {
 	PrerollURL string
 	MidrollURL string
+}
+
+// FeedConfig controls the personal feeds and the QR the Roku app shows (see
+// docs/superpowers/specs/2026-10-09-personal-feeds-qr-design.md).
+type FeedConfig struct {
+	// MobileBaseURL is the origin the mobile page is reached on; the QR
+	// encodes <MobileBaseURL>/tv/<household>.
+	MobileBaseURL string
+	// QRShowSeconds / QREverySeconds are the cadence reported to the app.
+	QRShowSeconds  int
+	QREverySeconds int
 }
 
 // SearchCriteria defines what properties the scheduler discovers each cycle.
@@ -365,6 +378,11 @@ func Load() (*Config, error) {
 			PrerollURL: strings.TrimSpace(getenv("AD_PREROLL_URL", "")),
 			MidrollURL: strings.TrimSpace(getenv("AD_MIDROLL_URL", "")),
 		},
+		Feed: FeedConfig{
+			MobileBaseURL:  strings.TrimRight(getenv("MOBILE_BASE_URL", "https://dwellings.tv"), "/"),
+			QRShowSeconds:  getenvInt("QR_SHOW_SECONDS", 60),
+			QREverySeconds: getenvInt("QR_EVERY_SECONDS", 300),
+		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),
 		Concurrency: ConcurrencyConfig{
@@ -429,6 +447,12 @@ func Load() (*Config, error) {
 		if v != "" && !isHTTPURL(v) {
 			return nil, fmt.Errorf("%s must be an absolute http(s) URL, got %q", key, v)
 		}
+	}
+	if !isHTTPURL(c.Feed.MobileBaseURL) {
+		return nil, fmt.Errorf("MOBILE_BASE_URL must be an absolute http(s) URL, got %q", c.Feed.MobileBaseURL)
+	}
+	if c.Feed.QRShowSeconds < 1 || c.Feed.QREverySeconds < c.Feed.QRShowSeconds {
+		return nil, fmt.Errorf("QR_SHOW_SECONDS (%d) must be >= 1 and <= QR_EVERY_SECONDS (%d)", c.Feed.QRShowSeconds, c.Feed.QREverySeconds)
 	}
 	if c.Video.FPS != 0 && c.Video.FPS < MinVideoFPS {
 		return nil, fmt.Errorf("VIDEO_FPS must be at least %d, got %d", MinVideoFPS, c.Video.FPS)

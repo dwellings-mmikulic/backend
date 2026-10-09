@@ -131,9 +131,9 @@ SELECT ip, user_agent, channel_key, first_seen, last_seen
 	return out, nil
 }
 
-// Purge implements Store. viewer_last_channel and viewer_clients are trimmed
-// on the same cutoff so neither a stale default nor a raw address outlives
-// the evidence for it.
+// Purge implements Store. viewer_last_channel, viewer_clients and superseded
+// household_spans are trimmed on the same cutoff so neither a stale default
+// nor a raw address outlives the evidence for it.
 func (r *Repository) Purge(ctx context.Context, before time.Time) (int64, error) {
 	tag, err := r.pool.Exec(ctx, `DELETE FROM viewer_heartbeats WHERE minute < $1`, before)
 	if err != nil {
@@ -144,6 +144,14 @@ func (r *Repository) Purge(ctx context.Context, before time.Time) (int64, error)
 	}
 	if _, err := r.pool.Exec(ctx, `DELETE FROM viewer_clients WHERE last_seen < $1`, before); err != nil {
 		return tag.RowsAffected(), fmt.Errorf("purge clients: %w", err)
+	}
+	// A household keeps its current span forever; superseded ones go with
+	// the heartbeats that could have referenced them.
+	if _, err := r.pool.Exec(ctx, `
+DELETE FROM household_spans s
+ WHERE created_at < $1
+   AND n < (SELECT max(n) FROM household_spans WHERE household = s.household)`, before); err != nil {
+		return tag.RowsAffected(), fmt.Errorf("purge household spans: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }

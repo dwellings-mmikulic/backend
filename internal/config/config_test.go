@@ -705,3 +705,32 @@ func TestLoad_VideoFPS(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_FeedDefaults(t *testing.T) {
+	minimalEnv(t)
+	for _, key := range []string{"MOBILE_BASE_URL", "QR_SHOW_SECONDS", "QR_EVERY_SECONDS"} {
+		t.Setenv(key, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Feed.MobileBaseURL != "https://dwellings.tv" || cfg.Feed.QRShowSeconds != 60 || cfg.Feed.QREverySeconds != 300 {
+		t.Errorf("Feed = %+v", cfg.Feed)
+	}
+}
+
+func TestLoad_FeedValidation(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("QR_SHOW_SECONDS", "400")
+	t.Setenv("QR_EVERY_SECONDS", "300")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "QR_SHOW_SECONDS") {
+		t.Errorf("Load() error = %v, want one naming QR_SHOW_SECONDS", err)
+	}
+	t.Setenv("QR_SHOW_SECONDS", "")
+	t.Setenv("QR_EVERY_SECONDS", "")
+	t.Setenv("MOBILE_BASE_URL", "dwellings.tv")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MOBILE_BASE_URL") {
+		t.Errorf("Load() error = %v, want one naming MOBILE_BASE_URL", err)
+	}
+}

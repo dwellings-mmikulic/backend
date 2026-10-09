@@ -17,6 +17,7 @@ type Handler struct {
 	svc     *Service
 	log     *slog.Logger
 	viewers *ViewerOptions // nil until EnableViewers
+	feeds   *FeedOptions   // nil until EnableFeeds
 
 	preRollAd, midRollAd *string // VAST tags for /channels/resolve; nil = none
 }
@@ -50,6 +51,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		mux.HandleFunc("GET /channels/beat", h.beat)
 		if h.viewers.Clients != nil && h.viewers.AdminKey != "" {
 			mux.HandleFunc("GET /admin/viewers", h.adminViewers)
+		}
+		if h.feeds != nil {
+			h.registerFeeds(mux)
 		}
 	}
 }
@@ -136,9 +140,13 @@ func playlistHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 }
 
+// writeError answers status with {"error": msg}. The CORS header is set so a
+// page on another origin (the mobile page on dwellings.tv) can read the
+// error instead of seeing a rejected fetch.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

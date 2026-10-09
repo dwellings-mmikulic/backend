@@ -56,6 +56,10 @@ type Service struct {
 	contentMu  sync.Mutex
 	hasContent bool
 	contentAt  time.Time // when hasContent was last refreshed
+
+	citiesMu sync.Mutex
+	cities   []City
+	citiesAt time.Time // when cities was last loaded
 }
 
 // contentTTL is how long HasContent reuses its answer.
@@ -187,17 +191,15 @@ func (s *Service) checkArea(ctx context.Context, sc Scope) error {
 	return nil
 }
 
-// Playlist renders the live media playlist of sc at now.
-func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte, error) {
-	if err := s.checkArea(ctx, sc); err != nil {
-		return nil, err
-	}
-	key := sc.Key()
-	cur, prev, err := s.current(ctx, key, now, s.newSource(key))
+// channelWindow is the live window of channel key at t: the newest ended
+// segments that satisfy liveWindow. Playlist writes it out as is; a personal
+// feed splices several of them (household.go).
+func (s *Service) channelWindow(ctx context.Context, key string, t time.Time) ([]segment, error) {
+	cur, prev, err := s.current(ctx, key, t, s.newSource(key))
 	if err != nil {
 		return nil, err
 	}
-	ids := windowClipIDs(cur, prev, now, liveWindow)
+	ids := windowClipIDs(cur, prev, t, liveWindow)
 	clips, err := s.store.ClipsByID(ctx, ids)
 	if err != nil {
 		return nil, err
@@ -210,7 +212,15 @@ func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte
 			return nil, err
 		}
 	}
-	segs, err := window(cur, prev, clips, now, liveWindow)
+	return window(cur, prev, clips, t, liveWindow)
+}
+
+// Playlist renders the live media playlist of sc at now.
+func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte, error) {
+	if err := s.checkArea(ctx, sc); err != nil {
+		return nil, err
+	}
+	segs, err := s.channelWindow(ctx, sc.Key(), now)
 	if err != nil {
 		return nil, err
 	}

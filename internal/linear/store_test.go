@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/dwellingtw/backend/internal/viewer"
 )
 
 // memStore is an in-memory Store for tests.
@@ -16,6 +18,7 @@ type memStore struct {
 	zipCity  map[string][2]string
 	zips     map[string]bool // ZIPs that exist, with or without listings
 	cities   map[string]bool // "city|state" pairs that exist
+	spans    map[viewer.ID][]Span
 }
 
 type memClip struct {
@@ -28,6 +31,7 @@ func newMemStore() *memStore {
 	return &memStore{
 		clips: map[int64]memClip{}, versions: map[string][]Version{},
 		zipCity: map[string][2]string{}, zips: map[string]bool{}, cities: map[string]bool{},
+		spans: map[viewer.ID][]Span{},
 	}
 }
 
@@ -197,5 +201,64 @@ func (m *memStore) ListingsByClipID(_ context.Context, ids []int64) ([]Listing, 
 			out = append(out, Listing{ClipID: id, ZPID: fmt.Sprint(id), Price: c.price, City: c.scope.City, State: c.scope.State})
 		}
 	}
+	return out, nil
+}
+
+func (m *memStore) Spans(_ context.Context, h viewer.ID) ([]Span, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.spans[h]) == 0 {
+		return nil, nil
+	}
+	out := append([]Span(nil), m.spans[h]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].N < out[j].N })
+	return out, nil
+}
+
+func (m *memStore) InsertSpan(_ context.Context, sp *Span) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.spans[sp.Household] {
+		if e.N == sp.N {
+			return false, nil
+		}
+	}
+	m.spans[sp.Household] = append(m.spans[sp.Household], *sp)
+	return true, nil
+}
+
+func (m *memStore) ReplaceSpan(_ context.Context, sp *Span) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, e := range m.spans[sp.Household] {
+		if e.N == sp.N {
+			m.spans[sp.Household][i] = *sp
+			return nil
+		}
+	}
+	return fmt.Errorf("replace span %d of %s: no such span", sp.N, sp.Household)
+}
+
+func (m *memStore) ListCities(_ context.Context, min int) ([]City, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counts := map[[2]string]int{}
+	for _, c := range m.clips {
+		if c.scope.City != "" {
+			counts[[2]string{c.scope.City, c.scope.State}]++
+		}
+	}
+	var out []City
+	for k, n := range counts {
+		if n >= min {
+			out = append(out, City{City: k[0], State: k[1], Clips: n})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].State != out[j].State {
+			return out[i].State < out[j].State
+		}
+		return out[i].City < out[j].City
+	})
 	return out, nil
 }

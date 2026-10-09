@@ -225,6 +225,12 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 		h.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
 		if cfg.Viewer.Enabled {
 			h.EnableViewers(viewerOptions(ctx, cfg, pool, log))
+			h.EnableFeeds(linear.FeedOptions{
+				MobileBaseURL:  cfg.Feed.MobileBaseURL,
+				QRShowSeconds:  cfg.Feed.QRShowSeconds,
+				QREverySeconds: cfg.Feed.QREverySeconds,
+			})
+			log.Info("personal feeds enabled", "mobile_base_url", cfg.Feed.MobileBaseURL, "qr_show_s", cfg.Feed.QRShowSeconds, "qr_every_s", cfg.Feed.QREverySeconds)
 		}
 		httpSrv.Mount(h)
 		if cfg.PublicBaseURL != "" {
