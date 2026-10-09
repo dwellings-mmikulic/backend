@@ -157,8 +157,29 @@ func (s *Scheduler) processListing(ctx context.Context, p *property.Property, re
 		if err := s.renderVideo(ctx, p, localPhotos, workDir); err != nil {
 			return false, err
 		}
+		s.purgePhotos(ctx, p.ZPID)
 	}
 	return false, nil
+}
+
+// purgePhotos removes the listing's CDN photos but the first, now that its
+// video is ready and the rest serve no purpose. It is housekeeping: a failure
+// is logged, never returned — the listing is stored, rendered and on the feed,
+// and failing the item would re-render it for nothing. cmd/purge-photos sweeps
+// up what is left behind.
+func (s *Scheduler) purgePhotos(ctx context.Context, zpid string) {
+	if s.purger == nil {
+		return
+	}
+	deleted, err := s.purger.Purge(ctx, zpid)
+	switch {
+	case err == nil:
+		s.log.Info("photos purged", "zpid", zpid, "deleted", deleted)
+	case shuttingDown(ctx):
+		// Not a verdict on the purge; the sweep finishes it.
+	default:
+		s.log.Warn("photo purge failed", "zpid", zpid, "error", err)
+	}
 }
 
 // storeWithoutPhotos is the terminal path of a listing the provider has no

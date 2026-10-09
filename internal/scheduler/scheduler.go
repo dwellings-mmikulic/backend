@@ -182,6 +182,12 @@ type HLSRecorder interface {
 	SetVideoHLS(ctx context.Context, zpid, contentHash, baseURL string, clip hls.Clip) error
 }
 
+// PhotoPurger removes a listing's CDN photos but the first once its video is
+// ready (photopurge.Purger). It reads the gallery from the row.
+type PhotoPurger interface {
+	Purge(ctx context.Context, zpid string) (deleted int, err error)
+}
+
 // Deps keeps New readable now that there are this many collaborators.
 type Deps struct {
 	Zillow  zillowAPI
@@ -191,7 +197,8 @@ type Deps struct {
 	Queue   listingQueue
 	Ledger  budgetLedger
 	Windows windowClock
-	Render  Renderer // nil when video rendering is disabled
+	Render  Renderer    // nil when video rendering is disabled
+	Purger  PhotoPurger // nil when the photo purge is disabled
 }
 
 // Scheduler owns an instance's worker loops.
@@ -205,6 +212,7 @@ type Scheduler struct {
 	ledger  budgetLedger
 	windows windowClock
 	render  Renderer
+	purger  PhotoPurger
 	owner   string
 	http    *http.Client
 	log     *slog.Logger
@@ -254,6 +262,7 @@ func New(cfg *config.Config, d Deps, owner string, log *slog.Logger) *Scheduler 
 		ledger:  d.Ledger,
 		windows: d.Windows,
 		render:  d.Render,
+		purger:  d.Purger,
 		owner:   owner,
 		http:    &http.Client{Timeout: cfg.HTTPTimeout},
 		log:     log,

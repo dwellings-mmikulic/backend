@@ -81,6 +81,79 @@ UPDATE properties SET video_status = 'failed', updated_at = now()
 	return nil
 }
 
+// ErrGalleryChanged is TrimImageURLs finding a gallery other than the one it
+// was shown: the row was refreshed in between, and the new photos must stay.
+var ErrGalleryChanged = errors.New("gallery changed underneath")
+
+// ImageURLs returns the stored gallery of one listing. An unknown zpid is
+// ErrNotFound.
+func (r *Repository) ImageURLs(ctx context.Context, zpid string) ([]string, error) {
+	var urls []string
+	err := r.pool.QueryRow(ctx, `SELECT image_urls FROM properties WHERE zpid = $1`, zpid).Scan(&urls)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("image urls zpid=%s: %w", zpid, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("image urls zpid=%s: %w", zpid, err)
+	}
+	return urls, nil
+}
+
+// TrimImageURLs replaces the gallery from with to (the photo purge: to is the
+// first photo of from). It is conditional on the row still holding from, so a
+// purge working from a stale read can never throw away photos a refresh has
+// just stored; that case is ErrGalleryChanged.
+func (r *Repository) TrimImageURLs(ctx context.Context, zpid string, from, to []string) error {
+	const q = `
+UPDATE properties SET image_urls = $3, updated_at = now()
+ WHERE zpid = $1 AND image_urls = $2`
+	tag, err := r.pool.Exec(ctx, q, zpid, from, to)
+	if err != nil {
+		return fmt.Errorf("trim image urls zpid=%s: %w", zpid, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("trim image urls zpid=%s: %w", zpid, ErrGalleryChanged)
+	}
+	return nil
+}
+
+// Gallery is a listing's stored photo URLs.
+type Gallery struct {
+	ZPID string
+	URLs []string
+}
+
+// ListGalleriesToPurge returns up to limit ready listings that still hold
+// more than one photo, in zpid order after the given zpid (empty: from the
+// start): what the photo purge has left to do. The cursor is what lets the
+// sweep (cmd/purge-photos) move past a listing it could not purge instead of
+// being offered it again at once.
+func (r *Repository) ListGalleriesToPurge(ctx context.Context, after string, limit int) ([]Gallery, error) {
+	const q = `
+SELECT zpid, image_urls FROM properties
+ WHERE video_status = 'ready' AND cardinality(image_urls) > 1 AND zpid > $1
+ ORDER BY zpid
+ LIMIT $2`
+	rows, err := r.pool.Query(ctx, q, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list galleries to purge: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Gallery
+	for rows.Next() {
+		var g Gallery
+		if err := rows.Scan(&g.ZPID, &g.URLs); err != nil {
+			return nil, fmt.Errorf("scan gallery: %w", err)
+		}
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate galleries: %w", err)
+	}
+	return out, nil
+}
+
 // ListReadyForFeed returns the published listings (see publishedPredicate),
 // newest video first, for the Roku feed.
 func (r *Repository) ListReadyForFeed(ctx context.Context) ([]Property, error) {

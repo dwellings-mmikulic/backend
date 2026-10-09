@@ -88,6 +88,28 @@ func clearFleetEnv(t *testing.T) {
 	}
 }
 
+// The photo purge is on unless switched off: it is the behaviour the storage
+// bill was sized for, and the switch exists to stop it quickly if it misfires.
+func TestLoad_PhotoPurge(t *testing.T) {
+	minimalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.PhotoPurge {
+		t.Error("PhotoPurge = false by default, want true")
+	}
+
+	t.Setenv("PHOTO_PURGE", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PhotoPurge {
+		t.Error("PhotoPurge = true with PHOTO_PURGE=false")
+	}
+}
+
 func TestLoad_APIBudgetDefault(t *testing.T) {
 	minimalEnv(t)
 	cfg, err := Load()

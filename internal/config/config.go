@@ -59,6 +59,13 @@ type Config struct {
 	// and Bunny config is not required (useful for local/dev runs).
 	ImagesEnabled bool
 
+	// PhotoPurge, when true (the default), has a worker delete a listing's
+	// CDN photos but the first once its video is ready: the video is rendered
+	// from local copies, and only the first photo is used afterwards (as the
+	// thumbnail). PHOTO_PURGE=false is the switch to stop it quickly; the
+	// photos it has already removed stay removed.
+	PhotoPurge bool
+
 	// SkipExisting, when true, leaves already-stored listings (by zpid)
 	// untouched — no re-upsert and no re-render. When false, existing listings
 	// are updated each cycle (refreshing price, photos, etc.).
@@ -315,6 +322,7 @@ func Load() (*Config, error) {
 		ZillowAPIKey:      getenv("ZILLOW_API_KEY", ""),
 		LocationIQAPIKey:  getenv("LOCATIONIQ_API_KEY", ""),
 		ImagesEnabled:     getenvBool("IMAGES_ENABLED", true),
+		PhotoPurge:        getenvBool("PHOTO_PURGE", true),
 		SkipExisting:      getenvBool("SKIP_EXISTING", true),
 		DetailsPerCycle:   getenvInt("DETAILS_PER_CYCLE", 50),
 		APIBudgetPerCycle: getenvInt("API_BUDGET_PER_CYCLE", 150),

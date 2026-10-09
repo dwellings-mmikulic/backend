@@ -25,6 +25,7 @@ import (
 	"github.com/dwellingtw/backend/internal/hls"
 	"github.com/dwellingtw/backend/internal/linear"
 	"github.com/dwellingtw/backend/internal/locationiq"
+	"github.com/dwellingtw/backend/internal/photopurge"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/propertymap"
 	"github.com/dwellingtw/backend/internal/scheduler"
@@ -149,7 +150,7 @@ func startWorkers(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, r
 	if err != nil {
 		return nil, err
 	}
-	sched := scheduler.New(cfg, scheduler.Deps{
+	deps := scheduler.Deps{
 		Zillow:  zillowClient,
 		Bunny:   bunnyClient,
 		Repo:    repo,
@@ -159,7 +160,15 @@ func startWorkers(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, r
 		Windows: windows,
 		// nil-safe: a typed-nil renderer becomes an untyped nil when disabled.
 		Render: rendererOrNil(renderer),
-	}, owner, log)
+	}
+	// Once a video is ready its photos but the first are deleted from the
+	// CDN. Only where the photos are on the CDN to begin with: with images
+	// disabled the rows hold source URLs, which the purger refuses anyway.
+	if cfg.PhotoPurge && cfg.ImagesEnabled {
+		deps.Purger = photopurge.New(bunnyClient, repo, cfg.Concurrency.Images, log)
+	}
+	log.Info("photo purge after render", "enabled", deps.Purger != nil)
+	sched := scheduler.New(cfg, deps, owner, log)
 
 	// Workers segment every new render for the linear channels whether or
 	// not this instance serves them: LINEAR_ENABLED is what turns it on.
