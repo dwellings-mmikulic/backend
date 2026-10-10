@@ -176,6 +176,34 @@ outside the ledger. Stop the workers first, or start the old image with
 hands every claim back within the 60 s grace period — **and** remove the host
 from `WORKER_HOSTS`, or the next push to `main` starts it again.
 
+### Daily photo purge (cron on web-01)
+
+Workers delete a listing's CDN photos but the first right after its video is
+ready (`PHOTO_PURGE`, see the main README). `cmd/purge-photos` is the repair
+sweep for whatever that leaves behind, and runs daily from root's crontab on
+web-01 through `deploy/purge-photos-cron.sh`:
+
+```
+# /opt/dwellings/purge-photos-cron.sh, root crontab, 04:30 UTC daily
+30 4 * * * /opt/dwellings/purge-photos-cron.sh
+```
+
+Safety against videos still being processed, in layers: the tool only reads
+listings with `video_status = 'ready'` (set after render, upload and HLS
+segmentation), it skips videos ready for less than `-settled` (1h) so it never
+races a worker's own purge, and the purger refuses any URL that is not one of
+the listing's own photos. The wrapper runs one sweep at a time (flock) and
+stands back while a manual sweep is running. Log: `/var/log/purge-photos-cron.log`
+(one `start`/`end` pair per day plus one progress line per 500 listings; an
+`end (exit 1)` means some listings failed and will be retried tomorrow).
+
+To install or update after editing the script in the repo:
+
+```bash
+scp -i ~/.ssh/dwellings_tv deploy/purge-photos-cron.sh root@87.99.154.101:/opt/dwellings/purge-photos-cron.sh
+ssh -i ~/.ssh/dwellings_tv root@87.99.154.101 'chmod 755 /opt/dwellings/purge-photos-cron.sh; (crontab -l 2>/dev/null | grep -v purge-photos-cron; echo "30 4 * * * /opt/dwellings/purge-photos-cron.sh") | crontab -'
+```
+
 ### Runbook (psql on the db box)
 
 ```sql

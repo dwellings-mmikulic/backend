@@ -128,13 +128,20 @@ type Gallery struct {
 // start): what the photo purge has left to do. The cursor is what lets the
 // sweep (cmd/purge-photos) move past a listing it could not purge instead of
 // being offered it again at once.
-func (r *Repository) ListGalleriesToPurge(ctx context.Context, after string, limit int) ([]Gallery, error) {
+//
+// Only videos ready for at least settledFor are offered: a video that went
+// ready a moment ago is still the worker's, whose own purge follows the
+// render. Rows from before video_rendered_at existed count as settled.
+// Listings whose video is pending or failed are never offered: a retry
+// renders from their photos.
+func (r *Repository) ListGalleriesToPurge(ctx context.Context, after string, limit int, settledFor time.Duration) ([]Gallery, error) {
 	const q = `
 SELECT zpid, image_urls FROM properties
  WHERE video_status = 'ready' AND cardinality(image_urls) > 1 AND zpid > $1
+   AND (video_rendered_at IS NULL OR video_rendered_at <= now() - make_interval(secs => $3))
  ORDER BY zpid
  LIMIT $2`
-	rows, err := r.pool.Query(ctx, q, after, limit)
+	rows, err := r.pool.Query(ctx, q, after, limit, settledFor.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("list galleries to purge: %w", err)
 	}
