@@ -98,6 +98,10 @@ Bunny → store video_url + status.
   listings in zpid order, logs progress per page, and exits non-zero if any
   listing could not be purged — run it again to retry those. `-workers`
   (8) listings are purged side by side, `-concurrency` (4) objects each.
+  It only ever reads listings whose video is `ready`, and of those only the
+  ones ready for at least `-settled` (1h), so a video still being processed
+  — or one a worker has just finished and is purging itself — is never
+  touched. It runs daily from cron on web-01 (see `deploy/README.md`).
   It is safe to run while the fleet renders: prod runs `SKIP_EXISTING=true`,
   so no worker refreshes an existing row, and a listing a worker purges in
   the meantime is counted as such, not as a failure. The first full run is a

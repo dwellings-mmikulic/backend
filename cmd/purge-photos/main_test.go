@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dwellingtw/backend/internal/property"
 )
@@ -19,11 +20,12 @@ type fakeSource struct {
 	mu        sync.Mutex
 	galleries []property.Gallery // sorted by zpid
 	afters    []string           // the cursor of every call
+	settled   []time.Duration    // the settle margin of every call
 	err       error
 	onList    func() // runs at the start of every call
 }
 
-func (s *fakeSource) ListGalleriesToPurge(ctx context.Context, after string, limit int) ([]property.Gallery, error) {
+func (s *fakeSource) ListGalleriesToPurge(ctx context.Context, after string, limit int, settledFor time.Duration) ([]property.Gallery, error) {
 	if s.onList != nil {
 		s.onList()
 	}
@@ -36,6 +38,7 @@ func (s *fakeSource) ListGalleriesToPurge(ctx context.Context, after string, lim
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.afters = append(s.afters, after)
+	s.settled = append(s.settled, settledFor)
 	var out []property.Gallery
 	for _, g := range s.galleries {
 		if g.ZPID > after && len(g.URLs) > 1 {
@@ -129,10 +132,17 @@ func TestSweep_PurgesEveryListingAcrossBatches(t *testing.T) {
 	src := &fakeSource{galleries: galleries(7, 4)}
 	pg := &fakePurger{src: src}
 
-	c := sweep(context.Background(), src, pg, options{batch: 3, workers: 2}, quiet)
+	c := sweep(context.Background(), src, pg, options{batch: 3, workers: 2, settled: time.Hour}, quiet)
 
 	if want := zpidsOf(galleries(7, 4)); !reflect.DeepEqual(pg.sorted(), want) {
 		t.Errorf("purged = %v, want all of %v", pg.sorted(), want)
+	}
+	// The settle margin reaches the query on every page: it is what keeps the
+	// sweep off a video a worker has just finished.
+	for i, d := range src.settled {
+		if d != time.Hour {
+			t.Errorf("page %d asked with settled = %v, want 1h", i, d)
+		}
 	}
 	if c.listings != 7 || c.photos != 21 || c.failed != 0 || c.interrupted {
 		t.Errorf("counts = %+v, want 7 listings, 21 photos, 0 failed", c)
