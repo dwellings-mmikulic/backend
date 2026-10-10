@@ -17,6 +17,9 @@
 // and BUNNY_* from the environment.
 //
 //	-dry-run        report what would go without deleting or updating anything
+//	-settled D      leave alone videos ready for less than D (1h): the worker's
+//	                own purge follows the render, and a video still being
+//	                processed is not ready at all
 //	-limit N        consider at most N listings (0 = all)
 //	-batch N        listings read from the database per page (500)
 //	-workers N      listings purged side by side (8)
@@ -56,6 +59,7 @@ func main() {
 	flag.IntVar(&o.limit, "limit", 0, "consider at most this many listings (0 = all)")
 	flag.IntVar(&o.batch, "batch", 500, "listings read from the database per page")
 	flag.IntVar(&o.workers, "workers", 8, "listings purged side by side")
+	flag.DurationVar(&o.settled, "settled", time.Hour, "leave alone videos ready for less than this (the worker's own purge follows the render)")
 	concurrency := flag.Int("concurrency", 4, "objects deleted side by side per listing")
 	flag.Parse()
 
@@ -96,9 +100,10 @@ func run(ctx context.Context, o options, concurrency int) error {
 	return nil
 }
 
-// gallerySource pages through the listings left to purge (property.Repository).
+// gallerySource pages through the listings left to purge (property.Repository):
+// ready for at least settledFor, with more than one photo.
 type gallerySource interface {
-	ListGalleriesToPurge(ctx context.Context, after string, limit int) ([]property.Gallery, error)
+	ListGalleriesToPurge(ctx context.Context, after string, limit int, settledFor time.Duration) ([]property.Gallery, error)
 }
 
 // galleryPurger purges one listing's gallery (photopurge.Purger). Check is
@@ -112,6 +117,7 @@ type options struct {
 	dryRun         bool
 	limit          int // listings to consider; 0 = all
 	batch, workers int
+	settled        time.Duration // videos ready for less than this are left alone
 }
 
 // counts is what one sweep came to.
@@ -153,7 +159,7 @@ func sweep(ctx context.Context, src gallerySource, pg galleryPurger, o options, 
 			}
 			want = min(want, remaining)
 		}
-		page, err := src.ListGalleriesToPurge(ctx, after, want)
+		page, err := src.ListGalleriesToPurge(ctx, after, want, o.settled)
 		if err != nil {
 			if ctx.Err() != nil {
 				return interrupted()

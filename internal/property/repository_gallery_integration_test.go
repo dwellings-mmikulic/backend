@@ -113,25 +113,34 @@ func TestRepository_ListGalleriesToPurgeIntegration(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM properties WHERE zpid LIKE $1`, prefix+"%")
 	})
-	insert := func(suffix, status string, photos int) string {
+	// renderedAgo < 0 leaves video_rendered_at NULL (rows from before the
+	// column existed).
+	insert := func(suffix, status string, photos int, renderedAgo time.Duration) string {
 		zpid := prefix + suffix
 		urls := make([]string, photos)
 		for i := range urls {
 			urls[i] = "https://cdn.example/properties/" + zpid + "/" + strconv.Itoa(i) + ".jpg"
 		}
+		var renderedAt *time.Time
+		if renderedAgo >= 0 {
+			t := time.Now().Add(-renderedAgo)
+			renderedAt = &t
+		}
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO properties (zpid, address, image_urls, video_status) VALUES ($1, 'x', $2, $3)`,
-			zpid, urls, status); err != nil {
+			`INSERT INTO properties (zpid, address, image_urls, video_status, video_rendered_at) VALUES ($1, 'x', $2, $3, $4)`,
+			zpid, urls, status, renderedAt); err != nil {
 			t.Fatalf("insert %s: %v", zpid, err)
 		}
 		return zpid
 	}
-	a := insert("a", "ready", 3)
-	insert("b", "ready", 1)   // already purged
-	insert("c", "pending", 3) // no video yet: photos still needed for the render
-	insert("d", "failed", 3)  // no video yet: photos still needed for the retry
-	e := insert("e", "ready", 2)
-	f := insert("f", "ready", 5)
+	const day = 24 * time.Hour
+	a := insert("a", "ready", 3, day)
+	insert("b", "ready", 1, day)  // already purged
+	insert("c", "pending", 3, -1) // no video yet: photos still needed for the render
+	insert("d", "failed", 3, -1)  // no video yet: photos still needed for the retry
+	e := insert("e", "ready", 2, day)
+	f := insert("f", "ready", 5, -1) // ready since before video_rendered_at existed
+	g := insert("g", "ready", 3, time.Minute)
 
 	zpids := func(gs []Gallery) []string {
 		out := make([]string, len(gs))
@@ -141,25 +150,36 @@ func TestRepository_ListGalleriesToPurgeIntegration(t *testing.T) {
 		return out
 	}
 
-	got, err := repo.ListGalleriesToPurge(ctx, prefix, 10)
+	// A video that went ready a minute ago is still the worker's: its own
+	// purge follows the render. The sweep takes only videos that have been
+	// ready for settledFor.
+	got, err := repo.ListGalleriesToPurge(ctx, prefix, 10, time.Hour)
 	if err != nil {
 		t.Fatalf("ListGalleriesToPurge: %v", err)
 	}
 	if want := []string{a, e, f}; !reflect.DeepEqual(zpids(got), want) {
-		t.Errorf("purgeable = %v, want %v", zpids(got), want)
+		t.Errorf("purgeable (settled 1h) = %v, want %v", zpids(got), want)
 	}
 	if len(got) > 0 && len(got[0].URLs) != 3 {
 		t.Errorf("gallery of %s = %v, want its 3 photos", a, got[0].URLs)
 	}
 
-	got, err = repo.ListGalleriesToPurge(ctx, prefix, 2)
+	got, err = repo.ListGalleriesToPurge(ctx, prefix, 10, 0)
+	if err != nil {
+		t.Fatalf("ListGalleriesToPurge(settled 0): %v", err)
+	}
+	if want := []string{a, e, f, g}; !reflect.DeepEqual(zpids(got), want) {
+		t.Errorf("purgeable (settled 0) = %v, want %v", zpids(got), want)
+	}
+
+	got, err = repo.ListGalleriesToPurge(ctx, prefix, 2, time.Hour)
 	if err != nil {
 		t.Fatalf("ListGalleriesToPurge(limit 2): %v", err)
 	}
 	if want := []string{a, e}; !reflect.DeepEqual(zpids(got), want) {
 		t.Errorf("first page = %v, want %v", zpids(got), want)
 	}
-	got, err = repo.ListGalleriesToPurge(ctx, e, 2)
+	got, err = repo.ListGalleriesToPurge(ctx, e, 2, time.Hour)
 	if err != nil {
 		t.Fatalf("ListGalleriesToPurge(after e): %v", err)
 	}
