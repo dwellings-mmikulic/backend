@@ -19,6 +19,7 @@ type memStore struct {
 	zips     map[string]bool // ZIPs that exist, with or without listings
 	cities   map[string]bool // "city|state" pairs that exist
 	spans    map[viewer.ID][]Span
+	bumpers  map[int64]Bumper
 }
 
 type memClip struct {
@@ -31,7 +32,7 @@ func newMemStore() *memStore {
 	return &memStore{
 		clips: map[int64]memClip{}, versions: map[string][]Version{},
 		zipCity: map[string][2]string{}, zips: map[string]bool{}, cities: map[string]bool{},
-		spans: map[viewer.ID][]Span{},
+		spans: map[viewer.ID][]Span{}, bumpers: map[int64]Bumper{},
 	}
 }
 
@@ -58,6 +59,31 @@ func (m *memStore) addClip(id int64, sc Scope, price int64, segMS ...int) {
 	if sc.City != "" {
 		m.cities[sc.City+"|"+sc.State] = true
 	}
+}
+
+// addBumper registers bumper id with the given segment durations.
+func (m *memStore) addBumper(id int64, segMS ...int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	total := 0
+	for _, ms := range segMS {
+		total += ms
+	}
+	m.bumpers[id] = Bumper{ID: id, Name: fmt.Sprintf("b%d", id), ContentHash: fmt.Sprintf("hash%d", id),
+		BaseURL: fmt.Sprintf("https://cdn/hls/bumpers/%d/x", id), SegmentMS: segMS, TotalMS: total}
+}
+
+func (m *memStore) CurrentBumper(_ context.Context) (*Bumper, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *Bumper
+	for id, b := range m.bumpers {
+		if best == nil || id > best.ID {
+			b := b
+			best = &b
+		}
+	}
+	return best, nil
 }
 
 // AreaExists mirrors the repository: a ZIP exists when it is in zip_codes, a
@@ -185,6 +211,12 @@ func (m *memStore) ClipsByID(_ context.Context, ids []int64) (map[int64]ClipSegm
 	defer m.mu.Unlock()
 	out := map[int64]ClipSegments{}
 	for _, id := range ids {
+		if isBumper(id) {
+			if b, ok := m.bumpers[bumperID(id)]; ok {
+				out[id] = ClipSegments{ID: id, BaseURL: b.BaseURL, SegmentMS: b.SegmentMS}
+			}
+			continue
+		}
 		if c, ok := m.clips[id]; ok {
 			out[id] = c.seg
 		}
