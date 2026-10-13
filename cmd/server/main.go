@@ -220,6 +220,7 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 			LineupHours:     cfg.Linear.LineupHours,
 			MinScopeClips:   cfg.Linear.MinScopeClips,
 			EPGHorizonHours: cfg.Linear.EPGHorizonHours,
+			BumperInterval:  time.Duration(cfg.Linear.BumperIntervalMinutes) * time.Minute,
 		}, log)
 		h := linear.NewHandler(svc, log)
 		h.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
@@ -236,7 +237,8 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 		if cfg.PublicBaseURL != "" {
 			httpSrv.SetLiveFeed(cfg.PublicBaseURL+"/channels/master.m3u8", cfg.Linear.LiveThumbnailURL, svc.HasContent)
 		}
-		log.Info("linear channels enabled", "lineup_hours", cfg.Linear.LineupHours, "min_scope_clips", cfg.Linear.MinScopeClips)
+		log.Info("linear channels enabled", "lineup_hours", cfg.Linear.LineupHours, "min_scope_clips", cfg.Linear.MinScopeClips,
+			"bumper_interval_min", cfg.Linear.BumperIntervalMinutes)
 		warnLinearSetup(ctx, cfg, linearRepo, renderer, log)
 	}
 	go func() {

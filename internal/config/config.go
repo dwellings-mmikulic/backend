@@ -174,6 +174,10 @@ type LinearConfig struct {
 	// borrows the first ready listing's image; with neither, the entry is
 	// omitted (Roku requires a thumbnail).
 	LiveThumbnailURL string
+	// BumperIntervalMinutes is how much content airs between two QR bumpers
+	// (see docs/superpowers/specs/2026-10-13-qr-bumper-design.md); 0 turns
+	// bumpers off for versions built from then on.
+	BumperIntervalMinutes int
 }
 
 // ViewerConfig controls pseudonymous viewer tracking on the linear channels
@@ -360,11 +364,12 @@ func Load() (*Config, error) {
 			FPS:             getenvInt("VIDEO_FPS", 0),
 		},
 		Linear: LinearConfig{
-			Enabled:          getenvBool("LINEAR_ENABLED", true),
-			LineupHours:      getenvInt("LINEAR_LINEUP_HOURS", 6),
-			MinScopeClips:    getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
-			EPGHorizonHours:  getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
-			LiveThumbnailURL: strings.TrimSpace(getenv("LINEAR_LIVE_THUMBNAIL_URL", "")),
+			Enabled:               getenvBool("LINEAR_ENABLED", true),
+			LineupHours:           getenvInt("LINEAR_LINEUP_HOURS", 6),
+			MinScopeClips:         getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
+			EPGHorizonHours:       getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
+			LiveThumbnailURL:      strings.TrimSpace(getenv("LINEAR_LIVE_THUMBNAIL_URL", "")),
+			BumperIntervalMinutes: getenvInt("LINEAR_BUMPER_INTERVAL_MINUTES", 5),
 		},
 		Viewer: ViewerConfig{
 			Enabled:       getenvBool("VIEWER_TRACKING_ENABLED", true),

@@ -197,7 +197,7 @@ Storage:
 
 ```sql
 CREATE TABLE IF NOT EXISTS channel_anchors (
-    household   TEXT NOT NULL,       -- hex household id
+    household   BYTEA NOT NULL,      -- viewer hash bytes, as in household_spans
     channel_key TEXT NOT NULL,       -- the channel the platform requested
     starts_at   TIMESTAMPTZ NOT NULL, -- S: the household's feed airs from here
     seq_offset  BIGINT NOT NULL,     -- served seq  = personal seq  + seq_offset
@@ -239,8 +239,8 @@ whatever the viewer picks later, because every later span already
 continues the personal counters and the anchor only adds constants. A
 viewer who opens the platform's channel a week later, with no player
 state, gets a consistent playlist whose absolute counter values do not
-matter. Anchors are purged with the household when its spans are (same
-retention as `household_spans`).
+matter. Anchors are never purged, like a household's current span: one
+small row per (household, channel).
 
 ### Caching and limits
 
@@ -302,7 +302,7 @@ Unit, with the in-memory store (`memstore`):
 
 Integration (Postgres harness): the `bumpers` table, `InsertBumper`
 idempotency on `content_hash`, `CurrentBumper`, mixed `ClipsByID`; the
-`channel_anchors` table, insert-if-absent, and purge with the household.
+`channel_anchors` table and insert-if-absent.
 
 Smoke before shipping (local Docker stack, then prod): run the generator,
 let a channel build a version, pull ~10 minutes of `live.m3u8` with ffmpeg

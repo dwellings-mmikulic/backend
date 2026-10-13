@@ -89,3 +89,9 @@ func TestUpload_FailsWhenSegmentMissing(t *testing.T) {
 		t.Fatal("expected error when a segment file is missing")
 	}
 }
+
+func TestBumperPrefix(t *testing.T) {
+	if got := BumperPrefix("abcdef0123456789"); got != "hls/bumpers/abcdef01" {
+		t.Errorf("BumperPrefix = %q", got)
+	}
+}

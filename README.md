@@ -196,6 +196,25 @@ docker compose -f compose.prod.yml run --rm --entrypoint /app/backfill-hls app -
 It logs progress every 100 videos and exits non-zero if any video failed, so
 a wrapped run does not look successful while part of the library is unairable.
 
+Every `LINEAR_BUMPER_INTERVAL_MINUTES` (5) of content each channel airs the
+QR bumper: a short clip inviting viewers to customize the channel from their
+phone (design: `docs/superpowers/specs/2026-10-13-qr-bumper-design.md`).
+Generate (or replace) it with:
+
+```bash
+go run ./cmd/make-bumper -render-only /tmp/bumper.mp4   # look at it first
+go run ./cmd/make-bumper -music assets/music/03-calm-piano.mp3
+docker compose -f compose.prod.yml run --rm --entrypoint /app/make-bumper app -music /app/assets/music/03-calm-piano.mp3
+```
+
+The newest bumper is used by every lineup version built from then on (within
+`LINEAR_LINEUP_HOURS`); setting the interval to `0` stops inserting it. A
+platform that fetches `/channels/live.m3u8?…&ip=<viewer public IP>` per
+viewer gets, once that viewer has opened the mobile page from the same
+network, their personal feed in place of the channel, with continuous HLS
+counters; without `ip=`, or before the page was ever opened, the channel is
+served as advertised.
+
 With `PUBLIC_BASE_URL` set, `/roku/feed.json` also lists the national channel
 as a Roku `liveFeeds` entry. Its poster is `LINEAR_LIVE_THUMBNAIL_URL`; when
 that is empty the first ready listing's image is used, and when there is no
@@ -378,8 +397,9 @@ runbook are in [`deploy/README.md`](deploy/README.md#fleet-worker-boxes).
 origin, used for the absolute URLs in the Roku feed; empty leaves the live
 channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 `LINEAR_LINEUP_HOURS` (`6`), `LINEAR_MIN_SCOPE_CLIPS` (`20`),
-`LINEAR_EPG_HORIZON_HOURS` (`24`) and `LINEAR_LIVE_THUMBNAIL_URL` (empty —
-the poster of the Roku live entry; see [Linear channels](#linear-channels)).
+`LINEAR_EPG_HORIZON_HOURS` (`24`), `LINEAR_BUMPER_INTERVAL_MINUTES` (`5`; `0`
+= no QR bumper) and `LINEAR_LIVE_THUMBNAIL_URL` (empty — the poster of the
+Roku live entry; see [Linear channels](#linear-channels)).
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
 `VIEWER_RETENTION_DAYS` (`30`), `GEOIP_DB_PATH` (empty = no geo) and

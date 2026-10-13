@@ -734,3 +734,23 @@ func TestLoad_FeedValidation(t *testing.T) {
 		t.Errorf("Load() error = %v, want one naming MOBILE_BASE_URL", err)
 	}
 }
+
+func TestLoad_BumperIntervalDefaultsToFiveMinutes(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("LINEAR_BUMPER_INTERVAL_MINUTES", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Linear.BumperIntervalMinutes != 5 {
+		t.Errorf("default bumper interval = %d, want 5", cfg.Linear.BumperIntervalMinutes)
+	}
+	t.Setenv("LINEAR_BUMPER_INTERVAL_MINUTES", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Linear.BumperIntervalMinutes != 0 {
+		t.Errorf("LINEAR_BUMPER_INTERVAL_MINUTES=0 gave %d, want 0 (bumpers off)", cfg.Linear.BumperIntervalMinutes)
+	}
+}
