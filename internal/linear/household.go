@@ -129,10 +129,9 @@ func (s *Service) contribution(ctx context.Context, sp Span, end time.Time) ([]s
 	return shifted(segs[i:], sp), nil
 }
 
-// PersonalPlaylist renders household h's live playlist at now: the spans'
-// contributions, oldest first, trimmed to the usual window. airing is the
-// span on air at now.
-func (s *Service) PersonalPlaylist(ctx context.Context, h viewer.ID, now time.Time) ([]byte, Span, error) {
+// personalSegments is the household's feed at now, untrimmed: the spans'
+// contributions oldest first, each ended by now. airing is the span on air.
+func (s *Service) personalSegments(ctx context.Context, h viewer.ID, now time.Time) ([]segment, Span, error) {
 	spans, err := s.Household(ctx, h)
 	if err != nil {
 		return nil, Span{}, err
@@ -157,12 +156,53 @@ func (s *Service) PersonalPlaylist(ctx context.Context, h viewer.ID, now time.Ti
 		}
 		segs = append(segs, c...)
 	}
+	return segs, airing, nil
+}
+
+// PersonalPlaylist renders household h's live playlist at now: the spans'
+// contributions, oldest first, trimmed to the usual window. airing is the
+// span on air at now.
+func (s *Service) PersonalPlaylist(ctx context.Context, h viewer.ID, now time.Time) ([]byte, Span, error) {
+	segs, airing, err := s.personalSegments(ctx, h, now)
+	if err != nil {
+		return nil, Span{}, err
+	}
 	if len(segs) == 0 {
 		return nil, Span{}, ErrNoContent
 	}
 	var buf bytes.Buffer
 	writePlaylist(&buf, liveWindow.trim(segs))
 	return buf.Bytes(), airing, nil
+}
+
+// firstPersonalAtOrAfter is the first segment of the household's feed (spans,
+// oldest first) that starts at or after t, relabelled with its span's
+// offsets. It is the next segment of the span airing at t — unless that
+// segment would end after the following span starts, in which case (as in
+// contribution) it never airs and the following span's first segment is the
+// answer.
+func (s *Service) firstPersonalAtOrAfter(ctx context.Context, spans []Span, t time.Time) (segment, error) {
+	k := 0
+	for k+1 < len(spans) && !spans[k+1].StartsAt.After(t) {
+		k++
+	}
+	for ; k < len(spans); k++ {
+		sp := spans[k]
+		from := t
+		if sp.StartsAt.After(from) {
+			from = sp.StartsAt
+		}
+		g, err := s.firstAtOrAfter(ctx, sp.Scope, from)
+		if err != nil {
+			return segment{}, err
+		}
+		end := g.Start.Add(time.Duration(g.DurMS) * time.Millisecond)
+		if k+1 < len(spans) && end.After(spans[k+1].StartsAt) {
+			continue // cut off by the next span: it never airs
+		}
+		return shifted([]segment{g}, sp)[0], nil
+	}
+	return segment{}, fmt.Errorf("household %s: no segment at or after %s", spans[0].Household, t)
 }
 
 // endOfAiring is when the segment of channel key airing at now ends — the
