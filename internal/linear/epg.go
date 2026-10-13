@@ -102,6 +102,8 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	}
 
 	// Every item start within [start, upper), with the scope it airs under.
+	// Bumpers are not listings: they are left out of the count, the price
+	// range and the ids looked up, though their air time still advances t.
 	type aired struct {
 		id    int64
 		start time.Time
@@ -112,7 +114,7 @@ func (s *Service) EPG(ctx context.Context, sc Scope, now time.Time) (EPG, error)
 	for _, v := range versions {
 		t := v.StartsAt
 		for i, id := range v.ItemIDs {
-			if !t.Before(start) && t.Before(upper) {
+			if !isBumper(id) && !t.Before(start) && t.Before(upper) {
 				items = append(items, aired{id: id, start: t, scope: v.Scope})
 				ids = append(ids, id)
 			}

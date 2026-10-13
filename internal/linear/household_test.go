@@ -105,15 +105,20 @@ func parsePlaylist(t *testing.T, body []byte) parsed {
 	return p
 }
 
-var clipIDRe = regexp.MustCompile(`/hls/v1/(\d+)/`)
+var clipIDRe = regexp.MustCompile(`/hls/(v1|bumpers)/(\d+)/`)
 
+// clipID is the clip id in a segment URL; negative for a bumper (its
+// bumperItem), so an isNew callback testing "id > N" never counts one.
 func clipID(t *testing.T, url string) int64 {
 	t.Helper()
 	m := clipIDRe.FindStringSubmatch(url)
 	if m == nil {
 		t.Fatalf("no clip id in %s", url)
 	}
-	id, _ := strconv.ParseInt(m[1], 10, 64)
+	id, _ := strconv.ParseInt(m[2], 10, 64)
+	if m[1] == "bumpers" {
+		return bumperItem(id)
+	}
 	return id
 }
 
@@ -424,5 +429,37 @@ func TestChoose_InsideTheNewChannelsLastSegmentRollsToTheNextVersion(t *testing.
 	}
 	if !pollMonotonic(t, s, hh, at, 2*time.Minute, func(id int64) bool { return id > 100 }) {
 		t.Error("never saw the switch")
+	}
+}
+
+func TestPersonalPlaylist_CarriesTheChannelsBumper(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	m.addBumper(1, 3000, 3000, 3000, 3000)
+	s := testService(m, t0)
+	s.opts.BumperInterval = 5 * time.Minute
+	hh := viewer.ID{1}
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+		t.Fatal(err)
+	}
+	sawBumper := false
+	lastSeq, lastDisc := int64(-1), int64(-1)
+	for now := t0; now.Before(t0.Add(12 * time.Minute)); now = now.Add(3 * time.Second) {
+		s.now = func() time.Time { return now }
+		body, _, err := s.PersonalPlaylist(context.Background(), hh, now)
+		if err != nil {
+			t.Fatalf("at %s: %v", now, err)
+		}
+		p := parsePlaylist(t, body)
+		if p.mediaSeq < lastSeq || p.discSeq < lastDisc {
+			t.Fatalf("at %s: counters went backwards\n%s", now, body)
+		}
+		lastSeq, lastDisc = p.mediaSeq, p.discSeq
+		for _, u := range p.urls {
+			sawBumper = sawBumper || clipID(t, u) == bumperItem(1)
+		}
+	}
+	if !sawBumper {
+		t.Error("personal feed never aired the channel's bumper")
 	}
 }
