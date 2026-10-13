@@ -131,6 +131,7 @@ func clipID(t *testing.T, url string) int64 {
 func pollMonotonic(t *testing.T, s *Service, hh viewer.ID, start time.Time, dur time.Duration, isNew func(id int64) bool) (sawSwitch bool) {
 	t.Helper()
 	seen := map[int64]string{}
+	labels := map[string][2]int64{} // url → (seq, discontinuity domain): a hole or overlap at the switch relabels a url
 	lastSeq, lastDisc := int64(-1), int64(-1)
 	for now := start; now.Before(start.Add(dur)); now = now.Add(3 * time.Second) {
 		now := now
@@ -145,12 +146,20 @@ func pollMonotonic(t *testing.T, s *Service, hh viewer.ID, start time.Time, dur 
 		}
 		lastSeq, lastDisc = p.mediaSeq, p.discSeq
 		firstNew := -1
+		domain := p.discSeq
 		for i, u := range p.urls {
 			seq := p.mediaSeq + int64(i)
 			if prev, ok := seen[seq]; ok && prev != u {
 				t.Fatalf("at %s: seq %d was %s, now %s", now, seq, prev, u)
 			}
 			seen[seq] = u
+			if p.discAt[i] {
+				domain++
+			}
+			if prev, ok := labels[u]; ok && prev != [2]int64{seq, domain} {
+				t.Fatalf("at %s: %s was seq %d in domain %d, now seq %d in domain %d\n%s", now, u, prev[0], prev[1], seq, domain, body)
+			}
+			labels[u] = [2]int64{seq, domain}
 			if isNew(clipID(t, u)) {
 				if firstNew < 0 {
 					firstNew = i

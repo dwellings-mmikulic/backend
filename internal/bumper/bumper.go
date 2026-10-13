@@ -30,9 +30,13 @@ const (
 
 	// renderVersion is mixed into the hash: bump it when the layout or the
 	// encode changes so an old bumper is not mistaken for the new one.
-	renderVersion = "b1"
+	renderVersion = "b2"
 	qrSize        = 560 // QR pixels; on a qrCard white card
 	qrCard        = 600
+	// audioRate is the listing clips' AAC sample rate (the music beds are
+	// 44.1 kHz MP3s). Silence and music beds alike are resampled to it so a
+	// bumper never changes the audio profile at a discontinuity.
+	audioRate = 44100
 )
 
 // Spec is everything the render depends on.
@@ -118,7 +122,7 @@ func buildFFmpegArgs(s Spec, qrPath string, captionFiles []string, urlFile, outP
 	if s.Music != "" {
 		args = append(args, "-stream_loop", "-1", "-i", s.Music)
 	} else {
-		args = append(args, "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo")
+		args = append(args, "-f", "lavfi", "-i", "anullsrc=r="+strconv.Itoa(audioRate)+":cl=stereo")
 	}
 
 	var g []string
@@ -143,7 +147,7 @@ func buildFFmpegArgs(s Spec, qrPath string, captionFiles []string, urlFile, outP
 	}
 	args = append(args,
 		"-t", secs,
-		"-c:a", "aac", "-b:a", "160k",
+		"-c:a", "aac", "-b:a", "160k", "-ar", strconv.Itoa(audioRate),
 		"-r", fps,
 		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "20",
 		"-g", strconv.Itoa(3*s.FPS), "-keyint_min", strconv.Itoa(3*s.FPS), "-sc_threshold", "0",

@@ -16,7 +16,8 @@ func TestBuildFFmpegArgs_ProfileMatchesListings(t *testing.T) {
 	for _, want := range []string{
 		"-f lavfi -i color=c=0x101418:s=1920x1080:r=30:d=12",
 		"-i /w/qr.png",
-		"-f lavfi -i anullsrc=r=48000:cl=stereo",
+		"-f lavfi -i anullsrc=r=44100:cl=stereo", // the listing clips' rate: no profile change at the splice
+		"-ar 44100",
 		"-c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 20",
 		"-g 90 -keyint_min 90 -sc_threshold 0",
 		"-c:a aac -b:a 160k",
@@ -43,6 +44,7 @@ func TestBuildFFmpegArgs_ImageAndMusic(t *testing.T) {
 		"-stream_loop -1 -i /m.mp3",
 		"afade=t=in:d=1,afade=t=out:st=9:d=1",
 		"-shortest",
+		"-ar 44100",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args lack %q:\n%s", want, joined)

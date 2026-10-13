@@ -314,8 +314,9 @@ counters (ffmpeg plays across the switch with zero errors).
 ## Rollout
 
 1. Deploy (schema is applied by the server on start, as for other tables).
-2. On web-01: `docker compose run --rm --entrypoint /make-bumper api`
-   (with the music flag if wanted). Note the printed id.
+2. On web-01: `docker compose -f compose.prod.yml run --rm --entrypoint
+   /app/make-bumper app -music /app/assets/music/03-calm-piano.mp3` (the
+   music flag is optional). Note the printed id.
 3. Within `LineupHours` every channel's next version carries the bumper;
    check a channel playlist and the EPG counts.
 4. Tell platforms the playlist URL format with `ip=` and the limit above.
