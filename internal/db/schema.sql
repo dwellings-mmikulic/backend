@@ -187,6 +187,20 @@ CREATE TABLE IF NOT EXISTS household_spans (
     PRIMARY KEY (household, n)
 );
 
+-- channel_anchors: a household's personal feed served on a channel a
+-- platform requested with ip= (see the QR bumper spec). The offsets make
+-- the household's counters continue the channel's from starts_at. One per
+-- (household, channel); never deleted.
+CREATE TABLE IF NOT EXISTS channel_anchors (
+    household   BYTEA       NOT NULL,
+    channel_key TEXT        NOT NULL,
+    starts_at   TIMESTAMPTZ NOT NULL,
+    seq_offset  BIGINT      NOT NULL,
+    item_offset BIGINT      NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (household, channel_key)
+);
+
 -- Multi-instance workers (see
 -- docs/superpowers/specs/2026-09-19-multi-instance-workers-design.md).
 -- schema_meta: the hash of this file as last applied, so Migrate can skip the

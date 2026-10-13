@@ -32,7 +32,27 @@ func TestHouseholdRepository_Integration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM household_spans WHERE household = $1`, hh[:]) })
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM channel_anchors WHERE household = $1`, hh[:]) })
 	repo := NewRepository(pool)
+
+	// --- Anchors ---------------------------------------------------------
+	if a, err := repo.Anchor(ctx, hh, "us"); err != nil || a != nil {
+		t.Fatalf("missing anchor = %+v err=%v", a, err)
+	}
+	a := &Anchor{Household: hh, Channel: "us", StartsAt: time.Now().UTC().Truncate(time.Millisecond), SeqOffset: 5, ItemOffset: -2}
+	if ok, err := repo.InsertAnchor(ctx, a); err != nil || !ok {
+		t.Fatalf("insert anchor: ok=%v err=%v", ok, err)
+	}
+	if ok, err := repo.InsertAnchor(ctx, a); err != nil || ok {
+		t.Fatalf("second insert anchor: ok=%v err=%v", ok, err)
+	}
+	got, err := repo.Anchor(ctx, hh, "us")
+	if err != nil || got == nil || got.SeqOffset != 5 || got.ItemOffset != -2 || !got.StartsAt.Equal(a.StartsAt) || got.Household != hh || got.CreatedAt.IsZero() {
+		t.Fatalf("anchor = %+v err=%v", got, err)
+	}
+	if other, err := repo.Anchor(ctx, hh, "state:tx"); err != nil || other != nil {
+		t.Fatalf("anchor on another channel = %+v err=%v", other, err)
+	}
 
 	if spans, err := repo.Spans(ctx, hh); err != nil || spans != nil {
 		t.Fatalf("unknown household: %+v, %v", spans, err)

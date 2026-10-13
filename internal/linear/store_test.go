@@ -20,6 +20,7 @@ type memStore struct {
 	cities   map[string]bool // "city|state" pairs that exist
 	spans    map[viewer.ID][]Span
 	bumpers  map[int64]Bumper
+	anchors  map[[2]string]Anchor // household hex, channel key
 }
 
 type memClip struct {
@@ -33,6 +34,7 @@ func newMemStore() *memStore {
 		clips: map[int64]memClip{}, versions: map[string][]Version{},
 		zipCity: map[string][2]string{}, zips: map[string]bool{}, cities: map[string]bool{},
 		spans: map[viewer.ID][]Span{}, bumpers: map[int64]Bumper{},
+		anchors: map[[2]string]Anchor{},
 	}
 }
 
@@ -293,4 +295,24 @@ func (m *memStore) ListCities(_ context.Context, min int) ([]City, error) {
 		return out[i].City < out[j].City
 	})
 	return out, nil
+}
+
+func (m *memStore) Anchor(_ context.Context, h viewer.ID, channel string) (*Anchor, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a, ok := m.anchors[[2]string{h.String(), channel}]; ok {
+		return &a, nil
+	}
+	return nil, nil
+}
+
+func (m *memStore) InsertAnchor(_ context.Context, a *Anchor) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := [2]string{a.Household.String(), a.Channel}
+	if _, exists := m.anchors[k]; exists {
+		return false, nil
+	}
+	m.anchors[k] = *a
+	return true, nil
 }

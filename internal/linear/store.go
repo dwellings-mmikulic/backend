@@ -62,6 +62,20 @@ type City struct {
 	Clips int    // current clips
 }
 
+// Anchor ties a household's personal feed to a channel a platform
+// requested with ip= (see the design spec, "Anchoring"): from StartsAt the
+// household's segments are served on the channel route with their counters
+// shifted so they continue the channel's. One per (household, channel),
+// never deleted.
+type Anchor struct {
+	Household  viewer.ID
+	Channel    string    // channel key the platform requested
+	StartsAt   time.Time // S: the household's feed airs from here
+	SeqOffset  int64     // served seq  = personal seq  + SeqOffset
+	ItemOffset int64     // served item = personal item + ItemOffset
+	CreatedAt  time.Time
+}
+
 // Bumper is one rendered QR bumper (see bumper.go). Rows are never deleted,
 // so lineups that reference an old bumper keep resolving.
 type Bumper struct {
@@ -157,4 +171,9 @@ type Store interface {
 	// ListCities returns every city with at least min current clips, ordered
 	// by state then city.
 	ListCities(ctx context.Context, min int) ([]City, error)
+	// Anchor returns the household's anchor on channel, or nil.
+	Anchor(ctx context.Context, h viewer.ID, channel string) (*Anchor, error)
+	// InsertAnchor stores a unless (household, channel) exists; ok reports
+	// whether a was stored.
+	InsertAnchor(ctx context.Context, a *Anchor) (ok bool, err error)
 }
