@@ -197,24 +197,46 @@ ON CONFLICT (channel_key, version) DO NOTHING`
 	return tag.RowsAffected() == 1, nil
 }
 
-// ClipsByID implements Store.
+// ClipsByID implements Store. Positive ids are video_hls rows, negative ones
+// bumpers (bumperID); each entry is keyed by the id as given.
 func (r *Repository) ClipsByID(ctx context.Context, ids []int64) (map[int64]ClipSegments, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id, base_url, segment_ms FROM video_hls WHERE id = ANY($1)`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("clips by id: %w", err)
-	}
-	defer rows.Close()
-	out := make(map[int64]ClipSegments, len(ids))
-	for rows.Next() {
-		var c ClipSegments
-		var ms []int32
-		if err := rows.Scan(&c.ID, &c.BaseURL, &ms); err != nil {
-			return nil, fmt.Errorf("scan clip segments: %w", err)
+	var clipIDs, bumperIDs []int64
+	for _, id := range ids {
+		if isBumper(id) {
+			bumperIDs = append(bumperIDs, bumperID(id))
+		} else {
+			clipIDs = append(clipIDs, id)
 		}
-		c.SegmentMS = ints(ms)
-		out[c.ID] = c
 	}
-	return out, rows.Err()
+	out := make(map[int64]ClipSegments, len(ids))
+	scan := func(q string, in []int64, key func(int64) int64) error {
+		if len(in) == 0 {
+			return nil
+		}
+		rows, err := r.pool.Query(ctx, q, in)
+		if err != nil {
+			return fmt.Errorf("clips by id: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var c ClipSegments
+			var ms []int32
+			if err := rows.Scan(&c.ID, &c.BaseURL, &ms); err != nil {
+				return fmt.Errorf("scan clip segments: %w", err)
+			}
+			c.ID = key(c.ID)
+			c.SegmentMS = ints(ms)
+			out[c.ID] = c
+		}
+		return rows.Err()
+	}
+	if err := scan(`SELECT id, base_url, segment_ms FROM video_hls WHERE id = ANY($1)`, clipIDs, func(id int64) int64 { return id }); err != nil {
+		return nil, err
+	}
+	if err := scan(`SELECT id, base_url, segment_ms FROM bumpers WHERE id = ANY($1)`, bumperIDs, bumperItem); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListingsByClipID implements Store.
