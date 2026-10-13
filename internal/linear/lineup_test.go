@@ -37,8 +37,8 @@ func TestBuildItems_DeterministicAndCapped(t *testing.T) {
 	for id := int64(1); id <= 10; id++ {
 		clips = append(clips, ClipRef{ID: id, TotalMS: 60000, Segments: 20})
 	}
-	ids1, ms, segs := buildItems(clips, seedFor("us", 1), 5*60000)
-	ids2, _, _ := buildItems(clips, seedFor("us", 1), 5*60000)
+	ids1, ms, segs := buildItems(clips, nil, 0, seedFor("us", 1), 5*60000)
+	ids2, _, _ := buildItems(clips, nil, 0, seedFor("us", 1), 5*60000)
 	if !reflect.DeepEqual(ids1, ids2) {
 		t.Errorf("same seed gave different orders: %v vs %v", ids1, ids2)
 	}
@@ -51,7 +51,7 @@ func TestBuildItems_DeterministicAndCapped(t *testing.T) {
 		}
 	}
 	// A clip longer than the cap still airs (a lineup is never empty).
-	ids, _, _ := buildItems([]ClipRef{{ID: 9, TotalMS: 99999999, Segments: 1}}, 1, 1000)
+	ids, _, _ := buildItems([]ClipRef{{ID: 9, TotalMS: 99999999, Segments: 1}}, nil, 0, 1, 1000)
 	if len(ids) != 1 {
 		t.Errorf("oversized single clip: got %d items, want 1", len(ids))
 	}
@@ -60,7 +60,7 @@ func TestBuildItems_DeterministicAndCapped(t *testing.T) {
 	for i, c := range clips {
 		rev[len(clips)-1-i] = c
 	}
-	ids3, _, _ := buildItems(rev, seedFor("us", 1), 5*60000)
+	ids3, _, _ := buildItems(rev, nil, 0, seedFor("us", 1), 5*60000)
 	if !reflect.DeepEqual(ids1, ids3) {
 		t.Errorf("reversed input gave different order: %v vs %v", ids1, ids3)
 	}
@@ -235,5 +235,65 @@ func TestVersionAt_NoContent(t *testing.T) {
 	s := testService(newMemStore(), t0)
 	if _, _, err := s.versionAt(context.Background(), "us", t0, s.newSource("us")); !errors.Is(err, ErrNoContent) {
 		t.Errorf("err = %v, want ErrNoContent", err)
+	}
+}
+
+func TestBuildItems_InsertsBumperEveryInterval(t *testing.T) {
+	var clips []ClipRef
+	for id := int64(1); id <= 12; id++ { // 12 two-minute clips
+		clips = append(clips, ClipRef{ID: id, TotalMS: 120000, Segments: 40})
+	}
+	bumper := &ClipRef{ID: bumperItem(3), TotalMS: 12000, Segments: 4}
+	ids, ms, segs := buildItems(clips, bumper, 5*time.Minute, seedFor("us", 1), 24*3600*1000)
+	plain, _, _ := buildItems(clips, nil, 0, seedFor("us", 1), 24*3600*1000)
+	var content []int64
+	lastEnd := 0 // ms since version start when the last bumper ended (0 = version start)
+	at := 0
+	for i, id := range ids {
+		if isBumper(id) {
+			if i == 0 || i == len(ids)-1 {
+				t.Fatalf("bumper at position %d of %d", i, len(ids))
+			}
+			if ms[i] != 12000 || segs[i] != 4 {
+				t.Errorf("bumper item %d: ms=%d segs=%d", i, ms[i], segs[i])
+			}
+			if at-lastEnd < 5*60000 {
+				t.Errorf("bumper at %d ms, only %d ms after the previous one", at, at-lastEnd)
+			}
+			lastEnd = at + ms[i]
+		} else {
+			content = append(content, id)
+			if at-lastEnd >= 5*60000 && !(i > 0 && isBumper(ids[i-1])) {
+				t.Errorf("clip %d at %d ms is overdue for a bumper (last ended %d)", id, at, lastEnd)
+			}
+		}
+		at += ms[i]
+	}
+	if !reflect.DeepEqual(content, plain) {
+		t.Errorf("content order changed by bumpers: %v vs %v", content, plain)
+	}
+	// 12 × 2 min = 24 min of content → bumpers before the clips starting at
+	// 6, 12, 18 min (three of them; nothing after the last clip).
+	if n := len(ids) - len(content); n != 3 {
+		t.Errorf("got %d bumpers, want 3: %v", n, ids)
+	}
+}
+
+func TestBuildItems_BumperNeverFirstOrLast(t *testing.T) {
+	bumper := &ClipRef{ID: bumperItem(1), TotalMS: 12000, Segments: 4}
+	one := []ClipRef{{ID: 1, TotalMS: 20 * 60000, Segments: 400}}
+	ids, _, _ := buildItems(one, bumper, 5*time.Minute, 1, 24*3600*1000)
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("single clip: %v", ids)
+	}
+	short := []ClipRef{{ID: 1, TotalMS: 60000, Segments: 20}, {ID: 2, TotalMS: 60000, Segments: 20}}
+	ids, _, _ = buildItems(short, bumper, 5*time.Minute, 1, 24*3600*1000)
+	if len(ids) != 2 {
+		t.Errorf("content shorter than the interval: %v", ids)
+	}
+	// Interval 0 or no bumper: untouched.
+	ids, _, _ = buildItems(one, bumper, 0, 1, 24*3600*1000)
+	if len(ids) != 1 {
+		t.Errorf("interval 0: %v", ids)
 	}
 }

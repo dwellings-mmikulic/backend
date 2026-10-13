@@ -36,8 +36,12 @@ func seedFor(key string, version int) int64 {
 
 // buildItems picks a version's air order: a seeded shuffle of clips (sorted
 // by id first so the input order is irrelevant), cut to maxMS. A lineup always
-// has at least one clip, even if that clip alone exceeds maxMS.
-func buildItems(clips []ClipRef, seed int64, maxMS int) (ids []int64, ms []int, segs []int) {
+// has at least one clip, even if that clip alone exceeds maxMS. With a bumper
+// and a positive interval, the bumper is then inserted in front of every clip
+// that would otherwise start interval or more after the previous bumper ended
+// (for the first one: after the version's start). It is never the first item
+// and never the last: a version starts and ends with content.
+func buildItems(clips []ClipRef, bumper *ClipRef, interval time.Duration, seed int64, maxMS int) (ids []int64, ms []int, segs []int) {
 	order := make([]ClipRef, len(clips))
 	copy(order, clips)
 	sort.Slice(order, func(i, j int) bool { return order[i].ID < order[j].ID })
@@ -45,16 +49,40 @@ func buildItems(clips []ClipRef, seed int64, maxMS int) (ids []int64, ms []int, 
 	r.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 
 	total := 0
+	var items []ClipRef
 	for _, c := range order {
-		if len(ids) > 0 && total+c.TotalMS > maxMS {
+		if len(items) > 0 && total+c.TotalMS > maxMS {
 			break
 		}
+		items = append(items, c)
+		total += c.TotalMS
+	}
+	if bumper != nil && interval > 0 {
+		items = withBumpers(items, *bumper, int(interval.Milliseconds()))
+	}
+	for _, c := range items {
 		ids = append(ids, c.ID)
 		ms = append(ms, c.TotalMS)
 		segs = append(segs, c.Segments)
-		total += c.TotalMS
 	}
 	return ids, ms, segs
+}
+
+// withBumpers inserts bumper before every clip of items that would start
+// intervalMS or more after the previous bumper's end (initially: after the
+// start). The first item is always a clip, so is the last.
+func withBumpers(items []ClipRef, bumper ClipRef, intervalMS int) []ClipRef {
+	out := make([]ClipRef, 0, len(items)+len(items)/2)
+	since := 0 // content ms since the last bumper ended
+	for i, c := range items {
+		if i > 0 && since >= intervalMS {
+			out = append(out, bumper)
+			since = 0
+		}
+		out = append(out, c)
+		since += c.TotalMS
+	}
+	return out
 }
 
 // resolveScope walks zip → city → state → national until a scope has at
@@ -105,6 +133,7 @@ type lineupSource struct {
 	key      string
 	scope    Scope
 	clips    []ClipRef
+	bumper   *ClipRef // the current bumper as a lineup item; nil = none
 	resolved bool
 }
 
@@ -124,6 +153,16 @@ func (src *lineupSource) resolve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if src.svc.opts.BumperInterval > 0 {
+		b, err := src.svc.store.CurrentBumper(ctx)
+		if err != nil {
+			return err
+		}
+		if b != nil {
+			r := b.ref()
+			src.bumper = &r
+		}
+	}
 	src.scope, src.clips, src.resolved = eff, clips, true
 	return nil
 }
@@ -134,7 +173,7 @@ func (s *Service) newVersion(ctx context.Context, key string, n int, startsAt ti
 	if err := src.resolve(ctx); err != nil {
 		return nil, err
 	}
-	ids, ms, segs := buildItems(src.clips, seedFor(key, n), s.opts.LineupHours*3600*1000)
+	ids, ms, segs := buildItems(src.clips, src.bumper, s.opts.BumperInterval, seedFor(key, n), s.opts.LineupHours*3600*1000)
 	v := &Version{Key: key, Version: n, Scope: src.scope.Key(), StartsAt: startsAt, ItemIDs: ids, ItemMS: ms, ItemSegs: segs}
 	v.EndsAt = startsAt.Add(time.Duration(v.TotalMS()) * time.Millisecond)
 	if prev != nil {

@@ -299,3 +299,80 @@ func TestHasContent_CachesTheCount(t *testing.T) {
 		t.Errorf("CountCurrentClips called %d times, want 2", got)
 	}
 }
+
+func TestPlaylist_AirsTheBumperAndKeepsCountersMonotonic(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	m.addBumper(1, 3000, 3000, 3000, 3000)
+	s := testService(m, t0)
+	s.opts.BumperInterval = 5 * time.Minute
+	sawBumper := false
+	lastSeq, lastDisc := int64(-1), int64(-1)
+	for now := t0; now.Before(t0.Add(12 * time.Minute)); now = now.Add(3 * time.Second) {
+		s.now = func() time.Time { return now }
+		body, err := s.Playlist(context.Background(), Scope{Zip: "77494"}, now)
+		if err != nil {
+			t.Fatalf("at %s: %v", now, err)
+		}
+		p := parsePlaylist(t, body)
+		if p.mediaSeq < lastSeq || p.discSeq < lastDisc {
+			t.Fatalf("at %s: counters went backwards\n%s", now, body)
+		}
+		lastSeq, lastDisc = p.mediaSeq, p.discSeq
+		for i, u := range p.urls {
+			if strings.Contains(u, "/hls/bumpers/1/") {
+				sawBumper = true
+				if strings.HasSuffix(u, "seg-000.ts") && !p.discAt[i] && i > 0 {
+					t.Fatalf("at %s: bumper starts without a discontinuity\n%s", now, body)
+				}
+			}
+		}
+	}
+	if !sawBumper {
+		t.Error("the bumper never aired in 12 minutes")
+	}
+	// Without a bumper row the version is exactly as before.
+	plain := newMemStore()
+	addClips(plain, katy, 1, 40)
+	sp := testService(plain, t0)
+	sp.opts.BumperInterval = 5 * time.Minute
+	v1, _, err := sp.versionAt(context.Background(), "zip:77494", t0, sp.newSource("zip:77494"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range v1.ItemIDs {
+		if isBumper(id) {
+			t.Fatal("bumper item without a bumper row")
+		}
+	}
+}
+
+func TestWindow_BumperMismatchIsInconsistent(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	m.addBumper(1, 3000, 3000, 3000, 3000)
+	s := testService(m, t0)
+	s.opts.BumperInterval = 5 * time.Minute
+	// Build the version with the 4-segment bumper, then change the row.
+	if _, err := s.Playlist(context.Background(), Scope{Zip: "77494"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	m.addBumper(1, 3000, 3000)
+	s.cache = map[string]cached{}
+	var inconsistent *InconsistentLineupError
+	var sawErr bool
+	for now := t0; now.Before(t0.Add(12 * time.Minute)); now = now.Add(3 * time.Second) {
+		s.now = func() time.Time { return now }
+		_, err := s.Playlist(context.Background(), Scope{Zip: "77494"}, now)
+		if errors.As(err, &inconsistent) {
+			sawErr = true
+			if inconsistent.ClipID != bumperItem(1) || inconsistent.Want != 4 || inconsistent.Got != 2 {
+				t.Fatalf("error = %+v", inconsistent)
+			}
+			break
+		}
+	}
+	if !sawErr {
+		t.Error("a bumper whose segments changed under a stored version was served")
+	}
+}
