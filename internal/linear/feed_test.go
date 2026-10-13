@@ -303,3 +303,80 @@ func TestFeed_TVPagePrefersHlsJSOverNativePlayback(t *testing.T) {
 		t.Errorf("play() must check Hls.isSupported() (at %d) before canPlayType (at %d)", hls, native)
 	}
 }
+
+func TestHandler_LiveWithIPFollowsTheHousehold(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	addClips(m, austin, 101, 40)
+	svc, mux := feedMux(m, t0)
+	ip := "203.0.113.7"
+	// Before the phone opens the page: the channel, as advertised, and no
+	// anchor is created.
+	svc.now = func() time.Time { return t0.Add(time.Minute) }
+	rec := do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "198.51.100.1", "")
+	plain := do(mux, "GET", "/channels/live.m3u8?zip=78701", "198.51.100.1", "")
+	if rec.Code != 200 || rec.Body.String() != plain.Body.String() {
+		t.Fatalf("status %d; ip= changed the channel before any household existed:\n%s\n---\n%s", rec.Code, rec.Body.String(), plain.Body.String())
+	}
+	if a, _ := m.Anchor(context.Background(), viewer.NewHasher("salt", false).Household(ip), "zip:78701"); a != nil {
+		t.Fatalf("anchor created for a household that does not exist: %+v", a)
+	}
+	// The phone (same public IP) opens the page: household created on katy.
+	if rec := do(mux, "GET", "/feed/me", ip, ""); rec.Code != 200 {
+		t.Fatalf("/feed/me: %d %s", rec.Code, rec.Body.String())
+	}
+	// The platform's next poll anchors the household to the channel…
+	svc.now = func() time.Time { return t0.Add(2 * time.Minute) }
+	rec = do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "198.51.100.1", "")
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != playlistContentType {
+		t.Errorf("content type %q", ct)
+	}
+	// …and three minutes later the channel route with ip= lists katy only.
+	svc.now = func() time.Time { return t0.Add(5 * time.Minute) }
+	rec = do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "198.51.100.1", "")
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, u := range parsePlaylist(t, rec.Body.Bytes()).urls {
+		if clipID(t, u) > 100 {
+			t.Fatalf("austin listed on the household's feed:\n%s", rec.Body.String())
+		}
+	}
+	// Without ip= the channel is untouched.
+	plain = do(mux, "GET", "/channels/live.m3u8?zip=78701", "198.51.100.1", "")
+	for _, u := range parsePlaylist(t, plain.Body.Bytes()).urls {
+		if clipID(t, u) <= 100 {
+			t.Fatalf("katy listed on the plain channel:\n%s", plain.Body.String())
+		}
+	}
+}
+
+func TestHandler_LiveIgnoresNonPublicIP(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	addClips(m, austin, 101, 40)
+	svc, mux := feedMux(m, t0)
+	if rec := do(mux, "GET", "/feed/me", "203.0.113.7", ""); rec.Code != 200 {
+		t.Fatal(rec.Body.String())
+	}
+	svc.now = func() time.Time { return t0.Add(4 * time.Minute) }
+	plain := do(mux, "GET", "/channels/live.m3u8?zip=78701", "198.51.100.1", "").Body.String()
+	for _, ip := range []string{"10.0.0.5", "100.64.1.1", "127.0.0.1", "not-an-ip", ""} {
+		rec := do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "203.0.113.7", "")
+		if rec.Code != 200 || rec.Body.String() != plain {
+			t.Errorf("ip=%q: status %d, body differs from the plain channel", ip, rec.Code)
+		}
+	}
+}
+
+func TestHandler_LiveWithIPWithoutFeedsIsTheChannel(t *testing.T) {
+	m := newMemStore()
+	addClips(m, austin, 101, 40)
+	rec := serve(t, m, t0, "/channels/live.m3u8?zip=78701&ip=203.0.113.7")
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
