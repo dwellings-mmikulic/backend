@@ -102,6 +102,10 @@ func TestHandler_EPG(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"programs":[{"start":"`) {
 		t.Errorf("body:\n%s", rec.Body.String())
 	}
+	// Without personal feeds there is nothing to customize, so no URL.
+	if strings.Contains(rec.Body.String(), "Customize") {
+		t.Errorf("customize URL without feeds enabled:\n%s", rec.Body.String())
+	}
 }
 
 // A stored lineup whose item segment counts disagree with the clips it

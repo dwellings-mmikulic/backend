@@ -283,8 +283,13 @@ func TestFeed_TVPage(t *testing.T) {
 		if !strings.Contains(body, `"https://api.example.test"`) || strings.Contains(body, "__API_BASE__") {
 			t.Errorf("%s: API base not injected", p)
 		}
-		if !strings.Contains(body, "hls.js/1.5.13/hls.min.js") || !strings.Contains(body, "/feed/areas") {
-			t.Errorf("%s: page is missing the player or the areas call", p)
+		if !strings.Contains(body, "/feed/areas") {
+			t.Errorf("%s: page is missing the areas call", p)
+		}
+		// Daniel, 2026-10-15: no in-page player and no "watch here" copy;
+		// platforms will not carry a channel that pulls viewers to our site.
+		if strings.Contains(body, "No TV nearby") || strings.Contains(body, "hls.min.js") || strings.Contains(body, "<video") {
+			t.Errorf("%s: page still carries the in-page player", p)
 		}
 		if rec.Header().Get("Cache-Control") != "no-cache" {
 			t.Errorf("%s: cache control %q", p, rec.Header().Get("Cache-Control"))
@@ -292,15 +297,30 @@ func TestFeed_TVPage(t *testing.T) {
 	}
 }
 
-// Chrome on macOS answers "maybe" to canPlayType for HLS and then fails to
-// demux it, so the page must try hls.js first and fall back to the native
-// player only where hls.js cannot run (Safari on iOS).
-func TestFeed_TVPagePrefersHlsJSOverNativePlayback(t *testing.T) {
-	_, mux := feedMux(newMemStore(), t0)
-	body := do(mux, "GET", "/tv/", "203.0.113.5", "").Body.String()
-	hls, native := strings.Index(body, "Hls.isSupported()"), strings.Index(body, "canPlayType(")
-	if hls < 0 || native < 0 || hls > native {
-		t.Errorf("play() must check Hls.isSupported() (at %d) before canPlayType (at %d)", hls, native)
+// Platforms list the channel in their guide; the description tells viewers
+// where to customize it (Daniel, 2026-10-15).
+func TestFeed_EPGDescriptionsCarryTheCustomizeURL(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	_, mux := feedMux(m, t0)
+	rec := do(mux, "GET", "/channels/epg.json?zip=77494", "203.0.113.5", "")
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var e EPG
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Programs) == 0 {
+		t.Fatal("no programs")
+	}
+	for _, p := range e.Programs {
+		if !strings.HasSuffix(p.Description, " · Customize this channel at tv.example.test/tv") {
+			t.Errorf("description %q lacks the customize URL", p.Description)
+		}
+		if strings.Contains(p.Description, "https://") {
+			t.Errorf("description %q should show the bare host, not the scheme", p.Description)
+		}
 	}
 }
 
