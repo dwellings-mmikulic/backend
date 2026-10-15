@@ -62,6 +62,32 @@ type City struct {
 	Clips int    // current clips
 }
 
+// Anchor ties a household's personal feed to a channel a platform
+// requested with ip= (see the design spec, "Anchoring"): from StartsAt the
+// household's segments are served on the channel route with their counters
+// shifted so they continue the channel's. One per (household, channel),
+// never deleted.
+type Anchor struct {
+	Household  viewer.ID
+	Channel    string    // channel key the platform requested
+	StartsAt   time.Time // S: the household's feed airs from here
+	SeqOffset  int64     // served seq  = personal seq  + SeqOffset
+	ItemOffset int64     // served item = personal item + ItemOffset
+	CreatedAt  time.Time
+}
+
+// Bumper is one rendered QR bumper (see bumper.go). Rows are never deleted,
+// so lineups that reference an old bumper keep resolving.
+type Bumper struct {
+	ID          int64
+	Name        string
+	ContentHash string
+	BaseURL     string
+	SegmentMS   []int
+	TotalMS     int
+	CreatedAt   time.Time
+}
+
 // Version is one materialised lineup of a channel. Versions form a chain:
 // version N starts at N-1's EndsAt and continues its segment and item
 // counters, so playlist sequence numbers stay monotonic across the chain.
@@ -123,8 +149,12 @@ type Store interface {
 	// InsertVersion stores v unless (key, version) already exists; ok reports
 	// whether v was stored.
 	InsertVersion(ctx context.Context, v *Version) (ok bool, err error)
-	// ClipsByID returns the segment layout of each id.
+	// ClipsByID returns the segment layout of each id: a positive id is a
+	// video_hls row, a negative one the bumper bumperID(id). Entries are
+	// keyed by the id as given.
 	ClipsByID(ctx context.Context, ids []int64) (map[int64]ClipSegments, error)
+	// CurrentBumper returns the newest bumper, or nil when there is none.
+	CurrentBumper(ctx context.Context) (*Bumper, error)
 	// ListingsByClipID returns the listing behind each clip id.
 	ListingsByClipID(ctx context.Context, ids []int64) ([]Listing, error)
 	// CountCurrentClips counts the current clips across the whole library.
@@ -141,4 +171,9 @@ type Store interface {
 	// ListCities returns every city with at least min current clips, ordered
 	// by state then city.
 	ListCities(ctx context.Context, min int) ([]City, error)
+	// Anchor returns the household's anchor on channel, or nil.
+	Anchor(ctx context.Context, h viewer.ID, channel string) (*Anchor, error)
+	// InsertAnchor stores a unless (household, channel) exists; ok reports
+	// whether a was stored.
+	InsertAnchor(ctx context.Context, a *Anchor) (ok bool, err error)
 }

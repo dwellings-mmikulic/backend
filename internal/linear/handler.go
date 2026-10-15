@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/dwellingtw/backend/internal/viewer"
 )
@@ -92,7 +93,7 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.svc.now()
-	body, err := h.svc.Playlist(r.Context(), sc, now)
+	body, err := h.channelPlaylist(r, sc, now)
 	if err != nil {
 		h.fail(w, sc, err)
 		return
@@ -100,6 +101,23 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 	h.track(r, sc, now)
 	playlistHeaders(w)
 	_, _ = w.Write(body)
+}
+
+// channelPlaylist is the live playlist of sc — or, when the request carries
+// a public ip= and a household exists for it, that household's feed anchored
+// to sc (a platform fetching on a viewer's behalf; see the QR bumper spec).
+// The household is only ever created by the mobile page, so a viewer who
+// never scanned the QR sees the channel as advertised.
+func (h *Handler) channelPlaylist(r *http.Request, sc Scope, now time.Time) ([]byte, error) {
+	if h.feeds != nil && h.viewers != nil {
+		if ip := viewer.QueryIP(r.URL.Query()); ip != "" {
+			body, err := h.svc.AnchoredPlaylist(r.Context(), h.viewers.Hasher.Household(ip), sc, now)
+			if !errors.Is(err, ErrUnknownHousehold) {
+				return body, err
+			}
+		}
+	}
+	return h.svc.Playlist(r.Context(), sc, now)
 }
 
 func (h *Handler) epg(w http.ResponseWriter, r *http.Request) {

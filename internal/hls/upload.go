@@ -35,6 +35,16 @@ func Prefix(zpid, contentHash string) string {
 	return path.Join("hls", Version, zpid, h)
 }
 
+// BumperPrefix is the storage directory of a bumper: hls/bumpers/<hash8>.
+// Like clip prefixes it is immutable: a changed bumper has a new hash.
+func BumperPrefix(contentHash string) string {
+	h := contentHash
+	if len(h) > 8 {
+		h = h[:8]
+	}
+	return path.Join("hls", "bumpers", h)
+}
+
 // Upload publishes every segment in dir plus its index playlist under prefix,
 // with at most concurrency uploads in flight. It returns the clip's base URL
 // (the index playlist's URL without "/index.m3u8"); segment i is then

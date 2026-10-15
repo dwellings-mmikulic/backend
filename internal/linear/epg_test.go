@@ -177,3 +177,36 @@ func TestEPG_ResolvesTheScopeOncePerRequest(t *testing.T) {
 		t.Errorf("ListClips called %d times while building %d versions, want at most 3 (one per fallback level)", got, len(built))
 	}
 }
+
+func TestEPG_SkipsBumpers(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40) // one-minute clips → a bumper every 5 clips
+	m.addBumper(1, 3000, 3000, 3000, 3000)
+	s := testService(m, t0.Add(7*time.Minute))
+	s.opts.BumperInterval = 5 * time.Minute
+	e, err := s.EPG(context.Background(), Scope{Zip: "77494"}, t0.Add(7*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A full 30-minute block holds about 29 one-minute clips plus 5 or 6
+	// bumpers; more than 30 "listings" means the bumpers were counted.
+	for _, p := range e.Programs {
+		if p.Listings > 30 {
+			t.Errorf("block %s: %d listings — bumpers counted", p.Start, p.Listings)
+		}
+		if p.Title != "Homes for sale in 77494" {
+			t.Errorf("block %s title %q", p.Start, p.Title)
+		}
+	}
+	// And a bumper really is in the versions the EPG read.
+	vs, _ := m.ListVersions(context.Background(), "zip:77494")
+	found := false
+	for _, v := range vs {
+		for _, id := range v.ItemIDs {
+			found = found || isBumper(id)
+		}
+	}
+	if !found {
+		t.Fatal("no bumper in any version: the test proves nothing")
+	}
+}

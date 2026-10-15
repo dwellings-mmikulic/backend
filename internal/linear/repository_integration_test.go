@@ -72,6 +72,9 @@ func TestRepository_Integration(t *testing.T) {
 		if _, err := pool.Exec(cleanupCtx, `DELETE FROM zip_codes WHERE zip = $1`, testZip); err != nil {
 			t.Errorf("cleanup zip: %v", err)
 		}
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM bumpers WHERE content_hash LIKE 'it-%-' || $1`, suffix); err != nil {
+			t.Errorf("cleanup bumpers: %v", err)
+		}
 	})
 
 	r := NewRepository(pool)
@@ -256,6 +259,37 @@ func TestRepository_Integration(t *testing.T) {
 	}
 	if l := listings[0]; l.ClipID != cur.ID || l.ZPID != zpidCur || l.Price != 500000 || l.City != city || l.State != state {
 		t.Errorf("listing = %+v", l)
+	}
+
+	// --- Bumpers: idempotent insert, newest wins, mixed ClipsByID ---------
+	b1 := &Bumper{Name: "it", ContentHash: "it-b1-" + suffix, BaseURL: "https://cdn.example/hls/bumpers/aaaaaaaa", SegmentMS: []int{3000, 3000, 3000, 3000}, TotalMS: 12000}
+	id1, created, err := r.InsertBumper(ctx, b1)
+	if err != nil || !created || id1 == 0 {
+		t.Fatalf("insert bumper: id=%d created=%v err=%v", id1, created, err)
+	}
+	if id, created, err := r.InsertBumper(ctx, b1); err != nil || created || id != id1 {
+		t.Fatalf("second insert of the same hash: id=%d created=%v err=%v (want %d, false)", id, created, err, id1)
+	}
+	if got, err := r.BumperByHash(ctx, b1.ContentHash); err != nil || got == nil || got.ID != id1 || got.TotalMS != 12000 {
+		t.Fatalf("bumper by hash = %+v err=%v", got, err)
+	}
+	if got, err := r.BumperByHash(ctx, "it-none-"+suffix); err != nil || got != nil {
+		t.Fatalf("missing bumper by hash = %+v err=%v", got, err)
+	}
+	b2 := &Bumper{Name: "it2", ContentHash: "it-b2-" + suffix, BaseURL: "https://cdn.example/hls/bumpers/bbbbbbbb", SegmentMS: []int{4000, 4000}, TotalMS: 8000}
+	id2, _, err := r.InsertBumper(ctx, b2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if curB, err := r.CurrentBumper(ctx); err != nil || curB == nil || curB.ID != id2 {
+		t.Fatalf("current bumper = %+v err=%v, want id %d", curB, err, id2)
+	}
+	mixed, err := r.ClipsByID(ctx, []int64{cur.ID, bumperItem(id1), bumperItem(id2 + 1000000)})
+	if err != nil {
+		t.Fatalf("mixed clips by id: %v", err)
+	}
+	if len(mixed) != 2 || mixed[bumperItem(id1)].BaseURL != b1.BaseURL || len(mixed[bumperItem(id1)].SegmentMS) != 4 || mixed[cur.ID].BaseURL != base {
+		t.Errorf("mixed = %+v", mixed)
 	}
 }
 

@@ -17,6 +17,9 @@ type Options struct {
 	LineupHours     int // max content per lineup version
 	MinScopeClips   int // a scope with fewer current clips falls back to its parent
 	EPGHorizonHours int // how far ahead the EPG materialises versions
+	// BumperInterval is how much content airs between two QR bumpers. Zero
+	// means no bumpers; it is not defaulted, the config decides.
+	BumperInterval time.Duration
 }
 
 func (o Options) withDefaults() Options {

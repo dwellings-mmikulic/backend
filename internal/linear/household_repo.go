@@ -2,7 +2,10 @@ package linear
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/dwellingtw/backend/internal/viewer"
 )
@@ -85,4 +88,35 @@ HAVING count(*) >= $1
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// Anchor implements Store.
+func (r *Repository) Anchor(ctx context.Context, h viewer.ID, channel string) (*Anchor, error) {
+	var a Anchor
+	var hh []byte
+	err := r.pool.QueryRow(ctx, `SELECT household, channel_key, starts_at, seq_offset, item_offset, created_at
+	  FROM channel_anchors WHERE household = $1 AND channel_key = $2`, h[:], channel).
+		Scan(&hh, &a.Channel, &a.StartsAt, &a.SeqOffset, &a.ItemOffset, &a.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("anchor: %w", err)
+	}
+	copy(a.Household[:], hh)
+	return &a, nil
+}
+
+// InsertAnchor implements Store. The primary key settles a race between
+// concurrent first requests for one household: the loser sees ok=false and
+// re-reads.
+func (r *Repository) InsertAnchor(ctx context.Context, a *Anchor) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `
+INSERT INTO channel_anchors (household, channel_key, starts_at, seq_offset, item_offset)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (household, channel_key) DO NOTHING`, a.Household[:], a.Channel, a.StartsAt, a.SeqOffset, a.ItemOffset)
+	if err != nil {
+		return false, fmt.Errorf("insert anchor: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
