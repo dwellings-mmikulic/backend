@@ -22,7 +22,6 @@
   .list div.sel, .list div:active { background:#232836; }
   .status { font-size:15px; margin-top:12px; min-height:1.5em; }
   .ok { color:var(--ok); } .err { color:var(--err); }
-  video { width:100%; border-radius:10px; background:#000; margin-top:12px; }
 </style>
 </head>
 <body>
@@ -45,12 +44,7 @@
     <div id="status" class="status"></div>
   </div>
 
-  <div class="card" id="watch" hidden>
-    <div class="muted">No TV nearby? Watch your feed here.</div>
-    <video id="player" controls playsinline></video>
-  </div>
 </main>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
 <script>
 (function () {
   var API = "__API_BASE__";
@@ -65,8 +59,6 @@
     id = f.id;
     $("current").textContent = areaOf(f);
     if (history.replaceState && location.pathname.indexOf(f.id) < 0) history.replaceState(null, "", "/tv/" + f.id);
-    $("watch").hidden = false;
-    play(f.live);
     update();
   }
   function load() {
@@ -99,21 +91,6 @@
     return null;
   }
   function update() { $("go").disabled = !choice() || !id; }
-  // hls.js first: Chrome on macOS claims it can play HLS natively ("maybe")
-  // and then cannot demux it. The native player is only for browsers without
-  // MSE, i.e. Safari on iOS, where hls.js reports itself unsupported.
-  function play(url) {
-    var v = $("player");
-    if (window.Hls && Hls.isSupported()) {
-      if (v._hls) v._hls.destroy();
-      var h = new Hls({ liveSyncDurationCount: 3 });
-      v._hls = h;
-      h.loadSource(url);
-      h.attachMedia(v);
-      return;
-    }
-    if (v.canPlayType("application/vnd.apple.mpegurl")) v.src = url;
-  }
   $("zip").addEventListener("input", function () { picked = null; $("city").value = ""; renderCities(""); update(); });
   $("city").addEventListener("input", function () { picked = null; renderCities($("city").value); update(); });
   $("go").addEventListener("click", function () {

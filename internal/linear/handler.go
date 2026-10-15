@@ -131,6 +131,14 @@ func (h *Handler) epg(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, sc, err)
 		return
 	}
+	if h.feeds != nil {
+		// Platform guides show the description; it is where a viewer learns
+		// the channel can be customized before the bumper comes around.
+		note := " · Customize this channel at " + h.feeds.mobilePageHost() + "/tv"
+		for i := range e.Programs {
+			e.Programs[i].Description += note
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("Access-Control-Allow-Origin", "*")

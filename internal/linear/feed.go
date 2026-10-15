@@ -27,6 +27,14 @@ type FeedOptions struct {
 // EnableFeeds turns on the personal feeds. Call before Register.
 func (h *Handler) EnableFeeds(o FeedOptions) { h.feeds = &o }
 
+// mobilePageHost is MobileBaseURL as a viewer would type it: no scheme, no
+// trailing slash ("dwellings.tv").
+func (o *FeedOptions) mobilePageHost() string {
+	host := strings.TrimSuffix(o.MobileBaseURL, "/")
+	host = strings.TrimPrefix(host, "https://")
+	return strings.TrimPrefix(host, "http://")
+}
+
 func (h *Handler) registerFeeds(mux *http.ServeMux) {
 	mux.HandleFunc("GET /feed/master.m3u8", h.feedMaster)
 	mux.HandleFunc("GET /feed/live.m3u8", h.feedLive)
