@@ -183,14 +183,14 @@ func TestLoad_ViewerDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := cfg.Viewer
-	if !v.Enabled || v.Salt != "test-salt" || v.RotateDaily || v.RetentionDays != 30 || v.GeoIPDBPath != "" {
+	if !v.Enabled || v.Salt != "test-salt" || v.RotateDaily || v.RetentionDays != 30 || v.FreeIPAPIURL != "https://free.freeipapi.com/api/v1" {
 		t.Errorf("viewer defaults = %+v", v)
 	}
 	t.Setenv("VIEWER_SALT_ROTATE_DAILY", "true")
 	t.Setenv("VIEWER_RETENTION_DAYS", "0")
-	t.Setenv("GEOIP_DB_PATH", " /geoip/x.mmdb ")
+	t.Setenv("FREEIPAPI_URL", " https://de.freeipapi.com/api/ ")
 	cfg, _ = Load()
-	if !cfg.Viewer.RotateDaily || cfg.Viewer.RetentionDays != 1 || cfg.Viewer.GeoIPDBPath != "/geoip/x.mmdb" {
+	if !cfg.Viewer.RotateDaily || cfg.Viewer.RetentionDays != 1 || cfg.Viewer.FreeIPAPIURL != "https://de.freeipapi.com/api/" {
 		t.Errorf("viewer env = %+v", cfg.Viewer)
 	}
 }

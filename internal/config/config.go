@@ -192,9 +192,10 @@ type ViewerConfig struct {
 	// across days (and "last watched" only survives the day).
 	RotateDaily   bool
 	RetentionDays int
-	// GeoIPDBPath is a MaxMind GeoLite2-City .mmdb; empty disables the IP
-	// geo default in /channels/resolve.
-	GeoIPDBPath string
+	// FreeIPAPIURL is the Free IP API base ("https://free.freeipapi.com/api/v1",
+	// or a paid server's ".../api"); empty disables the IP geo default in
+	// /channels/resolve and the personal feeds.
+	FreeIPAPIURL string
 	// AdminKey protects GET /admin/viewers, the listing of raw client
 	// addresses. Empty leaves the route unmounted.
 	AdminKey string
@@ -377,7 +378,7 @@ func Load() (*Config, error) {
 			RotateDaily:   getenvBool("VIEWER_SALT_ROTATE_DAILY", false),
 			RetentionDays: getenvInt("VIEWER_RETENTION_DAYS", 30),
 			AdminKey:      strings.TrimSpace(getenv("VIEWER_ADMIN_KEY", "")),
-			GeoIPDBPath:   strings.TrimSpace(getenv("GEOIP_DB_PATH", "")),
+			FreeIPAPIURL:  strings.TrimSpace(getenv("FREEIPAPI_URL", "https://free.freeipapi.com/api/v1")),
 		},
 		Ads: AdsConfig{
 			PrerollURL: strings.TrimSpace(getenv("AD_PREROLL_URL", "")),
