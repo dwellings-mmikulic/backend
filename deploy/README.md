@@ -13,12 +13,9 @@ Push to `main` → GitHub Actions (`.github/workflows/publish-deploy.yml`):
 
 ## Server layout
 - `/opt/dwellings/compose.prod.yml` — app-only compose (concrete image owner).
-  Mounts `/opt/dwellings/geoip` read-only at `/geoip` for the MaxMind
-  GeoLite2-City database (`GEOIP_DB_PATH=/geoip/GeoLite2-City.mmdb`).
-  Refresh it weekly with `geoipupdate` (apt package; `/etc/GeoIP.conf` holds
-  the MaxMind AccountID/LicenseKey and `EditionIDs GeoLite2-City`,
-  `DatabaseDirectory /opt/dwellings/geoip`). Without the file the app logs
-  a warning and `/channels/resolve` skips the geo step.
+  IP location comes from the Free IP API over HTTPS (`FREEIPAPI_URL`, keyless
+  tier by default, one request per new viewer address per day); nothing to
+  install on the box.
 - `/opt/dwellings/.env` — runtime secrets, `chmod 600`, NOT in git.
 - nginx: `/etc/nginx/sites-available/dwellings` → proxies `:80` to `127.0.0.1:8080`.
 
@@ -65,8 +62,9 @@ ZIP or city; the server then reroutes that feed. Spec:
    `/channels/resolve` without an app release. Feeds are on whenever
    `LINEAR_ENABLED` and `VIEWER_TRACKING_ENABLED` are.
 3. The `household_spans` table applies on restart (schema.sql).
-4. The IP-city default needs the GeoLite2 file (`GEOIP_DB_PATH`); until it is
-   on the box every household starts national and picks its area by QR.
+4. The IP-city default is live as long as `FREEIPAPI_URL` is set (the
+   default); a lookup that fails or is rate limited starts that household
+   national, and it picks its area by QR.
 5. Roku app: play `resolve.feed` instead of a channel master, and every
    `resolve.qr.every_seconds` overlay `resolve.qr.url` (fetched fresh each
    time) for `resolve.qr.show_seconds`. Keep calling `/channels/beat`.
@@ -153,7 +151,7 @@ must carry the same values.
 1. **Before** the deploy, add `stop_grace_period: 60s` under `services.app`
    in the box's `/opt/dwellings/compose.prod.yml`, **editing that file in
    place** — CI only runs `pull` + `up -d`, and the box's copy is
-   hand-maintained and may carry mounts (the GeoIP volume) that a wholesale
+   hand-maintained and may carry local edits that a wholesale
    copy from this repo would drop. Compose reads the stop timeout when the
    container is recreated, so editing it first also lets the OLD container
    shut down gracefully. Then deploy the new image to the **existing** box:

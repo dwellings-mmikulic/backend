@@ -294,13 +294,10 @@ func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, 
 		Clients:        repo,
 		AdminKey:       cfg.Viewer.AdminKey,
 	}
-	if cfg.Viewer.GeoIPDBPath != "" {
-		g, err := geo.Open(cfg.Viewer.GeoIPDBPath)
-		if err != nil {
-			log.Warn("geoip disabled: database unreadable; /channels/resolve will not use IP location", "path", cfg.Viewer.GeoIPDBPath, "error", err)
-		} else {
-			o.Geo = g
-		}
+	if cfg.Viewer.FreeIPAPIURL != "" {
+		o.Geo = geo.NewFreeIPAPI(cfg.Viewer.FreeIPAPIURL, log)
+	} else {
+		log.Warn("FREEIPAPI_URL is empty: no IP location, every viewer defaults to the national channel")
 	}
 	log.Info("viewer tracking enabled", "rotate_daily", cfg.Viewer.RotateDaily, "retention_days", cfg.Viewer.RetentionDays, "geoip", o.Geo != nil, "admin_viewers", o.AdminKey != "")
 	return o

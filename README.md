@@ -271,8 +271,9 @@ with `sid` or `ip` in the URL each viewer has its own cache entry, so every
 one of their polls is counted.
 
 `resolve` picks a channel for the caller: the one they last watched (within
-the retention period), else the ZIP/city/state of their IP (MaxMind
-GeoLite2-City at `GEOIP_DB_PATH`), else national — each candidate goes
+the retention period), else the ZIP/city/state of their IP (looked up at
+the Free IP API, `FREEIPAPI_URL`, cached per address for a day), else
+national — each candidate goes
 through the usual thin-area fallback, so the answer always has content.
 `source` says which rule won. Pass `?sid=` to identify a device instead of
 an IP. `concurrent` is distinct viewers in the last two minutes.
@@ -402,7 +403,8 @@ channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 Roku live entry; see [Linear channels](#linear-channels)).
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
-`VIEWER_RETENTION_DAYS` (`30`), `GEOIP_DB_PATH` (empty = no geo) and
+`VIEWER_RETENTION_DAYS` (`30`), `FREEIPAPI_URL`
+(`https://free.freeipapi.com/api/v1`; empty = no geo) and
 `VIEWER_ADMIN_KEY` (empty = no `/admin/viewers`).
 
 `AD_PREROLL_URL` and `AD_MIDROLL_URL` (both empty) are the VAST ad tags from
