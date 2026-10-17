@@ -161,6 +161,78 @@ SELECT zpid, image_urls FROM properties
 	return out, nil
 }
 
+// VideoSwap is a listing whose MP4 can be retired: its row still points at
+// the MP4 while the current render (ContentHash) has an HLS clip at HLSURL.
+type VideoSwap struct {
+	ZPID        string
+	MP4URL      string // video_url as stored
+	HLSURL      string // the current render's VOD playlist
+	ContentHash string // video_content_hash at read time
+}
+
+// ErrVideoChanged is SwapVideoURL finding a video other than the one it was
+// shown: the listing was re-rendered in between, and the new state must stay.
+var ErrVideoChanged = errors.New("video changed underneath")
+
+// ListMP4sToPurge returns up to limit ready listings whose video_url is still
+// an MP4 and whose current render has an HLS clip, in zpid order after the
+// given zpid (empty: from the start). Videos ready for less than settledFor
+// are left out: a listing a worker has just finished is still being wired up.
+//
+// The clip is looked up per row (LATERAL) rather than joined: the planner
+// has no statistics for the (zpid, content_hash) pair, estimates a plain
+// join at one row and hashes both whole tables for every page (~1 s); the
+// lateral form walks the zpid index and stops at limit (~3 ms).
+func (r *Repository) ListMP4sToPurge(ctx context.Context, after string, limit int, settledFor time.Duration) ([]VideoSwap, error) {
+	const q = `
+SELECT p.zpid, p.video_url, h.base_url || '/index.m3u8', p.video_content_hash
+  FROM properties p
+  CROSS JOIN LATERAL (
+    SELECT base_url FROM video_hls h
+     WHERE h.zpid = p.zpid AND h.content_hash = p.video_content_hash LIMIT 1) h
+ WHERE p.video_status = 'ready' AND p.video_url LIKE '%.mp4' AND p.zpid > $1
+   AND (p.video_rendered_at IS NULL OR p.video_rendered_at <= now() - make_interval(secs => $3))
+ ORDER BY p.zpid
+ LIMIT $2`
+	rows, err := r.pool.Query(ctx, q, after, limit, settledFor.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("list mp4s to purge: %w", err)
+	}
+	defer rows.Close()
+
+	var out []VideoSwap
+	for rows.Next() {
+		var s VideoSwap
+		if err := rows.Scan(&s.ZPID, &s.MP4URL, &s.HLSURL, &s.ContentHash); err != nil {
+			return nil, fmt.Errorf("scan video swap: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate video swaps: %w", err)
+	}
+	return out, nil
+}
+
+// SwapVideoURL replaces video_url from with to (the MP4 purge: to is the HLS
+// playlist of the render from belonged to). It is conditional on the row
+// still holding from under contentHash, so a purge working from a stale read
+// can never point a re-rendered listing at an old clip; that case is
+// ErrVideoChanged.
+func (r *Repository) SwapVideoURL(ctx context.Context, zpid, from, to, contentHash string) error {
+	const q = `
+UPDATE properties SET video_url = $3, updated_at = now()
+ WHERE zpid = $1 AND video_url = $2 AND video_content_hash = $4`
+	tag, err := r.pool.Exec(ctx, q, zpid, from, to, contentHash)
+	if err != nil {
+		return fmt.Errorf("swap video url zpid=%s: %w", zpid, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("swap video url zpid=%s: %w", zpid, ErrVideoChanged)
+	}
+	return nil
+}
+
 // ListReadyForFeed returns the published listings (see publishedPredicate),
 // newest video first, for the Roku feed.
 func (r *Repository) ListReadyForFeed(ctx context.Context) ([]Property, error) {
