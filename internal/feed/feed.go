@@ -77,16 +77,22 @@ func Build(providerName string, props []property.Property, now time.Time) Feed {
 			Content: Content{
 				DateAdded: added.Format(time.RFC3339),
 				Duration:  p.VideoDurationSecs,
-				Videos: []Video{{
-					URL:       p.VideoURL,
-					Quality:   "HD",
-					VideoType: "MP4",
-				}},
+				Videos:    []Video{rendition(p)},
 			},
 			Tags: []string{"real estate"},
 		})
 	}
 	return f
+}
+
+// rendition is the one stream the feed offers for a listing: the HLS VOD
+// playlist when the current render has one, otherwise the MP4. Roku plays
+// both; HLS is preferred so the MP4 copy can be retired from the CDN.
+func rendition(p *property.Property) Video {
+	if p.HLSURL != "" {
+		return Video{URL: p.HLSURL, Quality: "HD", VideoType: "HLS"}
+	}
+	return Video{URL: p.VideoURL, Quality: "HD", VideoType: "MP4"}
 }
 
 // LiveFeed is a Roku Direct Publisher liveFeeds entry: a linear stream.

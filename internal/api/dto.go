@@ -124,7 +124,11 @@ func toDetailResponse(p *property.Property) detailResponse {
 	if d.ImageURLs == nil {
 		d.ImageURLs = []string{}
 	}
-	if p.VideoURL != "" {
+	// The HLS playlist when the render has one, else the MP4: same bytes,
+	// and the MP4 copy is being retired from the CDN.
+	if p.HLSURL != "" {
+		d.VideoURL = &p.HLSURL
+	} else if p.VideoURL != "" {
 		d.VideoURL = &p.VideoURL
 	}
 	d.setMaps(property.MapURLs{Light: p.MapImageURL, Dark: p.MapImageDarkURL})
