@@ -27,18 +27,18 @@ Needs `~/.ssh/dwellings_tv` (override with `DWELLINGS_SSH_KEY`). Takes ~20 s.
 |---|---|---|
 | `renders_1h` / `renders_24h` | ~1,500 / ~35k | < 1,000/h, or `last_render` more than a few minutes old |
 | `new_24h` | tracks `renders_24h` (queue is kept short) | far above renders (backlog building) |
-| `details_24h` | 8,000 (two 4,000 windows) | below 8,000 while `details_done` < total |
+| `details_24h` | ~26,000 (two 13,000 windows; was 8,000 before 2026-10-17) | well below 26,000 while `details_done` < total |
 | per-day renders (7 days) | flat 33k–36k; today's row is partial, pro-rate by hour of day UTC | a full day drops sharply |
 | `claimed_by` | 8 rows, worker-02..09, claims = that box's LISTING_CONCURRENCY (8/2/4/2/8/8/8/8) | a worker missing, or claims 0 |
 | `listing_queue.depth` | a few thousand, `oldest_live` within hours | depth climbing for days, or `oldest_live` more than a day old |
 | `stuck` (attempts >= 3) | 17 as of 2026-10-05 (all lot-size overflow, below) | > 30, or a new error class in `--errors` |
-| `api_budget` search `spent` | well under 16,000/window | hitting 16,000 (backpressure broken) |
-| `api_budget` details `spent` | exactly 4,000/window | far below 4,000 while details backlog exists |
+| `api_budget` search `spent` | ~2,500/window, well under the 12,000 search share | approaching 12,000 (backpressure broken) |
+| `api_budget` details `spent` | exactly 13,000/window (4,000 before 2026-10-17) | far below 13,000 while details backlog exists |
 | `zip_codes.searched` | slowly rising | `last_search` stale while queue is empty |
 | `failed` videos | tens | hundreds |
 
 Topology and the LISTING_CONCURRENCY per box live in the memory note
-`multi-instance-workers`. Details has no backpressure; 4,000/window is a
+`multi-instance-workers`. Details has no backpressure; 13,000/window is a
 deliberate throttle, so spending it out in minutes then idling is normal.
 
 ## Known stuck-item cause

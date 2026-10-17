@@ -50,8 +50,12 @@ type Property struct {
 	Details
 	DetailsFetchedAt *time.Time // nil = enrichment not yet attempted/succeeded
 
-	// Video / Roku feed state.
+	// Video / Roku feed state. VideoURL is the MP4 on the CDN; HLSURL is the
+	// per-listing VOD playlist (index.m3u8) of the current render, empty when
+	// that render has no HLS clip yet. Viewer-facing surfaces hand out HLSURL
+	// when it exists and fall back to the MP4.
 	VideoURL          string
+	HLSURL            string
 	VideoStatus       VideoStatus
 	VideoContentHash  string
 	VideoRenderedAt   *time.Time

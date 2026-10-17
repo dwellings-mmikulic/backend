@@ -203,6 +203,7 @@ func TestDetail_FullMapping(t *testing.T) {
 	p.Latitude = f64p(30.2672)
 	p.Longitude = f64p(-97.7431)
 	p.VideoURL = "https://cdn.example/videos/Z9.mp4"
+	p.HLSURL = "https://cdn.example/hls/v1/Z9/abcd1234/index.m3u8"
 
 	rec := serve(t, &fakeRepo{detail: &p}, "/api/v1/properties/Z9")
 	if rec.Code != http.StatusOK {
@@ -222,8 +223,8 @@ func TestDetail_FullMapping(t *testing.T) {
 	if !ok || agent["name"] != "Hill Country Dream Realty" || agent["brokerage"] != nil {
 		t.Errorf("agent mapping wrong: %v", d["agent"])
 	}
-	if d["video_url"] != "https://cdn.example/videos/Z9.mp4" {
-		t.Errorf("video_url wrong: %v", d["video_url"])
+	if d["video_url"] != "https://cdn.example/hls/v1/Z9/abcd1234/index.m3u8" {
+		t.Errorf("video_url = %v, want the HLS playlist", d["video_url"])
 	}
 	imgs, ok := d["image_urls"].([]any)
 	if !ok || len(imgs) != 2 {
