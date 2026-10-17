@@ -20,6 +20,9 @@ type Options struct {
 	// BumperInterval is how much content airs between two QR bumpers. Zero
 	// means no bumpers; it is not defaulted, the config decides.
 	BumperInterval time.Duration
+	// AdBreakInterval is how much air time passes between two ad-break
+	// slates. Zero means no breaks; like BumperInterval it is not defaulted.
+	AdBreakInterval time.Duration
 }
 
 func (o Options) withDefaults() Options {

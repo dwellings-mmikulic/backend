@@ -281,15 +281,34 @@ func TestRepository_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if curB, err := r.CurrentBumper(ctx); err != nil || curB == nil || curB.ID != id2 {
+	if curB, err := r.CurrentBumper(ctx, KindBumper); err != nil || curB == nil || curB.ID != id2 || curB.Kind != KindBumper {
 		t.Fatalf("current bumper = %+v err=%v, want id %d", curB, err, id2)
 	}
-	mixed, err := r.ClipsByID(ctx, []int64{cur.ID, bumperItem(id1), bumperItem(id2 + 1000000)})
+	// A slate is kept apart by kind: it is never "the current bumper", and it
+	// is the one row kind that resolves as an ad break.
+	if curS, err := r.CurrentBumper(ctx, KindSlate); err != nil || curS != nil {
+		t.Fatalf("current slate before any = %+v err=%v, want nil", curS, err)
+	}
+	sl := &Bumper{Kind: KindSlate, Name: "it-slate", ContentHash: "it-s1-" + suffix, BaseURL: "https://cdn.example/hls/slates/cccccccc", SegmentMS: []int{5000, 5000, 5000}, TotalMS: 15000}
+	idS, created, err := r.InsertBumper(ctx, sl)
+	if err != nil || !created {
+		t.Fatalf("insert slate: id=%d created=%v err=%v", idS, created, err)
+	}
+	if curS, err := r.CurrentBumper(ctx, KindSlate); err != nil || curS == nil || curS.ID != idS || curS.Kind != KindSlate {
+		t.Fatalf("current slate = %+v err=%v, want id %d", curS, err, idS)
+	}
+	if curB, err := r.CurrentBumper(ctx, KindBumper); err != nil || curB == nil || curB.ID != id2 {
+		t.Fatalf("current bumper after the slate = %+v err=%v, want id %d still", curB, err, id2)
+	}
+	mixed, err := r.ClipsByID(ctx, []int64{cur.ID, bumperItem(id1), bumperItem(idS), bumperItem(id2 + 1000000)})
 	if err != nil {
 		t.Fatalf("mixed clips by id: %v", err)
 	}
-	if len(mixed) != 2 || mixed[bumperItem(id1)].BaseURL != b1.BaseURL || len(mixed[bumperItem(id1)].SegmentMS) != 4 || mixed[cur.ID].BaseURL != base {
+	if len(mixed) != 3 || mixed[bumperItem(id1)].BaseURL != b1.BaseURL || len(mixed[bumperItem(id1)].SegmentMS) != 4 || mixed[cur.ID].BaseURL != base {
 		t.Errorf("mixed = %+v", mixed)
+	}
+	if mixed[cur.ID].Break || mixed[bumperItem(id1)].Break || !mixed[bumperItem(idS)].Break {
+		t.Errorf("break flags: clip=%v bumper=%v slate=%v", mixed[cur.ID].Break, mixed[bumperItem(id1)].Break, mixed[bumperItem(idS)].Break)
 	}
 }
 

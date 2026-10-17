@@ -735,6 +735,26 @@ func TestLoad_FeedValidation(t *testing.T) {
 	}
 }
 
+func TestLoad_AdBreakIntervalDefaultsToTenMinutes(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("LINEAR_AD_BREAK_INTERVAL_MINUTES", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Linear.AdBreakIntervalMinutes != 10 {
+		t.Errorf("default ad break interval = %d, want 10", cfg.Linear.AdBreakIntervalMinutes)
+	}
+	t.Setenv("LINEAR_AD_BREAK_INTERVAL_MINUTES", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Linear.AdBreakIntervalMinutes != 0 {
+		t.Errorf("LINEAR_AD_BREAK_INTERVAL_MINUTES=0 gave %d, want 0 (breaks off)", cfg.Linear.AdBreakIntervalMinutes)
+	}
+}
+
 func TestLoad_BumperIntervalDefaultsToFiveMinutes(t *testing.T) {
 	minimalEnv(t)
 	t.Setenv("LINEAR_BUMPER_INTERVAL_MINUTES", "")

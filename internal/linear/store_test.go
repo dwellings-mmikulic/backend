@@ -71,15 +71,30 @@ func (m *memStore) addBumper(id int64, segMS ...int) {
 	for _, ms := range segMS {
 		total += ms
 	}
-	m.bumpers[id] = Bumper{ID: id, Name: fmt.Sprintf("b%d", id), ContentHash: fmt.Sprintf("hash%d", id),
+	m.bumpers[id] = Bumper{ID: id, Kind: KindBumper, Name: fmt.Sprintf("b%d", id), ContentHash: fmt.Sprintf("hash%d", id),
 		BaseURL: fmt.Sprintf("https://cdn/hls/bumpers/%d/x", id), SegmentMS: segMS, TotalMS: total}
 }
 
-func (m *memStore) CurrentBumper(_ context.Context) (*Bumper, error) {
+// addSlate registers an ad-break slate id with the given segment durations.
+func (m *memStore) addSlate(id int64, segMS ...int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	total := 0
+	for _, ms := range segMS {
+		total += ms
+	}
+	m.bumpers[id] = Bumper{ID: id, Kind: KindSlate, Name: fmt.Sprintf("s%d", id), ContentHash: fmt.Sprintf("hash%d", id),
+		BaseURL: fmt.Sprintf("https://cdn/hls/slates/%d/x", id), SegmentMS: segMS, TotalMS: total}
+}
+
+func (m *memStore) CurrentBumper(_ context.Context, kind string) (*Bumper, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var best *Bumper
 	for id, b := range m.bumpers {
+		if b.Kind != kind {
+			continue
+		}
 		if best == nil || id > best.ID {
 			b := b
 			best = &b
@@ -215,7 +230,7 @@ func (m *memStore) ClipsByID(_ context.Context, ids []int64) (map[int64]ClipSegm
 	for _, id := range ids {
 		if isBumper(id) {
 			if b, ok := m.bumpers[bumperID(id)]; ok {
-				out[id] = ClipSegments{ID: id, BaseURL: b.BaseURL, SegmentMS: b.SegmentMS}
+				out[id] = ClipSegments{ID: id, BaseURL: b.BaseURL, SegmentMS: b.SegmentMS, Break: b.Kind == KindSlate}
 			}
 			continue
 		}

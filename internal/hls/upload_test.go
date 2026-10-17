@@ -90,6 +90,12 @@ func TestUpload_FailsWhenSegmentMissing(t *testing.T) {
 	}
 }
 
+func TestSlatePrefix(t *testing.T) {
+	if got := SlatePrefix("abcdef0123456789"); got != "hls/slates/abcdef01" {
+		t.Errorf("SlatePrefix = %q", got)
+	}
+}
+
 func TestBumperPrefix(t *testing.T) {
 	if got := BumperPrefix("abcdef0123456789"); got != "hls/bumpers/abcdef01" {
 		t.Errorf("BumperPrefix = %q", got)

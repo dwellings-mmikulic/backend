@@ -19,6 +19,7 @@ type ClipSegments struct {
 	ID        int64
 	BaseURL   string
 	SegmentMS []int
+	Break     bool // an ad-break slate: the playlist cues it out and back in
 }
 
 // Listing is what the EPG needs about the property behind a clip.
@@ -76,10 +77,18 @@ type Anchor struct {
 	CreatedAt  time.Time
 }
 
-// Bumper is one rendered QR bumper (see bumper.go). Rows are never deleted,
-// so lineups that reference an old bumper keep resolving.
+// Bumper kinds: what a rendered clip of our own is for.
+const (
+	KindBumper = "bumper" // the QR invitation between listings
+	KindSlate  = "slate"  // an ad-break slate, cued out for SSAI
+)
+
+// Bumper is one rendered clip of our own (see bumper.go): the QR bumper or
+// the ad-break slate, told apart by Kind. Rows are never deleted, so lineups
+// that reference an old one keep resolving.
 type Bumper struct {
 	ID          int64
+	Kind        string // KindBumper or KindSlate
 	Name        string
 	ContentHash string
 	BaseURL     string
@@ -150,11 +159,12 @@ type Store interface {
 	// whether v was stored.
 	InsertVersion(ctx context.Context, v *Version) (ok bool, err error)
 	// ClipsByID returns the segment layout of each id: a positive id is a
-	// video_hls row, a negative one the bumper bumperID(id). Entries are
-	// keyed by the id as given.
+	// video_hls row, a negative one the bumper bumperID(id), marked Break
+	// when it is a slate. Entries are keyed by the id as given.
 	ClipsByID(ctx context.Context, ids []int64) (map[int64]ClipSegments, error)
-	// CurrentBumper returns the newest bumper, or nil when there is none.
-	CurrentBumper(ctx context.Context) (*Bumper, error)
+	// CurrentBumper returns the newest bumper of kind, or nil when there is
+	// none.
+	CurrentBumper(ctx context.Context, kind string) (*Bumper, error)
 	// ListingsByClipID returns the listing behind each clip id.
 	ListingsByClipID(ctx context.Context, ids []int64) ([]Listing, error)
 	// CountCurrentClips counts the current clips across the whole library.

@@ -45,6 +45,16 @@ func BumperPrefix(contentHash string) string {
 	return path.Join("hls", "bumpers", h)
 }
 
+// SlatePrefix is the storage directory of an ad-break slate:
+// hls/slates/<hash8>. Immutable like the others.
+func SlatePrefix(contentHash string) string {
+	h := contentHash
+	if len(h) > 8 {
+		h = h[:8]
+	}
+	return path.Join("hls", "slates", h)
+}
+
 // Upload publishes every segment in dir plus its index playlist under prefix,
 // with at most concurrency uploads in flight. It returns the clip's base URL
 // (the index playlist's URL without "/index.m3u8"); segment i is then

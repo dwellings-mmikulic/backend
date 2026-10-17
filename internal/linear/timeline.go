@@ -16,7 +16,14 @@ type segment struct {
 	Seq         int64 // media sequence number
 	Item        int64 // global item index across the chain
 	FirstOfItem bool
+	// BreakMS is the length of the ad break this segment belongs to, 0 for
+	// content; ElapsedMS is how far into the break it starts.
+	BreakMS   int
+	ElapsedMS int
 }
+
+// inBreak reports whether s is part of an ad-break slate.
+func (s segment) inBreak() bool { return s.BreakMS > 0 }
 
 // itemAt returns the index of the item airing at t within v, or -1 when t is
 // outside the version.
@@ -177,6 +184,10 @@ func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) ([]segm
 		}
 		t := v.StartsAt.Add(time.Duration(startMS) * time.Millisecond)
 		itemSeq := seq
+		breakMS, elapsed := 0, 0
+		if c.Break {
+			breakMS = v.ItemMS[i]
+		}
 		for j, ms := range c.SegmentMS {
 			out = append(out, segment{
 				URL:         c.BaseURL + "/" + hls.SegmentName(j),
@@ -185,8 +196,11 @@ func expandItems(v *Version, clips map[int64]ClipSegments, from, to int) ([]segm
 				Seq:         itemSeq + int64(j),
 				Item:        v.StartItem + int64(i),
 				FirstOfItem: j == 0,
+				BreakMS:     breakMS,
+				ElapsedMS:   elapsed,
 			})
 			t = t.Add(time.Duration(ms) * time.Millisecond)
+			elapsed += ms
 		}
 		seq += int64(v.ItemSegs[i])
 		startMS += int64(v.ItemMS[i])

@@ -157,12 +157,15 @@ CREATE INDEX IF NOT EXISTS idx_viewer_clients_last_seen
     ON viewer_clients (last_seen);
 
 -- Personal feeds (see docs/superpowers/specs/2026-10-09-personal-feeds-qr-design.md).
--- bumpers: the QR bumper clips (see
--- docs/superpowers/specs/2026-10-13-qr-bumper-design.md). Lineups reference
--- a bumper as the NEGATED id in channel_lineups.item_ids. Rows are never
--- deleted; the newest row is the bumper new versions use.
+-- bumpers: our own clips between listings — the QR bumper (see
+-- docs/superpowers/specs/2026-10-13-qr-bumper-design.md) and the ad-break
+-- slate (kind 'slate', cued out in the playlist for SSAI; see
+-- docs/superpowers/specs/2026-10-17-ad-breaks-design.md). Lineups reference
+-- a row as the NEGATED id in channel_lineups.item_ids. Rows are never
+-- deleted; the newest row of a kind is what new versions use.
 CREATE TABLE IF NOT EXISTS bumpers (
     id           BIGSERIAL PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'bumper',
     name         TEXT NOT NULL,
     content_hash TEXT NOT NULL UNIQUE,
     base_url     TEXT NOT NULL,
@@ -170,6 +173,7 @@ CREATE TABLE IF NOT EXISTS bumpers (
     total_ms     INTEGER NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE bumpers ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'bumper';
 
 -- household_spans: a household's feed as a chain of spans. household is the
 -- ip-kind viewer hash; the highest n is the household's current channel.
