@@ -208,7 +208,26 @@ docker compose -f compose.prod.yml run --rm --entrypoint /app/make-bumper app -m
 ```
 
 The newest bumper is used by every lineup version built from then on (within
-`LINEAR_LINEUP_HOURS`); setting the interval to `0` stops inserting it. A
+`LINEAR_LINEUP_HOURS`); setting the interval to `0` stops inserting it.
+
+Every `LINEAR_AD_BREAK_INTERVAL_MINUTES` (10) of air time each channel also
+airs an *ad break*: a slate of our own (60 s by default, "We'll be right
+back" plus the QR) that the live playlist cues out for server-side ad
+insertion with `#EXT-X-CUE-OUT:<seconds>`, `#EXT-X-CUE-OUT-CONT:…` on each
+following slate segment and `#EXT-X-CUE-IN` on the first listing after it
+(design: `docs/superpowers/specs/2026-10-17-ad-breaks-design.md`). A FAST
+platform's stitcher replaces the slate with ads; a player without SSAI (our
+own app included) shows the slate. When a break and the bumper fall on the
+same boundary the break airs first. Nothing airs until a slate exists:
+
+```bash
+go run ./cmd/make-bumper -kind slate -render-only /tmp/slate.mp4
+go run ./cmd/make-bumper -kind slate -music assets/music/03-calm-piano.mp3
+docker compose -f compose.prod.yml run --rm --entrypoint /app/make-bumper app -kind slate -music /app/assets/music/03-calm-piano.mp3
+```
+
+`-seconds` sets the break length (3..180); the cue's duration follows the
+rendered slate. Setting the interval to `0` stops inserting it. A
 platform that fetches `/channels/live.m3u8?…&ip=<viewer public IP>` per
 viewer gets, once that viewer has opened the mobile page from the same
 network, their personal feed in place of the channel, with continuous HLS
@@ -399,7 +418,8 @@ origin, used for the absolute URLs in the Roku feed; empty leaves the live
 channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 `LINEAR_LINEUP_HOURS` (`6`), `LINEAR_MIN_SCOPE_CLIPS` (`20`),
 `LINEAR_EPG_HORIZON_HOURS` (`24`), `LINEAR_BUMPER_INTERVAL_MINUTES` (`5`; `0`
-= no QR bumper) and `LINEAR_LIVE_THUMBNAIL_URL` (empty — the poster of the
+= no QR bumper), `LINEAR_AD_BREAK_INTERVAL_MINUTES` (`10`; `0` = no cued ad
+breaks) and `LINEAR_LIVE_THUMBNAIL_URL` (empty — the poster of the
 Roku live entry; see [Linear channels](#linear-channels)).
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),

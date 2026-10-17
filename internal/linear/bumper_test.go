@@ -19,13 +19,13 @@ func TestBumperItemIDs(t *testing.T) {
 func TestMemStore_Bumpers(t *testing.T) {
 	ctx := context.Background()
 	m := newMemStore()
-	if b, err := m.CurrentBumper(ctx); err != nil || b != nil {
+	if b, err := m.CurrentBumper(ctx, KindBumper); err != nil || b != nil {
 		t.Fatalf("empty store: bumper=%+v err=%v", b, err)
 	}
 	m.addClip(1, katy, 1, 3000, 3000)
 	m.addBumper(1, 3000, 3000, 3000, 3000)
 	m.addBumper(2, 4000, 4000, 4000)
-	b, err := m.CurrentBumper(ctx)
+	b, err := m.CurrentBumper(ctx, KindBumper)
 	if err != nil || b == nil || b.ID != 2 || b.TotalMS != 12000 {
 		t.Fatalf("current bumper = %+v err=%v (want the newest, id 2)", b, err)
 	}

@@ -34,14 +34,23 @@ func seedFor(key string, version int) int64 {
 	return int64(h.Sum64())
 }
 
+// insert is a clip of our own (the ad-break slate, the QR bumper) that the
+// lineup builder airs between listings every interval of air time. An
+// interval of 0 leaves it out.
+type insert struct {
+	clip     ClipRef
+	interval time.Duration
+}
+
 // buildItems picks a version's air order: a seeded shuffle of clips (sorted
 // by id first so the input order is irrelevant), cut to maxMS. A lineup always
-// has at least one clip, even if that clip alone exceeds maxMS. With a bumper
-// and a positive interval, the bumper is then inserted in front of every clip
-// that would otherwise start interval or more after the previous bumper ended
-// (for the first one: after the version's start). It is never the first item
-// and never the last: a version starts and ends with content.
-func buildItems(clips []ClipRef, bumper *ClipRef, interval time.Duration, seed int64, maxMS int) (ids []int64, ms []int, segs []int) {
+// has at least one clip, even if that clip alone exceeds maxMS. Each insert
+// with a positive interval is then placed in front of every clip that would
+// otherwise start interval or more after that insert last ended (for the
+// first one: after the version's start); inserts due at the same boundary
+// air in the order given. An insert is never the first item and never the
+// last: a version starts and ends with content.
+func buildItems(clips []ClipRef, inserts []insert, seed int64, maxMS int) (ids []int64, ms []int, segs []int) {
 	order := make([]ClipRef, len(clips))
 	copy(order, clips)
 	sort.Slice(order, func(i, j int) bool { return order[i].ID < order[j].ID })
@@ -57,9 +66,7 @@ func buildItems(clips []ClipRef, bumper *ClipRef, interval time.Duration, seed i
 		items = append(items, c)
 		total += c.TotalMS
 	}
-	if bumper != nil && interval > 0 {
-		items = withBumpers(items, *bumper, int(interval.Milliseconds()))
-	}
+	items = withInserts(items, inserts)
 	for _, c := range items {
 		ids = append(ids, c.ID)
 		ms = append(ms, c.TotalMS)
@@ -68,19 +75,39 @@ func buildItems(clips []ClipRef, bumper *ClipRef, interval time.Duration, seed i
 	return ids, ms, segs
 }
 
-// withBumpers inserts bumper before every clip of items that would start
-// intervalMS or more after the previous bumper's end (initially: after the
-// start). The first item is always a clip, so is the last.
-func withBumpers(items []ClipRef, bumper ClipRef, intervalMS int) []ClipRef {
-	out := make([]ClipRef, 0, len(items)+len(items)/2)
-	since := 0 // content ms since the last bumper ended
-	for i, c := range items {
-		if i > 0 && since >= intervalMS {
-			out = append(out, bumper)
-			since = 0
+// withInserts places each insert with a positive interval before every clip
+// of items that would start that interval or more of air time after the
+// insert last ended (initially: after the start). Air time counts everything
+// aired, other inserts included. The first item is always a clip, so is the
+// last.
+func withInserts(items []ClipRef, inserts []insert) []ClipRef {
+	var active []insert
+	for _, in := range inserts {
+		if in.interval > 0 {
+			active = append(active, in)
 		}
+	}
+	if len(active) == 0 {
+		return items
+	}
+	out := make([]ClipRef, 0, len(items)+len(items)/2)
+	since := make([]int, len(active)) // ms aired since each insert last ended
+	air := func(c ClipRef) {
 		out = append(out, c)
-		since += c.TotalMS
+		for k := range since {
+			since[k] += c.TotalMS
+		}
+	}
+	for i, c := range items {
+		if i > 0 {
+			for k, in := range active {
+				if since[k] >= int(in.interval.Milliseconds()) {
+					air(in.clip)
+					since[k] = 0
+				}
+			}
+		}
+		air(c)
 	}
 	return out
 }
@@ -133,8 +160,38 @@ type lineupSource struct {
 	key      string
 	scope    Scope
 	clips    []ClipRef
-	bumper   *ClipRef // the current bumper as a lineup item; nil = none
+	bumper   *ClipRef // the current QR bumper as a lineup item; nil = none
+	slate    *ClipRef // the current ad-break slate as a lineup item; nil = none
 	resolved bool
+}
+
+// inserts lists what the builder airs between listings, in the order they
+// take a shared boundary: the ad break first, then the QR bumper, so the
+// invitation follows the ads straight into content (nil entries are
+// skipped).
+func (src *lineupSource) inserts(o Options) []insert {
+	var ins []insert
+	if src.slate != nil {
+		ins = append(ins, insert{*src.slate, o.AdBreakInterval})
+	}
+	if src.bumper != nil {
+		ins = append(ins, insert{*src.bumper, o.BumperInterval})
+	}
+	return ins
+}
+
+// currentInsert loads the newest bumper of kind as a lineup item when its
+// interval is positive; nil when the interval is 0 or there is no row.
+func (src *lineupSource) currentInsert(ctx context.Context, kind string, interval time.Duration) (*ClipRef, error) {
+	if interval <= 0 {
+		return nil, nil
+	}
+	b, err := src.svc.store.CurrentBumper(ctx, kind)
+	if err != nil || b == nil {
+		return nil, err
+	}
+	r := b.ref()
+	return &r, nil
 }
 
 // newSource creates an unresolved lineupSource for key. Nothing is queried
@@ -153,15 +210,11 @@ func (src *lineupSource) resolve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if src.svc.opts.BumperInterval > 0 {
-		b, err := src.svc.store.CurrentBumper(ctx)
-		if err != nil {
-			return err
-		}
-		if b != nil {
-			r := b.ref()
-			src.bumper = &r
-		}
+	if src.bumper, err = src.currentInsert(ctx, KindBumper, src.svc.opts.BumperInterval); err != nil {
+		return err
+	}
+	if src.slate, err = src.currentInsert(ctx, KindSlate, src.svc.opts.AdBreakInterval); err != nil {
+		return err
 	}
 	src.scope, src.clips, src.resolved = eff, clips, true
 	return nil
@@ -173,7 +226,7 @@ func (s *Service) newVersion(ctx context.Context, key string, n int, startsAt ti
 	if err := src.resolve(ctx); err != nil {
 		return nil, err
 	}
-	ids, ms, segs := buildItems(src.clips, src.bumper, s.opts.BumperInterval, seedFor(key, n), s.opts.LineupHours*3600*1000)
+	ids, ms, segs := buildItems(src.clips, src.inserts(s.opts), seedFor(key, n), s.opts.LineupHours*3600*1000)
 	v := &Version{Key: key, Version: n, Scope: src.scope.Key(), StartsAt: startsAt, ItemIDs: ids, ItemMS: ms, ItemSegs: segs}
 	v.EndsAt = startsAt.Add(time.Duration(v.TotalMS()) * time.Millisecond)
 	if prev != nil {

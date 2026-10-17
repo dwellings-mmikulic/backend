@@ -209,6 +209,8 @@ func (r *Repository) ClipsByID(ctx context.Context, ids []int64) (map[int64]Clip
 		}
 	}
 	out := make(map[int64]ClipSegments, len(ids))
+	// Each query selects id, base_url, segment_ms and the row's kind (a
+	// literal for clips); a slate is the only kind that is an ad break.
 	scan := func(q string, in []int64, key func(int64) int64) error {
 		if len(in) == 0 {
 			return nil
@@ -221,19 +223,21 @@ func (r *Repository) ClipsByID(ctx context.Context, ids []int64) (map[int64]Clip
 		for rows.Next() {
 			var c ClipSegments
 			var ms []int32
-			if err := rows.Scan(&c.ID, &c.BaseURL, &ms); err != nil {
+			var kind string
+			if err := rows.Scan(&c.ID, &c.BaseURL, &ms, &kind); err != nil {
 				return fmt.Errorf("scan clip segments: %w", err)
 			}
 			c.ID = key(c.ID)
 			c.SegmentMS = ints(ms)
+			c.Break = kind == KindSlate
 			out[c.ID] = c
 		}
 		return rows.Err()
 	}
-	if err := scan(`SELECT id, base_url, segment_ms FROM video_hls WHERE id = ANY($1)`, clipIDs, func(id int64) int64 { return id }); err != nil {
+	if err := scan(`SELECT id, base_url, segment_ms, 'clip' FROM video_hls WHERE id = ANY($1)`, clipIDs, func(id int64) int64 { return id }); err != nil {
 		return nil, err
 	}
-	if err := scan(`SELECT id, base_url, segment_ms FROM bumpers WHERE id = ANY($1)`, bumperIDs, bumperItem); err != nil {
+	if err := scan(`SELECT id, base_url, segment_ms, kind FROM bumpers WHERE id = ANY($1)`, bumperIDs, bumperItem); err != nil {
 		return nil, err
 	}
 	return out, nil

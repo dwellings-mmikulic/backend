@@ -55,6 +55,17 @@ func TestBuildFFmpegArgs_ImageAndMusic(t *testing.T) {
 	}
 }
 
+// The slate has its own defaults: a longer clip (a whole ad break) with a
+// caption that says the channel is coming back.
+func TestSlateDefaults(t *testing.T) {
+	if SlateSeconds < 30 || SlateSeconds > 180 {
+		t.Errorf("SlateSeconds = %d, want a typical FAST break length", SlateSeconds)
+	}
+	if !strings.Contains(SlateCaption, "right back") || !strings.Contains(SlateCaption, "\n") {
+		t.Errorf("SlateCaption = %q", SlateCaption)
+	}
+}
+
 func TestHash_DependsOnEveryInput(t *testing.T) {
 	dir := t.TempDir()
 	img := filepath.Join(dir, "bg.png")
@@ -67,12 +78,13 @@ func TestHash_DependsOnEveryInput(t *testing.T) {
 	if h, _ := base.Hash(); h != h0 {
 		t.Error("hash is not deterministic")
 	}
-	vary := []Spec{base, base, base, base, base}
+	vary := []Spec{base, base, base, base, base, base}
 	vary[0].URL = "https://example.test/"
 	vary[1].Caption = "x"
 	vary[2].Seconds = 13
 	vary[3].Background = "0x000000"
 	vary[4].BackgroundImage = img
+	vary[5].Kind = "slate" // same picture, different job: its own row
 	seen := map[string]bool{h0: true}
 	for i, v := range vary {
 		h, err := v.Hash()

@@ -22,6 +22,16 @@ import (
 // already gone from the window: with g the global item index of the first
 // listed segment, that is g−1 tags for items 1..g−1, plus item g's own tag
 // when the window starts mid-item.
+//
+// An ad-break slate (segment.inBreak) is cued the way SSAI stitchers read
+// legacy SCTE-35 markers (AWS MediaPackage "SCTE-35 enhanced", MediaTailor,
+// Wurl, Amagi): EXT-X-CUE-OUT:<seconds> on its first segment,
+// EXT-X-CUE-OUT-CONT:ElapsedTime=…,Duration=… on every later one (and in
+// place of CUE-OUT when the window opens mid-break, so a joining stitcher
+// knows where in the break it is), EXT-X-CUE-IN on the first content segment
+// after it. Each tag precedes the EXTINF it applies to, after the
+// discontinuity and before PROGRAM-DATE-TIME. A break whose last segment has
+// left the window takes its CUE-IN with it, as any tag goes with its segment.
 func writePlaylist(w io.Writer, segs []segment) {
 	var first segment
 	var removed int64
@@ -41,12 +51,25 @@ func writePlaylist(w io.Writer, segs []segment) {
 		if disc {
 			io.WriteString(w, "#EXT-X-DISCONTINUITY\n")
 		}
+		switch {
+		case s.inBreak() && i == 0 && s.ElapsedMS > 0:
+			fmt.Fprintf(w, "#EXT-X-CUE-OUT-CONT:ElapsedTime=%s,Duration=%s\n", seconds(s.ElapsedMS), seconds(s.BreakMS))
+		case s.inBreak() && s.FirstOfItem:
+			fmt.Fprintf(w, "#EXT-X-CUE-OUT:%s\n", seconds(s.BreakMS))
+		case s.inBreak():
+			fmt.Fprintf(w, "#EXT-X-CUE-OUT-CONT:ElapsedTime=%s,Duration=%s\n", seconds(s.ElapsedMS), seconds(s.BreakMS))
+		case i > 0 && segs[i-1].inBreak():
+			io.WriteString(w, "#EXT-X-CUE-IN\n")
+		}
 		if i == 0 || disc {
 			fmt.Fprintf(w, "#EXT-X-PROGRAM-DATE-TIME:%s\n", s.Start.UTC().Format("2006-01-02T15:04:05.000Z"))
 		}
 		fmt.Fprintf(w, "#EXTINF:%.3f,\n%s\n", float64(s.DurMS)/1000, s.URL)
 	}
 }
+
+// seconds formats a millisecond count as the playlist's "%.3f" seconds.
+func seconds(ms int) string { return fmt.Sprintf("%.3f", float64(ms)/1000) }
 
 // writeMaster renders the master playlist. All clips share one rendition, so
 // there is a single variant; the attributes describe the listing encode

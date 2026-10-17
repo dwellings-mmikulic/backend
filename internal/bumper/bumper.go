@@ -1,7 +1,10 @@
 // Package bumper renders the QR bumper: a short 1080p clip with a caption,
 // a large QR code and the URL it encodes, in the same encode profile as the
 // listing videos so it splices into a channel (see
-// docs/superpowers/specs/2026-10-13-qr-bumper-design.md).
+// docs/superpowers/specs/2026-10-13-qr-bumper-design.md). The same render,
+// with its own caption and length, is the ad-break slate: what airs during a
+// cued-out break for viewers whose player has no ad insertion (see
+// docs/superpowers/specs/2026-10-17-ad-breaks-design.md).
 package bumper
 
 import (
@@ -28,6 +31,11 @@ const (
 	DefaultSeconds = 12
 	DefaultColor   = "0x101418"
 
+	// Slate defaults: a whole ad break long, telling the viewer the channel
+	// is coming back while still inviting them to scan.
+	SlateCaption = "We'll be right back\nScan the QR code to customize your channel"
+	SlateSeconds = 60
+
 	// renderVersion is mixed into the hash: bump it when the layout or the
 	// encode changes so an old bumper is not mistaken for the new one.
 	renderVersion = "b2"
@@ -41,6 +49,10 @@ const (
 
 // Spec is everything the render depends on.
 type Spec struct {
+	// Kind is the row's job ("" or "bumper": the QR bumper; "slate": an ad
+	// break). It does not change the picture but it is part of the identity:
+	// one render cannot be both, and the two are stored and scheduled apart.
+	Kind            string
 	URL             string // what the QR encodes
 	Caption         string // lines separated by "\n"
 	Seconds         int
@@ -56,6 +68,11 @@ type Spec struct {
 func (s Spec) Hash() (string, error) {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s|%s|%s|%d|%s|%s|%d|", renderVersion, s.URL, s.Caption, s.Seconds, s.Background, s.FontPath, s.FPS)
+	if s.Kind != "" && s.Kind != "bumper" {
+		// Appended only for other kinds, so every bumper hashed before kinds
+		// existed keeps its hash (and its row and CDN prefix).
+		fmt.Fprintf(h, "kind=%s|", s.Kind)
+	}
 	for _, p := range []string{s.BackgroundImage, s.Music} {
 		if p == "" {
 			io.WriteString(h, "-|")

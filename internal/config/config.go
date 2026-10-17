@@ -178,6 +178,11 @@ type LinearConfig struct {
 	// (see docs/superpowers/specs/2026-10-13-qr-bumper-design.md); 0 turns
 	// bumpers off for versions built from then on.
 	BumperIntervalMinutes int
+	// AdBreakIntervalMinutes is how much air time passes between two ad-break
+	// slates, cued out in the playlist for SSAI (see
+	// docs/superpowers/specs/2026-10-17-ad-breaks-design.md); 0 turns breaks
+	// off for versions built from then on.
+	AdBreakIntervalMinutes int
 }
 
 // ViewerConfig controls pseudonymous viewer tracking on the linear channels
@@ -365,12 +370,13 @@ func Load() (*Config, error) {
 			FPS:             getenvInt("VIDEO_FPS", 0),
 		},
 		Linear: LinearConfig{
-			Enabled:               getenvBool("LINEAR_ENABLED", true),
-			LineupHours:           getenvInt("LINEAR_LINEUP_HOURS", 6),
-			MinScopeClips:         getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
-			EPGHorizonHours:       getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
-			LiveThumbnailURL:      strings.TrimSpace(getenv("LINEAR_LIVE_THUMBNAIL_URL", "")),
-			BumperIntervalMinutes: getenvInt("LINEAR_BUMPER_INTERVAL_MINUTES", 5),
+			Enabled:                getenvBool("LINEAR_ENABLED", true),
+			LineupHours:            getenvInt("LINEAR_LINEUP_HOURS", 6),
+			MinScopeClips:          getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
+			EPGHorizonHours:        getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
+			LiveThumbnailURL:       strings.TrimSpace(getenv("LINEAR_LIVE_THUMBNAIL_URL", "")),
+			BumperIntervalMinutes:  getenvInt("LINEAR_BUMPER_INTERVAL_MINUTES", 5),
+			AdBreakIntervalMinutes: getenvInt("LINEAR_AD_BREAK_INTERVAL_MINUTES", 10),
 		},
 		Viewer: ViewerConfig{
 			Enabled:       getenvBool("VIEWER_TRACKING_ENABLED", true),
