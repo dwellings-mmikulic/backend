@@ -36,11 +36,12 @@ const (
 )
 
 // Page sizes of /roku/search-feed.json. Roku's crawler walks nextPageUrl
-// links through the whole catalogue (250 MB cap per page), so pages are big:
-// ~0.7 KB per asset puts the default near 7 MB and the cap near 35 MB.
+// links through the whole catalogue, so page count is not a concern but page
+// weight is: at ~0.55 KB per asset the default is ~280 KB and the cap ~1.1 MB,
+// each well under a second to serve.
 const (
-	defaultSearchLimit = 10000
-	maxSearchLimit     = 50000
+	defaultSearchLimit = 500
+	maxSearchLimit     = 2000
 )
 
 // feedCacheControl lets Bunny and browsers hold a page for five minutes; a

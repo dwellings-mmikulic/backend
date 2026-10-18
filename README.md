@@ -313,7 +313,7 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
   zpid (Roku hands `playId` back to the app as the deep link `contentId`,
   `mediaType=shortFormVideo`), genre `house/garden`, rating `USA_PR` `NR`,
   main image = first photo, `license: free`, `quality: fhd`, US only. Paged
-  like the feed (`?limit=` 1–50,000, default 10,000) but with the spec's own
+  like the feed (`?limit=` 1–2,000, default 500, ~280 KB a page) but with the spec's own
   root `nextPageUrl`, which Roku's crawler follows to the last page. Register
   the first-page URL under *App → Search feeds* in the Roku developer
   dashboard, after running it through *Search feed validator* there.
