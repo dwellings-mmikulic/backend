@@ -52,8 +52,7 @@ already has a `ready` one with an unchanged content hash):
 ```
 photos → ffmpeg (scale-to-cover 1920×1080, lower-third price/address/facts
 overlay, QR to the Zillow listing, music bed) → upload videos/<zpid>.mp4 to
-Bunny → store video_url + status. The Roku feed and the API hand out the
-listing's HLS playlist (below) once it exists, the MP4 only as a fallback.
+Bunny → store video_url + status.
 ```
 
 - Pacing: every photo for `VIDEO_SECONDS_PER_PHOTO` seconds (default 4).
@@ -110,30 +109,6 @@ listing's HLS playlist (below) once it exists, the MP4 only as a fallback.
   `docker compose run` ends with the SSH session. A row that still lists an
   object that is gone (the worker's purge was cut short) is what a later run
   of the sweep repairs, so run it again after the first pass.
-- **MP4 purge.** Every video is on the CDN twice: the MP4 (`videos/<zpid>.mp4`)
-  and the HLS remux of the same bytes (`hls/v1/<zpid>/<hash8>/`, below). The
-  Roku feed and the API hand out the HLS playlist whenever the current render
-  has one, so the MP4 copy is storage for nothing (~14 MB per listing, half
-  the zone). `cmd/purge-mp4` deletes it and points `video_url` at the
-  playlist:
-
-  ```bash
-  docker compose -f compose.prod.yml run --rm --entrypoint /app/purge-mp4 app -dry-run
-  docker compose -f compose.prod.yml run --rm --entrypoint /app/purge-mp4 app -limit 100
-  docker compose -f compose.prod.yml run --rm --entrypoint /app/purge-mp4 app
-  ```
-
-  Same shape as the photo purge: resumable and idempotent (the row is
-  swapped only after the object is gone; a missing object counts as
-  deleted), zpid-ordered pages, `-settled` (1h), `-workers` (8), non-zero
-  exit when a listing failed. Before an MP4 goes, its playlist is fetched
-  from the CDN and must be a complete VOD playlist, so a listing whose HLS
-  copy is missing keeps its MP4 and is reported. A listing re-rendered in
-  the meantime is left as it is (`video_url` is swapped only while the row
-  still holds the hash it was read with). An MP4 can be rebuilt from the
-  segments without re-encoding — `ffmpeg -i index.m3u8 -c copy out.mp4` —
-  so nothing is lost. New renders still upload an MP4 until the render path
-  changes, so the sweep is worth repeating.
 
 ### Property maps
 

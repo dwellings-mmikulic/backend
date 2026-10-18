@@ -161,91 +161,17 @@ SELECT zpid, image_urls FROM properties
 	return out, nil
 }
 
-// VideoSwap is a listing whose MP4 can be retired: its row still points at
-// the MP4 while the current render (ContentHash) has an HLS clip at HLSURL.
-type VideoSwap struct {
-	ZPID        string
-	MP4URL      string // video_url as stored
-	HLSURL      string // the current render's VOD playlist
-	ContentHash string // video_content_hash at read time
-}
-
-// ErrVideoChanged is SwapVideoURL finding a video other than the one it was
-// shown: the listing was re-rendered in between, and the new state must stay.
-var ErrVideoChanged = errors.New("video changed underneath")
-
-// ListMP4sToPurge returns up to limit ready listings whose video_url is still
-// an MP4 and whose current render has an HLS clip, in zpid order after the
-// given zpid (empty: from the start). Videos ready for less than settledFor
-// are left out: a listing a worker has just finished is still being wired up.
-//
-// The clip is looked up per row (LATERAL) rather than joined: the planner
-// has no statistics for the (zpid, content_hash) pair, estimates a plain
-// join at one row and hashes both whole tables for every page (~1 s); the
-// lateral form walks the zpid index and stops at limit (~3 ms).
-func (r *Repository) ListMP4sToPurge(ctx context.Context, after string, limit int, settledFor time.Duration) ([]VideoSwap, error) {
-	const q = `
-SELECT p.zpid, p.video_url, h.base_url || '/index.m3u8', p.video_content_hash
-  FROM properties p
-  CROSS JOIN LATERAL (
-    SELECT base_url FROM video_hls h
-     WHERE h.zpid = p.zpid AND h.content_hash = p.video_content_hash LIMIT 1) h
- WHERE p.video_status = 'ready' AND p.video_url LIKE '%.mp4' AND p.zpid > $1
-   AND (p.video_rendered_at IS NULL OR p.video_rendered_at <= now() - make_interval(secs => $3))
- ORDER BY p.zpid
- LIMIT $2`
-	rows, err := r.pool.Query(ctx, q, after, limit, settledFor.Seconds())
-	if err != nil {
-		return nil, fmt.Errorf("list mp4s to purge: %w", err)
-	}
-	defer rows.Close()
-
-	var out []VideoSwap
-	for rows.Next() {
-		var s VideoSwap
-		if err := rows.Scan(&s.ZPID, &s.MP4URL, &s.HLSURL, &s.ContentHash); err != nil {
-			return nil, fmt.Errorf("scan video swap: %w", err)
-		}
-		out = append(out, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate video swaps: %w", err)
-	}
-	return out, nil
-}
-
-// SwapVideoURL replaces video_url from with to (the MP4 purge: to is the HLS
-// playlist of the render from belonged to). It is conditional on the row
-// still holding from under contentHash, so a purge working from a stale read
-// can never point a re-rendered listing at an old clip; that case is
-// ErrVideoChanged.
-func (r *Repository) SwapVideoURL(ctx context.Context, zpid, from, to, contentHash string) error {
-	const q = `
-UPDATE properties SET video_url = $3, updated_at = now()
- WHERE zpid = $1 AND video_url = $2 AND video_content_hash = $4`
-	tag, err := r.pool.Exec(ctx, q, zpid, from, to, contentHash)
-	if err != nil {
-		return fmt.Errorf("swap video url zpid=%s: %w", zpid, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("swap video url zpid=%s: %w", zpid, ErrVideoChanged)
-	}
-	return nil
-}
-
 // ListReadyForFeed returns the published listings (see publishedPredicate),
 // newest video first, for the Roku feed.
 func (r *Repository) ListReadyForFeed(ctx context.Context) ([]Property, error) {
 	const q = `
-SELECT p.zpid, p.sale_price, p.address, p.city, p.state, p.zip,
-       p.home_size_sqft, p.lot_size_sqft, p.bedrooms, p.bathrooms, p.detail_url,
-       p.image_urls, COALESCE(p.video_url,''),
-       COALESCE(h.base_url || '/index.m3u8', ''),
-       COALESCE(p.video_duration_secs,0), p.video_rendered_at
-  FROM properties p
-  LEFT JOIN video_hls h ON h.zpid = p.zpid AND h.content_hash = p.video_content_hash
- WHERE p.` + publishedPredicate + `
- ORDER BY p.video_rendered_at DESC NULLS LAST`
+SELECT zpid, sale_price, address, city, state, zip,
+       home_size_sqft, lot_size_sqft, bedrooms, bathrooms, detail_url,
+       image_urls, COALESCE(video_url,''), COALESCE(video_duration_secs,0),
+       video_rendered_at
+  FROM properties
+ WHERE ` + publishedPredicate + `
+ ORDER BY video_rendered_at DESC NULLS LAST`
 
 	rows, err := r.pool.Query(ctx, q)
 	if err != nil {
@@ -260,7 +186,7 @@ SELECT p.zpid, p.sale_price, p.address, p.city, p.state, p.zip,
 		if err := rows.Scan(
 			&p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 			&p.HomeSizeSqft, &p.LotSizeSqft, &p.Bedrooms, &p.Bathrooms, &p.DetailURL,
-			&p.ImageURLs, &p.VideoURL, &p.HLSURL, &p.VideoDurationSecs, &renderedAt,
+			&p.ImageURLs, &p.VideoURL, &p.VideoDurationSecs, &renderedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan feed row: %w", err)
 		}
@@ -312,7 +238,7 @@ func (r *Repository) List(ctx context.Context, f Filter) ([]Property, int, bool,
 		if err := rows.Scan(
 			&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 			&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft, &p.PropertyType,
-			&p.ImageURLs, &p.VideoURL, &p.HLSURL, &p.CreatedAt,
+			&p.ImageURLs, &p.VideoURL, &p.CreatedAt,
 		); err != nil {
 			return nil, 0, false, fmt.Errorf("scan property row: %w", err)
 		}
@@ -338,7 +264,7 @@ SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
        COALESCE(state,''), COALESCE(zip,''), COALESCE(bedrooms,0),
        COALESCE(bathrooms,0), COALESCE(home_size_sqft,0),
        COALESCE(lot_size_sqft,0), COALESCE(detail_url,''), image_urls,
-       COALESCE(video_url,''), ` + hlsURLExpr + `, video_status,
+       COALESCE(video_url,''), video_status,
        property_type, description, year_built, heating, cooling, garage,
        hoa_fee_monthly, mls_number, listing_status,
        agent_name, agent_phone, agent_brokerage, latitude, longitude,
@@ -367,7 +293,7 @@ func (r *Repository) getOne(ctx context.Context, q, zpid string) (*Property, err
 		&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 		&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft,
 		&p.LotSizeSqft, &p.DetailURL, &p.ImageURLs,
-		&p.VideoURL, &p.HLSURL, &p.VideoStatus,
+		&p.VideoURL, &p.VideoStatus,
 		&p.PropertyType, &p.Description, &p.YearBuilt, &p.Heating, &p.Cooling, &p.Garage,
 		&p.HOAFeeMonthly, &p.MLSNumber, &p.ListingStatus,
 		&p.AgentName, &p.AgentPhone, &p.AgentBrokerage, &p.Latitude, &p.Longitude,
