@@ -307,6 +307,16 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
   page only. The Direct Publisher spec has no paging of its own (it expects
   one file), so these two fields are ours; the Dwellings Roku app follows
   `nextPage`. Pages are cacheable for five minutes.
+- `GET /roku/search-feed.json` — the same listings as a [Roku Search
+  feed](https://developer.roku.com/docs/specs/search/search-feed.md) (spec
+  version 1): `assets[]` of `type: "shortForm"`, id and `playId` both the
+  zpid (Roku hands `playId` back to the app as the deep link `contentId`,
+  `mediaType=shortFormVideo`), genre `house/garden`, rating `USA_PR` `NR`,
+  main image = first photo, `license: free`, `quality: fhd`, US only. Paged
+  like the feed (`?limit=` 1–50,000, default 10,000) but with the spec's own
+  root `nextPageUrl`, which Roku's crawler follows to the last page. Register
+  the first-page URL under *App → Search feeds* in the Roku developer
+  dashboard, after running it through *Search feed validator* there.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
 - `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json` — linear channels, see [Linear channels](#linear-channels).
