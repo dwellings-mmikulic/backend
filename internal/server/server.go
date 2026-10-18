@@ -35,6 +35,14 @@ const (
 	maxFeedLimit     = 500
 )
 
+// Page sizes of /roku/search-feed.json. Roku's crawler walks nextPageUrl
+// links through the whole catalogue (250 MB cap per page), so pages are big:
+// ~0.7 KB per asset puts the default near 7 MB and the cap near 35 MB.
+const (
+	defaultSearchLimit = 10000
+	maxSearchLimit     = 50000
+)
+
 // feedCacheControl lets Bunny and browsers hold a page for five minutes; a
 // listing rendered in the meantime shows up on the next refresh.
 const feedCacheControl = "public, max-age=300"
@@ -65,6 +73,7 @@ func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *sl
 	mux := http.NewServeMux()
 	s.mux = mux
 	mux.HandleFunc("GET /roku/feed.json", s.handleFeed)
+	mux.HandleFunc("GET /roku/search-feed.json", s.handleSearchFeed)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
 	if publicAPI != nil {
@@ -115,7 +124,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	limit, after, err := parseFeedParams(r.URL.Query())
+	limit, after, err := parseFeedParams(r.URL.Query(), defaultFeedLimit, maxFeedLimit)
 	if err != nil {
 		writeFeedError(w, http.StatusBadRequest, err.Error())
 		return
@@ -144,17 +153,47 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// parseFeedParams reads ?limit= (1..maxFeedLimit, default defaultFeedLimit;
-// above the cap is clamped, not refused) and ?cursor= (a token from a
-// previous page's nextCursor).
-func parseFeedParams(q url.Values) (int, *property.FeedKey, error) {
-	limit := defaultFeedLimit
+// handleSearchFeed serves the Roku Search feed: the same published listings
+// as the Direct Publisher feed, in the catalogue format Roku ingests for its
+// home-screen search, paged with the same cursor. Roku follows nextPageUrl
+// from the first page through the last, so the first page is the URL to
+// register in the developer dashboard.
+func (s *Server) handleSearchFeed(w http.ResponseWriter, r *http.Request) {
+	limit, after, err := parseFeedParams(r.URL.Query(), defaultSearchLimit, maxSearchLimit)
+	if err != nil {
+		writeFeedError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	props, hasMore, err := s.repo.ListReadyForFeed(r.Context(), limit, after)
+	if err != nil {
+		s.log.Error("search feed query failed", "error", err)
+		writeFeedError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	doc := feed.BuildSearch(props, s.now())
+	if hasMore && len(props) > 0 {
+		doc.NextPageURL = nextPageURL(r, feed.EncodeCursor(&props[len(props)-1]), limit)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", feedCacheControl)
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
+		s.log.Error("search feed encode failed", "error", err)
+	}
+}
+
+// parseFeedParams reads ?limit= (1..maxLimit, default defaultLimit; above
+// the cap is clamped, not refused) and ?cursor= (a token from a previous
+// page's nextCursor / nextPageUrl).
+func parseFeedParams(q url.Values, defaultLimit, maxLimit int) (int, *property.FeedKey, error) {
+	limit := defaultLimit
 	if raw := q.Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 {
 			return 0, nil, errors.New("limit must be a positive integer")
 		}
-		limit = min(n, maxFeedLimit)
+		limit = min(n, maxLimit)
 	}
 	var after *property.FeedKey
 	if tok := q.Get("cursor"); tok != "" {

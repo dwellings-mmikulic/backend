@@ -332,3 +332,65 @@ func TestFeed_LiveEntryOnlyOnTheFirstPage(t *testing.T) {
 		t.Errorf("second page liveFeeds = %d, want none", len(second.LiveFeeds))
 	}
 }
+
+func TestSearchFeed_PagesWithNextPageURL(t *testing.T) {
+	repo := &stubFeed{props: listings(7)}
+	s := newFeedServer(repo)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/roku/search-feed.json?limit=5", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	s.srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d:\n%s", rec.Code, rec.Body.String())
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != feedCacheControl {
+		t.Errorf("Cache-Control = %q", cc)
+	}
+	var page feed.SearchFeed
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v\n%s", err, rec.Body.String())
+	}
+	if page.Version != "1" || len(page.Assets) != 5 || page.Assets[0].ID != "1" || page.Assets[4].ID != "5" {
+		t.Errorf("page = version %s, %d assets, first %s", page.Version, len(page.Assets), page.Assets[0].ID)
+	}
+	if !strings.HasPrefix(page.NextPageURL, "https://api.example.com/roku/search-feed.json?cursor=") || !strings.HasSuffix(page.NextPageURL, "&limit=5") {
+		t.Fatalf("nextPageUrl = %q", page.NextPageURL)
+	}
+	if strings.Contains(rec.Body.String(), "liveFeeds") || strings.Contains(rec.Body.String(), "shortFormVideos") {
+		t.Errorf("search feed must not carry Direct Publisher keys:\n%s", rec.Body.String())
+	}
+
+	// Follow it: the last two, and no further link.
+	u, _ := url.Parse(page.NextPageURL)
+	rec = httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, u.RequestURI(), nil))
+	var last feed.SearchFeed
+	if err := json.Unmarshal(rec.Body.Bytes(), &last); err != nil {
+		t.Fatal(err)
+	}
+	if len(last.Assets) != 2 || last.Assets[0].ID != "6" || last.NextPageURL != "" {
+		t.Errorf("last page = %d assets starting %s, nextPageUrl %q", len(last.Assets), last.Assets[0].ID, last.NextPageURL)
+	}
+	if strings.Contains(rec.Body.String(), "nextPageUrl") {
+		t.Errorf("last page must omit nextPageUrl, not blank it:\n%s", rec.Body.String())
+	}
+	if repo.calls[0].limit != 5 || repo.calls[1].after == nil || repo.calls[1].after.ID != 5 {
+		t.Errorf("repo calls = %+v", repo.calls)
+	}
+}
+
+func TestSearchFeed_DefaultLimitIsLarge(t *testing.T) {
+	repo := &stubFeed{props: listings(1)}
+	s := newFeedServer(repo)
+	rec := httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/roku/search-feed.json", nil))
+	if rec.Code != http.StatusOK || repo.calls[0].limit != defaultSearchLimit {
+		t.Errorf("status %d, limit %d, want 200 and %d", rec.Code, repo.calls[0].limit, defaultSearchLimit)
+	}
+	rec = httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/roku/search-feed.json?cursor=nope", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bad cursor = %d, want 400", rec.Code)
+	}
+}
