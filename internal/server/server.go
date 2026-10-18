@@ -5,8 +5,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	httpSwagger "github.com/swaggo/http-swagger"
@@ -17,10 +20,24 @@ import (
 	"github.com/dwellingtw/backend/internal/property"
 )
 
-// feedSource provides the listings whose videos are ready.
+// feedSource provides one page of the listings whose videos are ready, newest
+// first, continuing after the keyset position when it is set, and whether a
+// further page exists.
 type feedSource interface {
-	ListReadyForFeed(ctx context.Context) ([]property.Property, error)
+	ListReadyForFeed(ctx context.Context, limit int, after *property.FeedKey) ([]property.Property, bool, error)
 }
+
+// Page sizes of /roku/feed.json. The whole catalogue is close to a million
+// listings (hundreds of MB as one document), so the feed is always paged;
+// the Roku app walks nextPage links as the viewer scrolls.
+const (
+	defaultFeedLimit = 100
+	maxFeedLimit     = 500
+)
+
+// feedCacheControl lets Bunny and browsers hold a page for five minutes; a
+// listing rendered in the meantime shows up on the next refresh.
+const feedCacheControl = "public, max-age=300"
 
 // Server serves the Roku feed.
 type Server struct {
@@ -98,21 +115,80 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	props, err := s.repo.ListReadyForFeed(r.Context())
+	limit, after, err := parseFeedParams(r.URL.Query())
+	if err != nil {
+		writeFeedError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	props, hasMore, err := s.repo.ListReadyForFeed(r.Context(), limit, after)
 	if err != nil {
 		s.log.Error("feed query failed", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeFeedError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	doc := feed.Build(s.providerName, props, s.now())
-	s.addLiveFeed(r.Context(), &doc, props)
+	if after == nil {
+		// The live channel is part of the catalogue, not of every page.
+		s.addLiveFeed(r.Context(), &doc, props)
+	}
+	if hasMore && len(props) > 0 {
+		doc.NextCursor = feed.EncodeCursor(&props[len(props)-1])
+		doc.NextPage = nextPageURL(r, doc.NextCursor, limit)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(doc); err != nil {
+	w.Header().Set("Cache-Control", feedCacheControl)
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
 		s.log.Error("feed encode failed", "error", err)
 	}
+}
+
+// parseFeedParams reads ?limit= (1..maxFeedLimit, default defaultFeedLimit;
+// above the cap is clamped, not refused) and ?cursor= (a token from a
+// previous page's nextCursor).
+func parseFeedParams(q url.Values) (int, *property.FeedKey, error) {
+	limit := defaultFeedLimit
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return 0, nil, errors.New("limit must be a positive integer")
+		}
+		limit = min(n, maxFeedLimit)
+	}
+	var after *property.FeedKey
+	if tok := q.Get("cursor"); tok != "" {
+		key, err := feed.DecodeCursor(tok)
+		if err != nil {
+			return 0, nil, err
+		}
+		after = key
+	}
+	return limit, after, nil
+}
+
+// nextPageURL is the absolute URL of the following page, built from the
+// request as nginx forwarded it (X-Forwarded-Proto + Host), so the Roku app
+// can follow it without assembling anything.
+func nextPageURL(r *http.Request, cursor string, limit int) string {
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+	}
+	q := url.Values{}
+	q.Set("cursor", cursor)
+	q.Set("limit", strconv.Itoa(limit))
+	return scheme + "://" + r.Host + r.URL.Path + "?" + q.Encode()
+}
+
+func writeFeedError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // addLiveFeed appends the linear channel to doc when it is configured, has

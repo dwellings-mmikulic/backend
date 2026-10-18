@@ -27,6 +27,11 @@ ALTER TABLE properties ADD COLUMN IF NOT EXISTS video_rendered_at   TIMESTAMPTZ;
 ALTER TABLE properties ADD COLUMN IF NOT EXISTS video_duration_secs INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_properties_video_status ON properties (video_status);
+-- The Roku feed pages the published listings newest render first; this
+-- covers the keyset ordering so every page is an index range scan.
+CREATE INDEX IF NOT EXISTS idx_properties_feed
+    ON properties (video_rendered_at DESC, id DESC)
+    WHERE video_status = 'ready' AND video_url IS NOT NULL;
 
 -- Enrichment columns: fetched once per property from the Zillow
 -- property-details API, then served from the DB forever (see
