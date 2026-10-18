@@ -161,21 +161,14 @@ SELECT zpid, image_urls FROM properties
 	return out, nil
 }
 
-// ListReadyForFeed returns the published listings (see publishedPredicate),
-// newest video first, for the Roku feed.
-func (r *Repository) ListReadyForFeed(ctx context.Context) ([]Property, error) {
-	const q = `
-SELECT zpid, sale_price, address, city, state, zip,
-       home_size_sqft, lot_size_sqft, bedrooms, bathrooms, detail_url,
-       image_urls, COALESCE(video_url,''), COALESCE(video_duration_secs,0),
-       video_rendered_at
-  FROM properties
- WHERE ` + publishedPredicate + `
- ORDER BY video_rendered_at DESC NULLS LAST`
-
-	rows, err := r.pool.Query(ctx, q)
+// ListReadyForFeed returns one page of the Roku feed: up to limit published
+// listings (see publishedPredicate), newest video first, continuing after the
+// keyset position when after is set, and whether another page exists.
+func (r *Repository) ListReadyForFeed(ctx context.Context, limit int, after *FeedKey) ([]Property, bool, error) {
+	q, args := buildFeedQuery(limit, after)
+	rows, err := r.pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list ready for feed: %w", err)
+		return nil, false, fmt.Errorf("list ready for feed: %w", err)
 	}
 	defer rows.Close()
 
@@ -184,20 +177,26 @@ SELECT zpid, sale_price, address, city, state, zip,
 		var p Property
 		var renderedAt *time.Time
 		if err := rows.Scan(
-			&p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
+			&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 			&p.HomeSizeSqft, &p.LotSizeSqft, &p.Bedrooms, &p.Bathrooms, &p.DetailURL,
 			&p.ImageURLs, &p.VideoURL, &p.VideoDurationSecs, &renderedAt,
 		); err != nil {
-			return nil, fmt.Errorf("scan feed row: %w", err)
+			return nil, false, fmt.Errorf("scan feed row: %w", err)
 		}
 		p.VideoStatus = VideoReady
 		p.VideoRenderedAt = renderedAt
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate feed rows: %w", err)
+		return nil, false, fmt.Errorf("iterate feed rows: %w", err)
 	}
-	return out, nil
+
+	hasMore := false
+	if len(out) > limit {
+		out = out[:limit]
+		hasMore = true
+	}
+	return out, hasMore, nil
 }
 
 // Exists reports whether a property with the given zpid is already stored.

@@ -299,7 +299,14 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
 
 ### HTTP endpoints
 
-- `GET /roku/feed.json` — Roku Direct Publisher feed of all `ready` videos.
+- `GET /roku/feed.json` — Roku Direct Publisher feed of the `ready` videos,
+  one page at a time: `?limit=` (1–500, default 100) listings, newest render
+  first. A page with more behind it carries `nextCursor` (opaque token, pass
+  back as `?cursor=`) and `nextPage` (the absolute URL of the following page);
+  both are absent on the last page. The `liveFeeds` entry is on the first
+  page only. The Direct Publisher spec has no paging of its own (it expects
+  one file), so these two fields are ours; the Dwellings Roku app follows
+  `nextPage`. Pages are cacheable for five minutes.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
 - `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json` — linear channels, see [Linear channels](#linear-channels).

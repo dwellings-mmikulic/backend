@@ -144,3 +144,33 @@ func buildCountQuery(f Filter) (string, []any) {
 	where, args := buildWhere(f, false)
 	return "SELECT COUNT(*) FROM properties" + where, args
 }
+
+// FeedKey is the keyset position of the last row of the previous Roku feed
+// page: the feed is ordered newest render first, with id as the tiebreaker.
+type FeedKey struct {
+	RenderedAt time.Time
+	ID         int64
+}
+
+// feedColumns are what the Roku feed needs per listing; id and
+// video_rendered_at feed the next-page cursor.
+const feedColumns = `id, zpid, sale_price, address, city, state, zip,
+       home_size_sqft, lot_size_sqft, bedrooms, bathrooms, detail_url,
+       image_urls, COALESCE(video_url,''), COALESCE(video_duration_secs,0),
+       video_rendered_at`
+
+// buildFeedQuery renders one page of the Roku feed: published listings,
+// newest render first, continuing after the keyset position when after is
+// set. It asks for limit+1 rows so the caller can tell whether a next page
+// exists without a second query. idx_properties_feed covers the whole
+// ordering, so each page is an index range scan however deep it is.
+func buildFeedQuery(limit int, after *FeedKey) (string, []any) {
+	q := "SELECT " + feedColumns + " FROM properties WHERE " + publishedPredicate
+	var args []any
+	if after != nil {
+		args = append(args, after.RenderedAt, after.ID)
+		q += " AND (video_rendered_at, id) < ($1, $2)"
+	}
+	q += fmt.Sprintf(" ORDER BY video_rendered_at DESC, id DESC LIMIT %d", limit+1)
+	return q, args
+}

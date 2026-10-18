@@ -142,3 +142,33 @@ func TestBuildCountQuery_IgnoresKeysetAndLimit(t *testing.T) {
 		t.Errorf("args = %v, want just city", args)
 	}
 }
+
+func TestBuildFeedQuery_FirstPage(t *testing.T) {
+	q, args := buildFeedQuery(100, nil)
+	if !strings.Contains(q, publishedPredicate) {
+		t.Errorf("feed query must keep the published predicate:\n%s", q)
+	}
+	if !strings.Contains(q, "ORDER BY video_rendered_at DESC, id DESC") {
+		t.Errorf("feed query must order newest render first with id as tiebreaker:\n%s", q)
+	}
+	if !strings.HasSuffix(q, "LIMIT 101") {
+		t.Errorf("feed query must ask for limit+1 rows to detect the next page:\n%s", q)
+	}
+	if strings.Contains(q, "$1") || len(args) != 0 {
+		t.Errorf("first page takes no keyset args: %q %v", q, args)
+	}
+}
+
+func TestBuildFeedQuery_Keyset(t *testing.T) {
+	at := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	q, args := buildFeedQuery(50, &FeedKey{RenderedAt: at, ID: 77})
+	if !strings.Contains(q, "(video_rendered_at, id) < ($1, $2)") {
+		t.Errorf("keyset predicate missing:\n%s", q)
+	}
+	if len(args) != 2 || args[0] != at || args[1] != int64(77) {
+		t.Errorf("args = %v, want [%v 77]", args, at)
+	}
+	if !strings.HasSuffix(q, "LIMIT 51") {
+		t.Errorf("limit wrong:\n%s", q)
+	}
+}

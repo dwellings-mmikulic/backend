@@ -10,13 +10,19 @@ import (
 	"github.com/dwellingtw/backend/internal/property"
 )
 
-// Feed is the top-level Roku Direct Publisher document.
+// Feed is the top-level Roku Direct Publisher document, served one page at a
+// time. The Direct Publisher spec knows no paging (the feed is a single file
+// there), so the page links are our own extension: NextCursor is the opaque
+// token for the following page and NextPage the ready-made URL of it; both
+// are omitted on the last page. The Dwellings Roku app follows NextPage.
 type Feed struct {
 	ProviderName    string           `json:"providerName"`
 	Language        string           `json:"language"`
 	LastUpdated     string           `json:"lastUpdated"`
 	ShortFormVideos []ShortFormVideo `json:"shortFormVideos"`
 	LiveFeeds       []LiveFeed       `json:"liveFeeds,omitempty"`
+	NextCursor      string           `json:"nextCursor,omitempty"`
+	NextPage        string           `json:"nextPage,omitempty"`
 }
 
 // ShortFormVideo is one playable listing entry.
