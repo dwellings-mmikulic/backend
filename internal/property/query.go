@@ -57,19 +57,13 @@ type Filter struct {
 // predicate, so they can never disagree about what is public.
 const publishedPredicate = "video_status = 'ready' AND video_url IS NOT NULL"
 
-// hlsURLExpr is the current render's VOD playlist URL, or ” when the
-// listing has no HLS clip for the video it is showing. (zpid, content_hash)
-// is unique on video_hls, so the subquery yields at most one row.
-const hlsURLExpr = `COALESCE((SELECT h.base_url || '/index.m3u8' FROM video_hls h
-         WHERE h.zpid = properties.zpid AND h.content_hash = properties.video_content_hash), '')`
-
 // listColumns are the columns the browse endpoint needs; id and created_at
 // feed the next-page cursor. COALESCE guards pre-enrichment NULLs on columns
 // that scan into non-pointer Go fields.
 const listColumns = `id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
        COALESCE(state,''), COALESCE(zip,''), COALESCE(bedrooms,0),
        COALESCE(bathrooms,0), COALESCE(home_size_sqft,0), property_type,
-       image_urls, COALESCE(video_url,''), ` + hlsURLExpr + `, created_at`
+       image_urls, COALESCE(video_url,''), created_at`
 
 // buildWhere renders the published predicate, the filter and optionally the
 // keyset predicate as a WHERE clause with 1-based positional args.

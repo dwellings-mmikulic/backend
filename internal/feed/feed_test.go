@@ -58,28 +58,6 @@ func TestBuild_GoldenShape(t *testing.T) {
 	}
 }
 
-func TestBuild_PrefersHLSOverMP4(t *testing.T) {
-	props := []property.Property{
-		{ZPID: "1", Address: "A", SalePrice: 1, VideoDurationSecs: 30,
-			VideoURL: "https://cdn/videos/1.mp4",
-			HLSURL:   "https://cdn/hls/v1/1/aaaaaaaa/index.m3u8"},
-		{ZPID: "2", Address: "B", SalePrice: 1, VideoDurationSecs: 30,
-			VideoURL: "https://cdn/videos/2.mp4"},
-	}
-	f := Build("X", props, time.Now())
-	if len(f.ShortFormVideos) != 2 {
-		t.Fatalf("want 2 videos, got %d", len(f.ShortFormVideos))
-	}
-	got := f.ShortFormVideos[0].Content.Videos[0]
-	if got.URL != "https://cdn/hls/v1/1/aaaaaaaa/index.m3u8" || got.VideoType != "HLS" {
-		t.Errorf("listing with HLS: rendition = %+v, want the HLS playlist", got)
-	}
-	got = f.ShortFormVideos[1].Content.Videos[0]
-	if got.URL != "https://cdn/videos/2.mp4" || got.VideoType != "MP4" {
-		t.Errorf("listing without HLS: rendition = %+v, want the MP4 fallback", got)
-	}
-}
-
 func TestBuild_SkipsMissingVideoURL(t *testing.T) {
 	props := []property.Property{
 		{ZPID: "1", VideoURL: ""},

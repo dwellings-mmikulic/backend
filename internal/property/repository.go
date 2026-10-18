@@ -165,15 +165,13 @@ SELECT zpid, image_urls FROM properties
 // newest video first, for the Roku feed.
 func (r *Repository) ListReadyForFeed(ctx context.Context) ([]Property, error) {
 	const q = `
-SELECT p.zpid, p.sale_price, p.address, p.city, p.state, p.zip,
-       p.home_size_sqft, p.lot_size_sqft, p.bedrooms, p.bathrooms, p.detail_url,
-       p.image_urls, COALESCE(p.video_url,''),
-       COALESCE(h.base_url || '/index.m3u8', ''),
-       COALESCE(p.video_duration_secs,0), p.video_rendered_at
-  FROM properties p
-  LEFT JOIN video_hls h ON h.zpid = p.zpid AND h.content_hash = p.video_content_hash
- WHERE p.` + publishedPredicate + `
- ORDER BY p.video_rendered_at DESC NULLS LAST`
+SELECT zpid, sale_price, address, city, state, zip,
+       home_size_sqft, lot_size_sqft, bedrooms, bathrooms, detail_url,
+       image_urls, COALESCE(video_url,''), COALESCE(video_duration_secs,0),
+       video_rendered_at
+  FROM properties
+ WHERE ` + publishedPredicate + `
+ ORDER BY video_rendered_at DESC NULLS LAST`
 
 	rows, err := r.pool.Query(ctx, q)
 	if err != nil {
@@ -188,7 +186,7 @@ SELECT p.zpid, p.sale_price, p.address, p.city, p.state, p.zip,
 		if err := rows.Scan(
 			&p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 			&p.HomeSizeSqft, &p.LotSizeSqft, &p.Bedrooms, &p.Bathrooms, &p.DetailURL,
-			&p.ImageURLs, &p.VideoURL, &p.HLSURL, &p.VideoDurationSecs, &renderedAt,
+			&p.ImageURLs, &p.VideoURL, &p.VideoDurationSecs, &renderedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan feed row: %w", err)
 		}
@@ -240,7 +238,7 @@ func (r *Repository) List(ctx context.Context, f Filter) ([]Property, int, bool,
 		if err := rows.Scan(
 			&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 			&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft, &p.PropertyType,
-			&p.ImageURLs, &p.VideoURL, &p.HLSURL, &p.CreatedAt,
+			&p.ImageURLs, &p.VideoURL, &p.CreatedAt,
 		); err != nil {
 			return nil, 0, false, fmt.Errorf("scan property row: %w", err)
 		}
@@ -266,7 +264,7 @@ SELECT id, zpid, COALESCE(sale_price,0), address, COALESCE(city,''),
        COALESCE(state,''), COALESCE(zip,''), COALESCE(bedrooms,0),
        COALESCE(bathrooms,0), COALESCE(home_size_sqft,0),
        COALESCE(lot_size_sqft,0), COALESCE(detail_url,''), image_urls,
-       COALESCE(video_url,''), ` + hlsURLExpr + `, video_status,
+       COALESCE(video_url,''), video_status,
        property_type, description, year_built, heating, cooling, garage,
        hoa_fee_monthly, mls_number, listing_status,
        agent_name, agent_phone, agent_brokerage, latitude, longitude,
@@ -295,7 +293,7 @@ func (r *Repository) getOne(ctx context.Context, q, zpid string) (*Property, err
 		&p.ID, &p.ZPID, &p.SalePrice, &p.Address, &p.City, &p.State, &p.Zip,
 		&p.Bedrooms, &p.Bathrooms, &p.HomeSizeSqft,
 		&p.LotSizeSqft, &p.DetailURL, &p.ImageURLs,
-		&p.VideoURL, &p.HLSURL, &p.VideoStatus,
+		&p.VideoURL, &p.VideoStatus,
 		&p.PropertyType, &p.Description, &p.YearBuilt, &p.Heating, &p.Cooling, &p.Garage,
 		&p.HOAFeeMonthly, &p.MLSNumber, &p.ListingStatus,
 		&p.AgentName, &p.AgentPhone, &p.AgentBrokerage, &p.Latitude, &p.Longitude,

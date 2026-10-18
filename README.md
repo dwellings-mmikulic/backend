@@ -52,8 +52,7 @@ already has a `ready` one with an unchanged content hash):
 ```
 photos → ffmpeg (scale-to-cover 1920×1080, lower-third price/address/facts
 overlay, QR to the Zillow listing, music bed) → upload videos/<zpid>.mp4 to
-Bunny → store video_url + status. The Roku feed and the API hand out the
-listing's HLS playlist (below) once it exists, the MP4 only as a fallback.
+Bunny → store video_url + status.
 ```
 
 - Pacing: every photo for `VIDEO_SECONDS_PER_PHOTO` seconds (default 4).

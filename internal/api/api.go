@@ -111,7 +111,7 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 // handleDetail serves the detail endpoint.
 //
 //	@Summary		Get property detail
-//	@Description	Full detail-screen payload for one listing, addressed by its Zillow property ID. video_url is always set and is an HLS playlist (index.m3u8) for current renders, an MP4 for the few without one; a listing whose video is still being processed answers 404 until it is ready.
+//	@Description	Full detail-screen payload for one listing, addressed by its Zillow property ID. video_url is always set: a listing whose video is still being processed answers 404 until it is ready.
 //	@Description	map_image_url (light) and map_image_dark_url (dark) are generated on first view; either may be null on the very first request for a listing and populated shortly after.
 //	@Tags			properties
 //	@Produce		json
