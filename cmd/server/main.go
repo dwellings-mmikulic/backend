@@ -212,7 +212,7 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 	publicAPI := api.New(repo, mapEnsurerOrNil(mapSvc), log)
 	publicAPI.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
 	log.Info("ad tags", "pre_roll", cfg.Ads.PrerollURL != "", "mid_roll", cfg.Ads.MidrollURL != "")
-	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), "DwellingTV", repo, publicAPI, log)
+	httpSrv := server.New(net.JoinHostPort("", cfg.HTTPPort), repo, publicAPI, log)
 	httpSrv.Mount(subscriber.NewHandler(subscriber.NewRepository(pool), log))
 	if cfg.Linear.Enabled {
 		linearRepo := linear.NewRepository(pool)
@@ -235,9 +235,6 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 			log.Info("personal feeds enabled", "mobile_base_url", cfg.Feed.MobileBaseURL, "qr_show_s", cfg.Feed.QRShowSeconds, "qr_every_s", cfg.Feed.QREverySeconds)
 		}
 		httpSrv.Mount(h)
-		if cfg.PublicBaseURL != "" {
-			httpSrv.SetLiveFeed(cfg.PublicBaseURL+"/channels/master.m3u8", cfg.Linear.LiveThumbnailURL, svc.HasContent)
-		}
 		log.Info("linear channels enabled", "lineup_hours", cfg.Linear.LineupHours, "min_scope_clips", cfg.Linear.MinScopeClips,
 			"bumper_interval_min", cfg.Linear.BumperIntervalMinutes, "ad_break_interval_min", cfg.Linear.AdBreakIntervalMinutes)
 		warnLinearSetup(ctx, cfg, linearRepo, renderer, log)

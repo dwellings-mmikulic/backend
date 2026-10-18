@@ -1,113 +1,43 @@
 package feed
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/dwellingtw/backend/internal/property"
 )
 
-func TestBuild_GoldenShape(t *testing.T) {
-	rendered := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC)
-	props := []property.Property{
-		{
-			ZPID: "43590635", SalePrice: 310000, Address: "23265 McBurney Ave",
-			City: "Punta Gorda", State: "FL", Bedrooms: 3, Bathrooms: 3, HomeSizeSqft: 1779,
-			ImageURLs:         []string{"https://cdn/properties/43590635/0.jpg"},
-			VideoURL:          "https://cdn/videos/43590635.mp4",
-			VideoDurationSecs: 120,
-			VideoRenderedAt:   &rendered,
-		},
+func TestTitle(t *testing.T) {
+	tests := []struct {
+		name string
+		p    property.Property
+		want string
+	}{
+		{"price and address", property.Property{SalePrice: 310000, Address: "23265 McBurney Ave"}, "$310,000 · 23265 McBurney Ave"},
+		{"no price", property.Property{Address: "1 Main St"}, "Contact for price · 1 Main St"},
+		{"no address", property.Property{SalePrice: 1250000}, "$1,250,000"},
 	}
-	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
-	f := Build("DwellingTV", props, now)
-
-	if f.ProviderName != "DwellingTV" || f.Language != "en" {
-		t.Errorf("header wrong: %+v", f)
-	}
-	if f.LastUpdated != "2026-06-20T12:00:00Z" {
-		t.Errorf("lastUpdated = %s", f.LastUpdated)
-	}
-	if len(f.ShortFormVideos) != 1 {
-		t.Fatalf("want 1 video, got %d", len(f.ShortFormVideos))
-	}
-	v := f.ShortFormVideos[0]
-	if v.ID != "43590635" {
-		t.Errorf("id = %s", v.ID)
-	}
-	if v.Title != "$310,000 · 23265 McBurney Ave" {
-		t.Errorf("title = %q", v.Title)
-	}
-	if v.ShortDescription != "3 bd · 3 ba · 1,779 sqft — Punta Gorda, FL" {
-		t.Errorf("shortDescription = %q", v.ShortDescription)
-	}
-	if v.Thumbnail != "https://cdn/properties/43590635/0.jpg" {
-		t.Errorf("thumbnail = %q", v.Thumbnail)
-	}
-	if v.ReleaseDate != "2026-06-18" {
-		t.Errorf("releaseDate = %q", v.ReleaseDate)
-	}
-	if v.Content.Duration != 120 || len(v.Content.Videos) != 1 {
-		t.Errorf("content wrong: %+v", v.Content)
-	}
-	if v.Content.Videos[0].URL != "https://cdn/videos/43590635.mp4" ||
-		v.Content.Videos[0].Quality != "HD" || v.Content.Videos[0].VideoType != "MP4" {
-		t.Errorf("video rendition wrong: %+v", v.Content.Videos[0])
+	for _, tt := range tests {
+		if got := title(&tt.p); got != tt.want {
+			t.Errorf("%s: title = %q, want %q", tt.name, got, tt.want)
+		}
 	}
 }
 
-func TestBuild_SkipsMissingVideoURL(t *testing.T) {
-	props := []property.Property{
-		{ZPID: "1", VideoURL: ""},
-		{ZPID: "2", VideoURL: "https://cdn/videos/2.mp4", VideoDurationSecs: 30},
+func TestShortDescription(t *testing.T) {
+	tests := []struct {
+		name string
+		p    property.Property
+		want string
+	}{
+		{"all facts", property.Property{Bedrooms: 3, Bathrooms: 2.5, HomeSizeSqft: 1779, City: "Punta Gorda", State: "FL"}, "3 bd · 2.5 ba · 1,779 sqft — Punta Gorda, FL"},
+		{"whole baths", property.Property{Bedrooms: 2, Bathrooms: 2}, "2 bd · 2 ba"},
+		{"place only", property.Property{City: "Austin", State: "TX"}, "Austin, TX"},
+		{"state only", property.Property{State: "TX"}, "TX"},
+		{"nothing", property.Property{}, ""},
 	}
-	f := Build("DwellingTV", props, time.Now())
-	if len(f.ShortFormVideos) != 1 || f.ShortFormVideos[0].ID != "2" {
-		t.Errorf("expected only id=2, got %+v", f.ShortFormVideos)
-	}
-}
-
-func TestBuild_ValidJSON(t *testing.T) {
-	f := Build("DwellingTV", []property.Property{
-		{ZPID: "2", Address: "X", SalePrice: 100000, VideoURL: "https://cdn/v.mp4", VideoDurationSecs: 30},
-	}, time.Now())
-	b, err := json.Marshal(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !json.Valid(b) {
-		t.Error("invalid json")
-	}
-}
-
-func TestAddLive_AppendsRokuLiveFeed(t *testing.T) {
-	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
-	f := Build("DwellingTV", nil, now)
-	f.AddLive("https://api.example.com/channels/master.m3u8", "https://cdn/thumb.jpg", now)
-
-	if len(f.LiveFeeds) != 1 {
-		t.Fatalf("liveFeeds = %d, want 1", len(f.LiveFeeds))
-	}
-	lf := f.LiveFeeds[0]
-	if lf.ID != "dwellingtv-live" || lf.Title != "DwellingTV Live" || lf.Thumbnail != "https://cdn/thumb.jpg" {
-		t.Errorf("live feed = %+v", lf)
-	}
-	if lf.Content.DateAdded != "2026-08-25T12:00:00Z" {
-		t.Errorf("dateAdded = %s", lf.Content.DateAdded)
-	}
-	v := lf.Content.Videos[0]
-	if v.URL != "https://api.example.com/channels/master.m3u8" || v.VideoType != "HLS" || v.Quality != "HD" {
-		t.Errorf("video = %+v", v)
-	}
-	out, _ := json.Marshal(f)
-	if !strings.Contains(string(out), `"liveFeeds":[{"id":"dwellingtv-live"`) {
-		t.Errorf("json = %s", out)
-	}
-	// Without AddLive the key is omitted entirely (Roku rejects empty arrays).
-	out, _ = json.Marshal(Build("DwellingTV", nil, now))
-	if strings.Contains(string(out), "liveFeeds") {
-		t.Errorf("json without live feed must omit liveFeeds: %s", out)
+	for _, tt := range tests {
+		if got := shortDescription(&tt.p); got != tt.want {
+			t.Errorf("%s: shortDescription = %q, want %q", tt.name, got, tt.want)
+		}
 	}
 }

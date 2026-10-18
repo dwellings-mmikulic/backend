@@ -10,7 +10,7 @@ Continuously it:
 2. Downloads each listing's images and uploads them to **Bunny CDN** storage.
 3. Upserts the property (with CDN image URLs) into **PostgreSQL**.
 4. Renders a 16:9 1080p **listing video** (slideshow + facts overlay + QR + music),
-   uploads it to **Bunny CDN**, and serves a **Roku Direct Publisher JSON feed**
+   uploads it to **Bunny CDN**, and serves a **public listings API** plus a **Roku Search feed**
    so a Roku channel ("DwellingTV") can play them.
 
 ## Architecture
@@ -30,11 +30,11 @@ internal/zillow         OpenWebNinja Zillow API client
 internal/bunny          Bunny CDN storage upload client
 internal/qrcode         QR PNG generation (listing detail URL)
 internal/video          ffmpeg slideshow renderer (overlays, QR, music)
-internal/feed           Roku Direct Publisher feed builder
+internal/feed           Roku Search feed builder + page cursor
 internal/api            public read-only listings API (browse + detail)
 internal/locationiq     LocationIQ geocoding + static map client
 internal/propertymap    on-demand property map generation
-internal/server         HTTP server: /roku/feed.json, /api/v1/properties*, /healthz
+internal/server         HTTP server: /api/v1/properties*, /roku/search-feed.json, /healthz
 internal/scheduler      the worker loops: discovery (search ZIPs → queue),
                         media (photos → upsert → render → HLS), details
 internal/zipcode        ZIP rotation with atomic, expiring claims
@@ -234,12 +234,7 @@ network, their personal feed in place of the channel, with continuous HLS
 counters; without `ip=`, or before the page was ever opened, the channel is
 served as advertised.
 
-With `PUBLIC_BASE_URL` set, `/roku/feed.json` also lists the national channel
-as a Roku `liveFeeds` entry. Its poster is `LINEAR_LIVE_THUMBNAIL_URL`; when
-that is empty the first ready listing's image is used, and when there is no
-image either the entry is omitted (Roku requires a thumbnail). The entry is
-also left out while nothing has been segmented yet, so the feed never points
-at an empty stream. Set `LINEAR_ENABLED=false` to turn all of this off.
+Set `LINEAR_ENABLED=false` to turn all of this off.
 
 At startup the server warns when the channels are enabled but cannot work:
 `VIDEO_ENABLED=false` (nothing will be segmented), an empty `PUBLIC_BASE_URL`
@@ -299,22 +294,17 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
 
 ### HTTP endpoints
 
-- `GET /roku/feed.json` — Roku Direct Publisher feed of the `ready` videos,
-  one page at a time: `?limit=` (1–500, default 100) listings, newest render
-  first. A page with more behind it carries `nextCursor` (opaque token, pass
-  back as `?cursor=`) and `nextPage` (the absolute URL of the following page);
-  both are absent on the last page. The `liveFeeds` entry is on the first
-  page only. The Direct Publisher spec has no paging of its own (it expects
-  one file), so these two fields are ours; the Dwellings Roku app follows
-  `nextPage`. Pages are cacheable for five minutes.
-- `GET /roku/search-feed.json` — the same listings as a [Roku Search
+- `GET /roku/search-feed.json` — the `ready` listings as a [Roku Search
   feed](https://developer.roku.com/docs/specs/search/search-feed.md) (spec
-  version 1): `assets[]` of `type: "shortForm"`, id and `playId` both the
-  zpid (Roku hands `playId` back to the app as the deep link `contentId`,
+  version 1), the one Roku-facing URL (the Roku app itself reads the API):
+  `assets[]` of `type: "shortForm"`, id and `playId` both the zpid (Roku
+  hands `playId` back to the app as the deep link `contentId`,
   `mediaType=shortFormVideo`), genre `house/garden`, rating `USA_PR` `NR`,
-  main image = first photo, `license: free`, `quality: fhd`, US only. Paged
-  like the feed (`?limit=` 1–2,000, default 500, ~280 KB a page) but with the spec's own
-  root `nextPageUrl`, which Roku's crawler follows to the last page. Register
+  main image = first photo, `license: free`, `quality: fhd`, US only. Keyset
+  paged, newest render first: `?limit=` 1–2,000 (default 500, ~280 KB a
+  page) and `?cursor=`; the spec's root `nextPageUrl` carries the link, which
+  Roku's crawler follows to the last page; it is absent on the last page.
+  Pages are cacheable for five minutes. Register
   the first-page URL under *App → Search feeds* in the Roku developer
   dashboard, after running it through *Search feed validator* there.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
@@ -436,8 +426,7 @@ channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 `LINEAR_LINEUP_HOURS` (`6`), `LINEAR_MIN_SCOPE_CLIPS` (`20`),
 `LINEAR_EPG_HORIZON_HOURS` (`24`), `LINEAR_BUMPER_INTERVAL_MINUTES` (`5`; `0`
 = no QR bumper), `LINEAR_AD_BREAK_INTERVAL_MINUTES` (`10`; `0` = no cued ad
-breaks) and `LINEAR_LIVE_THUMBNAIL_URL` (empty — the poster of the
-Roku live entry; see [Linear channels](#linear-channels)).
+breaks).
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
 `VIEWER_RETENTION_DAYS` (`30`), `FREEIPAPI_URL`
