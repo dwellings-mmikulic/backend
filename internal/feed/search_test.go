@@ -97,7 +97,7 @@ func TestBuildSearch_EncodesAndDumps(t *testing.T) {
 		VideoURL: "https://cdn/videos/43590635.mp4", VideoDurationSecs: 120, VideoRenderedAt: &rendered,
 	}}
 	f := BuildSearch(props, rendered)
-	f.NextPageURL = "https://api.example.com/roku/search-feed.json?cursor=abc&limit=10000"
+	f.NextPageURL = "https://api.example.com/roku/search-feed.json?cursor=abc&limit=500"
 	b, err := json.Marshal(f)
 	if err != nil {
 		t.Fatal(err)

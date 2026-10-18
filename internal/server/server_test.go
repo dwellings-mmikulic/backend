@@ -380,7 +380,7 @@ func TestSearchFeed_PagesWithNextPageURL(t *testing.T) {
 	}
 }
 
-func TestSearchFeed_DefaultLimitIsLarge(t *testing.T) {
+func TestSearchFeed_DefaultLimitAndBadCursor(t *testing.T) {
 	repo := &stubFeed{props: listings(1)}
 	s := newFeedServer(repo)
 	rec := httptest.NewRecorder()
