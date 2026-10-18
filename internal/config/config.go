@@ -121,10 +121,11 @@ type Config struct {
 	Feed FeedConfig
 
 	// PublicBaseURL is this server's public origin (e.g. https://api.dwellings.tv)
-	// for absolute URLs in the Roku feed. Empty disables the feed's live entry.
+	// for the absolute URLs the linear channels hand out (resolve, personal
+	// feeds, the /tv/ page).
 	PublicBaseURL string
 
-	// HTTPPort is the port for the Roku feed + health HTTP server.
+	// HTTPPort is the port of the HTTP server (API, Roku Search feed, health).
 	HTTPPort string
 
 	// Concurrency limits for the collection cycle.
@@ -170,10 +171,6 @@ type LinearConfig struct {
 	LineupHours     int // max content per lineup version
 	MinScopeClips   int // a scope with fewer clips falls back to its parent area
 	EPGHorizonHours int // how far ahead the EPG materialises the schedule
-	// LiveThumbnailURL is the poster of the Roku liveFeeds entry. Empty
-	// borrows the first ready listing's image; with neither, the entry is
-	// omitted (Roku requires a thumbnail).
-	LiveThumbnailURL string
 	// BumperIntervalMinutes is how much content airs between two QR bumpers
 	// (see docs/superpowers/specs/2026-10-13-qr-bumper-design.md); 0 turns
 	// bumpers off for versions built from then on.
@@ -374,7 +371,6 @@ func Load() (*Config, error) {
 			LineupHours:            getenvInt("LINEAR_LINEUP_HOURS", 6),
 			MinScopeClips:          getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
 			EPGHorizonHours:        getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
-			LiveThumbnailURL:       strings.TrimSpace(getenv("LINEAR_LIVE_THUMBNAIL_URL", "")),
 			BumperIntervalMinutes:  getenvInt("LINEAR_BUMPER_INTERVAL_MINUTES", 5),
 			AdBreakIntervalMinutes: getenvInt("LINEAR_AD_BREAK_INTERVAL_MINUTES", 10),
 		},

@@ -1,131 +1,16 @@
-// Package feed builds a Roku Direct Publisher JSON feed from listing videos.
-// See: https://developer.roku.com/docs/specs/direct-publisher-feeds.md
+// Package feed renders the published listings for Roku: the Roku Search feed
+// (search.go) and the page cursor it is walked with (cursor.go). The Roku app
+// itself reads the listings API, not a feed.
 package feed
 
 import (
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/dwellingtw/backend/internal/property"
 )
 
-// Feed is the top-level Roku Direct Publisher document, served one page at a
-// time. The Direct Publisher spec knows no paging (the feed is a single file
-// there), so the page links are our own extension: NextCursor is the opaque
-// token for the following page and NextPage the ready-made URL of it; both
-// are omitted on the last page. The Dwellings Roku app follows NextPage.
-type Feed struct {
-	ProviderName    string           `json:"providerName"`
-	Language        string           `json:"language"`
-	LastUpdated     string           `json:"lastUpdated"`
-	ShortFormVideos []ShortFormVideo `json:"shortFormVideos"`
-	LiveFeeds       []LiveFeed       `json:"liveFeeds,omitempty"`
-	NextCursor      string           `json:"nextCursor,omitempty"`
-	NextPage        string           `json:"nextPage,omitempty"`
-}
-
-// ShortFormVideo is one playable listing entry.
-type ShortFormVideo struct {
-	ID               string   `json:"id"`
-	Title            string   `json:"title"`
-	ShortDescription string   `json:"shortDescription"`
-	Thumbnail        string   `json:"thumbnail"`
-	ReleaseDate      string   `json:"releaseDate"`
-	Content          Content  `json:"content"`
-	Tags             []string `json:"tags,omitempty"`
-}
-
-// Content holds the playable video info.
-type Content struct {
-	DateAdded string  `json:"dateAdded"`
-	Duration  int     `json:"duration"`
-	Videos    []Video `json:"videos"`
-}
-
-// Video is a single encoded rendition.
-type Video struct {
-	URL       string `json:"url"`
-	Quality   string `json:"quality"`
-	VideoType string `json:"videoType"`
-}
-
-// Build constructs the feed from ready listings. now is used for lastUpdated and
-// as a fallback date when a listing has no render timestamp.
-func Build(providerName string, props []property.Property, now time.Time) Feed {
-	f := Feed{
-		ProviderName:    providerName,
-		Language:        "en",
-		LastUpdated:     now.UTC().Format(time.RFC3339),
-		ShortFormVideos: make([]ShortFormVideo, 0, len(props)),
-	}
-
-	for i := range props {
-		p := &props[i]
-		if p.VideoURL == "" {
-			continue
-		}
-		added := now.UTC()
-		if p.VideoRenderedAt != nil {
-			added = p.VideoRenderedAt.UTC()
-		}
-		thumb := ""
-		if len(p.ImageURLs) > 0 {
-			thumb = p.ImageURLs[0]
-		}
-
-		f.ShortFormVideos = append(f.ShortFormVideos, ShortFormVideo{
-			ID:               p.ZPID,
-			Title:            title(p),
-			ShortDescription: shortDescription(p),
-			Thumbnail:        thumb,
-			ReleaseDate:      added.Format("2006-01-02"),
-			Content: Content{
-				DateAdded: added.Format(time.RFC3339),
-				Duration:  p.VideoDurationSecs,
-				Videos: []Video{{
-					URL:       p.VideoURL,
-					Quality:   "HD",
-					VideoType: "MP4",
-				}},
-			},
-			Tags: []string{"real estate"},
-		})
-	}
-	return f
-}
-
-// LiveFeed is a Roku Direct Publisher liveFeeds entry: a linear stream.
-type LiveFeed struct {
-	ID               string      `json:"id"`
-	Title            string      `json:"title"`
-	ShortDescription string      `json:"shortDescription"`
-	Thumbnail        string      `json:"thumbnail"`
-	Content          LiveContent `json:"content"`
-	Tags             []string    `json:"tags,omitempty"`
-}
-
-// LiveContent holds the live stream URL.
-type LiveContent struct {
-	DateAdded string  `json:"dateAdded"`
-	Videos    []Video `json:"videos"`
-}
-
-// AddLive appends the national linear channel as a live feed.
-func (f *Feed) AddLive(streamURL, thumbnail string, now time.Time) {
-	f.LiveFeeds = append(f.LiveFeeds, LiveFeed{
-		ID:               "dwellingtv-live",
-		Title:            "DwellingTV Live",
-		ShortDescription: "Homes for sale, around the clock",
-		Thumbnail:        thumbnail,
-		Content: LiveContent{
-			DateAdded: now.UTC().Format(time.RFC3339),
-			Videos:    []Video{{URL: streamURL, Quality: "HD", VideoType: "HLS"}},
-		},
-		Tags: []string{"real estate"},
-	})
-}
-
+// title is the listing's headline: price and street address.
 func title(p *property.Property) string {
 	price := "Contact for price"
 	if p.SalePrice > 0 {
@@ -137,6 +22,7 @@ func title(p *property.Property) string {
 	return price + " · " + p.Address
 }
 
+// shortDescription is the listing's facts line: beds, baths, size, place.
 func shortDescription(p *property.Property) string {
 	var parts []string
 	if p.Bedrooms > 0 {

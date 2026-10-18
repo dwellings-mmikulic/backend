@@ -1,5 +1,5 @@
-// Package server exposes the Roku Direct Publisher feed, the public listings
-// API, and a health endpoint.
+// Package server exposes the Roku Search feed, the public listings API, and
+// a health endpoint.
 package server
 
 import (
@@ -27,18 +27,10 @@ type feedSource interface {
 	ListReadyForFeed(ctx context.Context, limit int, after *property.FeedKey) ([]property.Property, bool, error)
 }
 
-// Page sizes of /roku/feed.json. The whole catalogue is close to a million
-// listings (hundreds of MB as one document), so the feed is always paged;
-// the Roku app walks nextPage links as the viewer scrolls.
-const (
-	defaultFeedLimit = 100
-	maxFeedLimit     = 500
-)
-
 // Page sizes of /roku/search-feed.json. Roku's crawler walks nextPageUrl
-// links through the whole catalogue, so page count is not a concern but page
-// weight is: at ~0.55 KB per asset the default is ~280 KB and the cap ~1.1 MB,
-// each well under a second to serve.
+// links through the whole catalogue (close to a million listings), so page
+// count is not a concern but page weight is: at ~0.55 KB per asset the
+// default is ~280 KB and the cap ~1.1 MB, each well under a second to serve.
 const (
 	defaultSearchLimit = 500
 	maxSearchLimit     = 2000
@@ -48,32 +40,25 @@ const (
 // listing rendered in the meantime shows up on the next refresh.
 const feedCacheControl = "public, max-age=300"
 
-// Server serves the Roku feed.
+// Server is the HTTP server of the api role.
 type Server struct {
-	repo         feedSource
-	providerName string
-	log          *slog.Logger
-	now          func() time.Time
-	srv          *http.Server
-	mux          *http.ServeMux
-
-	liveURL       string
-	liveThumbnail string
-	liveAvailable func(context.Context) bool
+	repo feedSource
+	log  *slog.Logger
+	now  func() time.Time
+	srv  *http.Server
+	mux  *http.ServeMux
 }
 
 // New creates a Server bound to addr (e.g. ":8080"). publicAPI may be nil
 // (e.g. in tests that only exercise the feed).
-func New(addr, providerName string, repo feedSource, publicAPI *api.API, log *slog.Logger) *Server {
+func New(addr string, repo feedSource, publicAPI *api.API, log *slog.Logger) *Server {
 	s := &Server{
-		repo:         repo,
-		providerName: providerName,
-		log:          log,
-		now:          time.Now,
+		repo: repo,
+		log:  log,
+		now:  time.Now,
 	}
 	mux := http.NewServeMux()
 	s.mux = mux
-	mux.HandleFunc("GET /roku/feed.json", s.handleFeed)
 	mux.HandleFunc("GET /roku/search-feed.json", s.handleSearchFeed)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
@@ -96,21 +81,6 @@ type Mounter interface {
 // Mount adds routes. Call before Start.
 func (s *Server) Mount(m Mounter) { m.Register(s.mux) }
 
-// SetLiveFeed adds the linear channel to the Roku feed as a live feed.
-//
-// thumbnail is the channel poster (LINEAR_LIVE_THUMBNAIL_URL). Roku Direct
-// Publisher requires a non-empty thumbnail on every liveFeeds entry; when
-// none is configured the first ready listing's first image is borrowed, and
-// when there is no image either the entry is omitted rather than published
-// with a thumbnail Roku rejects — or with a branding URL nobody uploaded.
-//
-// available reports whether the channels have anything to play; nil means
-// always. A feed that advertises a stream before any clip has been segmented
-// sends viewers to a 503.
-func (s *Server) SetLiveFeed(u, thumbnail string, available func(context.Context) bool) {
-	s.liveURL, s.liveThumbnail, s.liveAvailable = u, thumbnail, available
-}
-
 // Start runs the HTTP server until it errors or is shut down.
 func (s *Server) Start() error {
 	if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -124,41 +94,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	limit, after, err := parseFeedParams(r.URL.Query(), defaultFeedLimit, maxFeedLimit)
-	if err != nil {
-		writeFeedError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	props, hasMore, err := s.repo.ListReadyForFeed(r.Context(), limit, after)
-	if err != nil {
-		s.log.Error("feed query failed", "error", err)
-		writeFeedError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	doc := feed.Build(s.providerName, props, s.now())
-	if after == nil {
-		// The live channel is part of the catalogue, not of every page.
-		s.addLiveFeed(r.Context(), &doc, props)
-	}
-	if hasMore && len(props) > 0 {
-		doc.NextCursor = feed.EncodeCursor(&props[len(props)-1])
-		doc.NextPage = nextPageURL(r, doc.NextCursor, limit)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", feedCacheControl)
-	if err := json.NewEncoder(w).Encode(doc); err != nil {
-		s.log.Error("feed encode failed", "error", err)
-	}
-}
-
-// handleSearchFeed serves the Roku Search feed: the same published listings
-// as the Direct Publisher feed, in the catalogue format Roku ingests for its
-// home-screen search, paged with the same cursor. Roku follows nextPageUrl
-// from the first page through the last, so the first page is the URL to
-// register in the developer dashboard.
+// handleSearchFeed serves the Roku Search feed: the published listings in
+// the catalogue format Roku ingests for its home-screen search, one page at
+// a time. Roku follows nextPageUrl from the first page through the last, so
+// the first page is the URL to register in the developer dashboard. The Roku
+// app itself reads /api/v1/properties, not this.
 func (s *Server) handleSearchFeed(w http.ResponseWriter, r *http.Request) {
 	limit, after, err := parseFeedParams(r.URL.Query(), defaultSearchLimit, maxSearchLimit)
 	if err != nil {
@@ -185,8 +125,8 @@ func (s *Server) handleSearchFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseFeedParams reads ?limit= (1..maxLimit, default defaultLimit; above
-// the cap is clamped, not refused) and ?cursor= (a token from a previous
-// page's nextCursor / nextPageUrl).
+// the cap is clamped, not refused) and ?cursor= (the token inside a previous
+// page's nextPageUrl).
 func parseFeedParams(q url.Values, defaultLimit, maxLimit int) (int, *property.FeedKey, error) {
 	limit := defaultLimit
 	if raw := q.Get("limit"); raw != "" {
@@ -208,8 +148,8 @@ func parseFeedParams(q url.Values, defaultLimit, maxLimit int) (int, *property.F
 }
 
 // nextPageURL is the absolute URL of the following page, built from the
-// request as nginx forwarded it (X-Forwarded-Proto + Host), so the Roku app
-// can follow it without assembling anything.
+// request as nginx forwarded it (X-Forwarded-Proto + Host). Roku's schema
+// requires nextPageUrl to be absolute.
 func nextPageURL(r *http.Request, cursor string, limit int) string {
 	scheme := r.Header.Get("X-Forwarded-Proto")
 	if scheme == "" {
@@ -229,37 +169,6 @@ func writeFeedError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
-
-// addLiveFeed appends the linear channel to doc when it is configured, has
-// content, and has a thumbnail to show.
-func (s *Server) addLiveFeed(ctx context.Context, doc *feed.Feed, props []property.Property) {
-	if s.liveURL == "" {
-		return
-	}
-	if s.liveAvailable != nil && !s.liveAvailable(ctx) {
-		s.log.Warn("roku live feed omitted: the channels have no content yet", "url", s.liveURL)
-		return
-	}
-	thumb := s.liveThumbnail
-	if thumb == "" {
-		thumb = firstImage(props)
-	}
-	if thumb == "" {
-		s.log.Warn("roku live feed omitted: no LINEAR_LIVE_THUMBNAIL_URL and no listing image to borrow", "url", s.liveURL)
-		return
-	}
-	doc.AddLive(s.liveURL, thumb, s.now())
-}
-
-// firstImage returns the first image of the first listing that has one.
-func firstImage(props []property.Property) string {
-	for _, p := range props {
-		if len(p.ImageURLs) > 0 && p.ImageURLs[0] != "" {
-			return p.ImageURLs[0]
-		}
-	}
-	return ""
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
