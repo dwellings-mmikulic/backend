@@ -29,9 +29,9 @@ Needs `~/.ssh/dwellings_tv` (override with `DWELLINGS_SSH_KEY`). Takes ~20 s.
 | `new_24h` | tracks `renders_24h` (queue is kept short) | far above renders (backlog building) |
 | `details_24h` | ~26,000 (two 13,000 windows; was 8,000 before 2026-10-17) | well below 26,000 while `details_done` < total |
 | per-day renders (7 days) | flat 33k–36k; today's row is partial, pro-rate by hour of day UTC | a full day drops sharply |
-| `claimed_by` | 8 rows, worker-02..09, claims = that box's LISTING_CONCURRENCY (8/2/4/2/8/8/8/8) | a worker missing, or claims 0 |
+| `claimed_by` | 10 rows, worker-02..09 + worker-12/13, claims = that box's LISTING_CONCURRENCY (8/2/4/2/8/8/8/8/8/8 = 64) | a worker missing, or claims 0 |
 | `listing_queue.depth` | a few thousand, `oldest_live` within hours | depth climbing for days, or `oldest_live` more than a day old |
-| `stuck` (attempts >= 3) | 17 as of 2026-10-05 (all lot-size overflow, below) | > 30, or a new error class in `--errors` |
+| `stuck` (attempts >= 3) | 0 since 2026-10-20 (the lot-size overflow class is clamped now, below) | > 0 with a new error class in `--errors` |
 | `api_budget` search `spent` | ~2,500/window, well under the 12,000 search share | approaching 12,000 (backpressure broken) |
 | `api_budget` details `spent` | exactly 13,000/window (4,000 before 2026-10-17) | far below 13,000 while details backlog exists |
 | `zip_codes.searched` | slowly rising | `last_search` stale while queue is empty |
@@ -41,11 +41,14 @@ Topology and the LISTING_CONCURRENCY per box live in the memory note
 `multi-instance-workers`. Details has no backpressure; 13,000/window is a
 deliberate throttle, so spending it out in minutes then idling is normal.
 
-## Known stuck-item cause
+## Known stuck-item cause (fixed 2026-10-20, PR #16)
 
 `numeric field overflow` / `unable to encode N into binary format for int4` on
-upsert: Zillow returned a lot size in the billions of sqft. Those rows retry 3
-times and park. Fix is a clamp on ingest, not a queue purge.
+upsert: Zillow returned a lot size in the billions of sqft or thousands of
+bathrooms. Since PR #16 `Property.ClampToSchema` stores such sizes as 0
+(unknown) in `Repository.Upsert`, and the 46 parked rows were re-queued. If
+this error text ever reappears, a new column is involved; extend the clamp,
+do not purge the queue.
 
 ## Common mistakes
 
