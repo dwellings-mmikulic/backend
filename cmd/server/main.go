@@ -220,6 +220,7 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 			LineupHours:     cfg.Linear.LineupHours,
 			MinScopeClips:   cfg.Linear.MinScopeClips,
 			EPGHorizonHours: cfg.Linear.EPGHorizonHours,
+			GuideDays:       cfg.Linear.GuideDays,
 			BumperInterval:  time.Duration(cfg.Linear.BumperIntervalMinutes) * time.Minute,
 			AdBreakInterval: time.Duration(cfg.Linear.AdBreakIntervalMinutes) * time.Minute,
 		}, log)

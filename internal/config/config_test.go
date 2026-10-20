@@ -151,8 +151,16 @@ func TestLoad_LinearDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Linear.Enabled || cfg.Linear.LineupHours != 6 || cfg.Linear.MinScopeClips != 20 || cfg.Linear.EPGHorizonHours != 24 {
+	if !cfg.Linear.Enabled || cfg.Linear.LineupHours != 6 || cfg.Linear.MinScopeClips != 20 || cfg.Linear.EPGHorizonHours != 24 || cfg.Linear.GuideDays != 7 {
 		t.Errorf("linear defaults = %+v", cfg.Linear)
+	}
+	t.Setenv("LINEAR_EPG_GUIDE_DAYS", "14")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Linear.GuideDays != 14 {
+		t.Errorf("GuideDays = %d, want 14 from LINEAR_EPG_GUIDE_DAYS", cfg.Linear.GuideDays)
 	}
 	if cfg.PublicBaseURL != "https://api.example.com" {
 		t.Errorf("PublicBaseURL = %q (trailing slash must be trimmed)", cfg.PublicBaseURL)
