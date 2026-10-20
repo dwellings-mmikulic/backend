@@ -37,6 +37,7 @@ type xmltvProgramme struct {
 	Stop       string      `xml:"stop,attr"`
 	Channel    string      `xml:"channel,attr"`
 	Title      xmltvText   `xml:"title"`
+	SubTitle   xmltvText   `xml:"sub-title"`
 	Desc       xmltvText   `xml:"desc"`
 	Categories []xmltvText `xml:"category"`
 	Language   string      `xml:"language"`
@@ -73,14 +74,13 @@ type xmltvAudio struct {
 // reaches EPGHorizonHours and what airs in a slot varies per viewer
 // (personal feeds) and changes by the minute — so no block is described by
 // its listings. Every block is the same show, the area's homes for sale, and
-// carries the same static description. That is what makes a guide possible
-// for a channel whose content changes constantly. note is appended to every
-// description ("" for none).
-func renderXMLTV(e EPG, now, until time.Time, note string) []byte {
+// carries the same copy. That is what makes a guide possible for a channel
+// whose content changes constantly.
+func renderXMLTV(e EPG, now, until time.Time) []byte {
 	now, until = now.UTC(), until.UTC()
 	sc, _ := ParseKey(e.Channel.Scope)
 	key := e.Channel.Key
-	desc := sc.guideDescription() + note
+	short, long := sc.guideCopy()
 
 	doc := xmltvTV{
 		Date:       now.Format("2006-01-02"),
@@ -91,11 +91,12 @@ func renderXMLTV(e EPG, now, until time.Time, note string) []byte {
 	minutes := strconv.Itoa(int(programBlock / time.Minute))
 	for b := now.Truncate(programBlock).Add(-programBlock); b.Before(until); b = b.Add(programBlock) {
 		doc.Programmes = append(doc.Programmes, xmltvProgramme{
-			Start:   b.Format(xmltvTime),
-			Stop:    b.Add(programBlock).Format(xmltvTime),
-			Channel: key,
-			Title:   xmltvText{Lang: "en", Text: e.Channel.Name},
-			Desc:    xmltvText{Lang: "en", Text: desc},
+			Start:    b.Format(xmltvTime),
+			Stop:     b.Add(programBlock).Format(xmltvTime),
+			Channel:  key,
+			Title:    xmltvText{Lang: "en", Text: e.Channel.Name},
+			SubTitle: xmltvText{Lang: "en", Text: short},
+			Desc:     xmltvText{Lang: "en", Text: long},
 			Categories: []xmltvText{
 				{Lang: "en", Text: "Lifestyle"},
 				{Lang: "en", Text: "Real Estate"},
@@ -122,7 +123,20 @@ func renderXMLTV(e EPG, now, until time.Time, note string) []byte {
 	return buf.Bytes()
 }
 
-// guideDescription is the static description of every guide block.
-func (s Scope) guideDescription() string {
-	return "The newest homes for sale in " + s.areaName() + ": photos, price and details of every listing, around the clock"
+// guideCopy is the channel copy every guide block carries (Daniel,
+// 2026-10-20): the short form, for the sub-title, and the full text, for
+// the description. Platforms differ in how much of a description they
+// show, so both are sent. On an area channel the area replaces "from across
+// the United States".
+func (s Scope) guideCopy() (short, long string) {
+	where := "from across the United States"
+	if s.Key() != "us" {
+		where = "in " + s.areaName()
+	}
+	short = "Explore real estate listings " + where + " with Dwellings.TV"
+	long = short + ", featuring an engaging video slideshow of properties nationwide. " +
+		"Scan the QR code in the bottom-right corner to access additional details about any listing. " +
+		"Customize your viewing experience in real time using your mobile device by scanning the periodic on-screen QR code or visiting http://dwellings.tv/tv to get started immediately. " +
+		"Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel."
+	return short, long
 }

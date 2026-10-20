@@ -23,6 +23,7 @@ type xmltvDoc struct {
 		Stop     string   `xml:"stop,attr"`
 		Channel  string   `xml:"channel,attr"`
 		Title    string   `xml:"title"`
+		SubTitle string   `xml:"sub-title"`
 		Desc     string   `xml:"desc"`
 		Category []string `xml:"category"`
 		Length   string   `xml:"length"`
@@ -54,7 +55,7 @@ func TestXMLTV_ContinuousBlocksToTheGuideHorizon(t *testing.T) {
 	}
 	until := now.Add(7 * 24 * time.Hour)
 
-	body := renderXMLTV(e, now, until, "")
+	body := renderXMLTV(e, now, until)
 	doc := parseXMLTV(t, body)
 
 	if doc.Date != "2026-08-25" {
@@ -92,11 +93,14 @@ func TestXMLTV_ContinuousBlocksToTheGuideHorizon(t *testing.T) {
 			t.Errorf("programme %d has no category", i)
 		}
 	}
-	// Every block carries the same static description: what airs in a slot
-	// varies per viewer (personal feeds) and changes by the minute, so no
-	// block is described by its listings.
+	// Every block carries the same copy (Daniel, 2026-10-20): the short
+	// form as the sub-title, the full text as the description, with the
+	// area in place of "from across the United States" on an area channel.
 	for i, p := range doc.Programmes {
-		if p.Desc != "The newest homes for sale in 77494: photos, price and details of every listing, around the clock" {
+		if p.SubTitle != "Explore real estate listings in 77494 with Dwellings.TV" {
+			t.Fatalf("programme %d sub-title = %q", i, p.SubTitle)
+		}
+		if p.Desc != guideCopyFor("in 77494") {
 			t.Fatalf("programme %d desc = %q", i, p.Desc)
 		}
 	}
@@ -110,24 +114,33 @@ func TestXMLTV_ContinuousBlocksToTheGuideHorizon(t *testing.T) {
 	}
 }
 
-func TestXMLTV_NoteReachesEveryBlockAndIsEscaped(t *testing.T) {
+func TestXMLTV_NationalChannelUsesTheCopyVerbatim(t *testing.T) {
 	m := newMemStore()
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
-	e, err := s.EPG(context.Background(), Scope{Zip: "77494"}, t0)
+	e, err := s.EPG(context.Background(), Scope{}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := renderXMLTV(e, t0, t0.Add(2*time.Hour), " · Customize at tv.example.test/tv?a=1&b=2")
-	doc := parseXMLTV(t, body)
-	for i, p := range doc.Programmes {
-		if !strings.HasSuffix(p.Desc, "tv.example.test/tv?a=1&b=2") {
-			t.Errorf("programme %d desc = %q", i, p.Desc)
-		}
+	doc := parseXMLTV(t, renderXMLTV(e, t0, t0.Add(time.Hour)))
+	p := doc.Programmes[0]
+	if p.SubTitle != "Explore real estate listings from across the United States with Dwellings.TV" {
+		t.Errorf("sub-title = %q", p.SubTitle)
 	}
-	if strings.Contains(string(body), "a=1&b=2") {
-		t.Error("raw ampersand in XML body")
+	if p.Desc != guideCopyFor("from across the United States") {
+		t.Errorf("desc = %q", p.Desc)
 	}
+	if !strings.Contains(p.Desc, "http://dwellings.tv/tv") || !strings.Contains(p.Desc, "same Wi-Fi network") {
+		t.Errorf("desc is not the full copy: %q", p.Desc)
+	}
+}
+
+// guideCopyFor is Daniel's copy with the area phrase filled in.
+func guideCopyFor(where string) string {
+	return "Explore real estate listings " + where + " with Dwellings.TV, featuring an engaging video slideshow of properties nationwide. " +
+		"Scan the QR code in the bottom-right corner to access additional details about any listing. " +
+		"Customize your viewing experience in real time using your mobile device by scanning the periodic on-screen QR code or visiting http://dwellings.tv/tv to get started immediately. " +
+		"Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel."
 }
 
 func TestHandler_EPGXML(t *testing.T) {
@@ -156,8 +169,8 @@ func TestHandler_EPGXML(t *testing.T) {
 	if len(doc.Programmes) != want {
 		t.Errorf("programmes = %d, want %d", len(doc.Programmes), want)
 	}
-	if strings.Contains(body, "Customize") {
-		t.Error("note must not appear without feeds enabled")
+	if strings.Contains(body, "Customize this channel at") {
+		t.Error("the epg.json note must not be appended to the copy")
 	}
 
 	rec = serve(t, m, t0, "/channels/epg.xml?state=zz")
@@ -166,7 +179,7 @@ func TestHandler_EPGXML(t *testing.T) {
 	}
 }
 
-func TestHandler_EPGXMLCarriesTheCustomizeURL(t *testing.T) {
+func TestHandler_EPGXMLSameCopyWithFeedsOn(t *testing.T) {
 	m := newMemStore()
 	addClips(m, katy, 1, 40)
 	_, mux := feedMux(m, t0)
@@ -176,7 +189,7 @@ func TestHandler_EPGXMLCarriesTheCustomizeURL(t *testing.T) {
 	}
 	doc := parseXMLTV(t, rec.Body.Bytes())
 	for i, p := range doc.Programmes {
-		if !strings.HasSuffix(p.Desc, " · Customize this channel at tv.example.test/tv") {
+		if p.Desc != guideCopyFor("in 77494") {
 			t.Fatalf("programme %d desc = %q", i, p.Desc)
 		}
 	}
