@@ -175,9 +175,10 @@ GET /channels/epg.xml     (same filters; the same blocks as an XMLTV guide)
 `epg.xml` is the guide a FAST distributor ingests (XMLTV, timestamps as in
 Freebie TV's feeds): one 30-minute programme per block, continuous for
 `LINEAR_EPG_GUIDE_DAYS` (7) ahead. Every block carries the same channel
-copy (short form as `sub-title`, full text as `desc`): what airs in a slot
-varies per viewer and changes by the minute, so no block is described by
-its listings.
+copy ("Explore real estate listings from across the United States with
+Dwellings.TV" as the title, the channel blurb as `desc`): what airs in a
+slot varies per viewer and changes by the minute, so no block is described
+by its listings.
 
 No filter is the national channel. A ZIP with fewer than
 `LINEAR_MIN_SCOPE_CLIPS` (20) videos falls back to its city, then state, then

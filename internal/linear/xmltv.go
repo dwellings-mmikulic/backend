@@ -37,7 +37,6 @@ type xmltvProgramme struct {
 	Stop       string      `xml:"stop,attr"`
 	Channel    string      `xml:"channel,attr"`
 	Title      xmltvText   `xml:"title"`
-	SubTitle   xmltvText   `xml:"sub-title"`
 	Desc       xmltvText   `xml:"desc"`
 	Categories []xmltvText `xml:"category"`
 	Language   string      `xml:"language"`
@@ -80,7 +79,7 @@ func renderXMLTV(e EPG, now, until time.Time) []byte {
 	now, until = now.UTC(), until.UTC()
 	sc, _ := ParseKey(e.Channel.Scope)
 	key := e.Channel.Key
-	short, long := sc.guideCopy()
+	title := sc.guideTitle()
 
 	doc := xmltvTV{
 		Date:       now.Format("2006-01-02"),
@@ -91,12 +90,11 @@ func renderXMLTV(e EPG, now, until time.Time) []byte {
 	minutes := strconv.Itoa(int(programBlock / time.Minute))
 	for b := now.Truncate(programBlock).Add(-programBlock); b.Before(until); b = b.Add(programBlock) {
 		doc.Programmes = append(doc.Programmes, xmltvProgramme{
-			Start:    b.Format(xmltvTime),
-			Stop:     b.Add(programBlock).Format(xmltvTime),
-			Channel:  key,
-			Title:    xmltvText{Lang: "en", Text: e.Channel.Name},
-			SubTitle: xmltvText{Lang: "en", Text: short},
-			Desc:     xmltvText{Lang: "en", Text: long},
+			Start:   b.Format(xmltvTime),
+			Stop:    b.Add(programBlock).Format(xmltvTime),
+			Channel: key,
+			Title:   xmltvText{Lang: "en", Text: title},
+			Desc:    xmltvText{Lang: "en", Text: guideDescription},
 			Categories: []xmltvText{
 				{Lang: "en", Text: "Lifestyle"},
 				{Lang: "en", Text: "Real Estate"},
@@ -123,20 +121,21 @@ func renderXMLTV(e EPG, now, until time.Time) []byte {
 	return buf.Bytes()
 }
 
-// guideCopy is the channel copy every guide block carries (Daniel,
-// 2026-10-20): the short form, for the sub-title, and the full text, for
-// the description. Platforms differ in how much of a description they
-// show, so both are sent. On an area channel the area replaces "from across
-// the United States".
-func (s Scope) guideCopy() (short, long string) {
+// guideTitle is the programme title of every guide block (Daniel,
+// 2026-10-20: a guide like Roku's shows a title and a description, so the
+// short copy is the title). On an area channel the area replaces "from
+// across the United States".
+func (s Scope) guideTitle() string {
 	where := "from across the United States"
 	if s.Key() != "us" {
 		where = "in " + s.areaName()
 	}
-	short = "Explore real estate listings " + where + " with Dwellings.TV"
-	long = short + ", featuring an engaging video slideshow of properties nationwide. " +
-		"Scan the QR code in the bottom-right corner to access additional details about any listing. " +
-		"Customize your viewing experience in real time using your mobile device by scanning the periodic on-screen QR code or visiting http://dwellings.tv/tv to get started immediately. " +
-		"Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel."
-	return short, long
+	return "Explore real estate listings " + where + " with Dwellings.TV"
 }
+
+// guideDescription is the programme description of every guide block
+// (Daniel, 2026-10-20).
+const guideDescription = "Featuring an engaging video slideshow of properties nationwide. " +
+	"Scan the QR code in the bottom-right corner to access additional details about any listing. " +
+	"Customize your viewing experience in real time using your mobile device by scanning the periodic on-screen QR code or visiting http://dwellings.tv/tv to get started immediately. " +
+	"Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel."
