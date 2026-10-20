@@ -161,12 +161,13 @@ func (h *Handler) epgXML(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_, _ = w.Write(renderXMLTV(e, now, until, h.guideNote()))
+	_, _ = w.Write(renderXMLTV(e, now, until))
 }
 
-// guideNote is appended to every programme description when the personal
-// feeds are on. Platform guides show the description; it is where a viewer
-// learns the channel can be customized before the bumper comes around.
+// guideNote is appended to every epg.json programme description when the
+// personal feeds are on. The app's guide shows the description; it is where
+// a viewer learns the channel can be customized before the bumper comes
+// around. (epg.xml carries the channel copy, which already says so.)
 func (h *Handler) guideNote() string {
 	if h.feeds == nil {
 		return ""
