@@ -44,6 +44,7 @@ ON CONFLICT (zpid) DO UPDATE SET
     updated_at     = now()
 RETURNING id, video_status, COALESCE(video_content_hash, '')`
 
+	p.ClampToSchema()
 	err := r.pool.QueryRow(ctx, q,
 		p.ZPID, p.SalePrice, p.Address, p.City, p.State, p.Zip,
 		p.HomeSizeSqft, p.LotSizeSqft, p.Bedrooms, p.Bathrooms, p.DetailURL, p.ImageURLs,
