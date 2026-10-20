@@ -118,6 +118,28 @@ func TestRepository_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("upsert stores sizes the columns cannot hold as unknown", func(t *testing.T) {
+		// Real values Zillow returned (zpid 108254647 and 20564499); the
+		// rows had parked in listing_queue after three failed upserts.
+		p := &Property{
+			ZPID: zpidPrefix + "clamp" + suffix, Address: "21301 Erwin St Unit 511",
+			HomeSizeSqft: 1050, LotSizeSqft: 5864221440, Bedrooms: 2, Bathrooms: 40103, ImageURLs: []string{},
+		}
+		t.Cleanup(func() { pool.Exec(ctx, `DELETE FROM properties WHERE zpid = $1`, p.ZPID) })
+		if err := NewRepository(pool).Upsert(ctx, p); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		var home, lot, beds int
+		var baths float64
+		if err := pool.QueryRow(ctx, `SELECT home_size_sqft, lot_size_sqft, bedrooms, bathrooms FROM properties WHERE zpid = $1`,
+			p.ZPID).Scan(&home, &lot, &beds, &baths); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if home != 1050 || lot != 0 || beds != 2 || baths != 0 {
+			t.Errorf("stored home=%d lot=%d beds=%d baths=%v, want 1050 0 2 0", home, lot, beds, baths)
+		}
+	})
+
 	t.Run("claim returns the oldest rows, oldest first", func(t *testing.T) {
 		f := newFixture(t, pool, suffix)
 		zpids := f.insert("o1", "o2", "o3", "o4", "o5")
