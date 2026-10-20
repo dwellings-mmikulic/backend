@@ -46,6 +46,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /channels/master.m3u8", h.master)
 	mux.HandleFunc("GET /channels/live.m3u8", h.live)
 	mux.HandleFunc("GET /channels/epg.json", h.epg)
+	mux.HandleFunc("GET /channels/epg.xml", h.epgXML)
 	if h.viewers != nil {
 		mux.HandleFunc("GET /channels/resolve", h.resolve)
 		mux.HandleFunc("GET /channels/stats", h.stats)
@@ -131,10 +132,7 @@ func (h *Handler) epg(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, sc, err)
 		return
 	}
-	if h.feeds != nil {
-		// Platform guides show the description; it is where a viewer learns
-		// the channel can be customized before the bumper comes around.
-		note := " · Customize this channel at " + h.feeds.mobilePageHost() + "/tv"
+	if note := h.guideNote(); note != "" {
 		for i := range e.Programs {
 			e.Programs[i].Description += note
 		}
@@ -143,6 +141,37 @@ func (h *Handler) epg(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	_ = json.NewEncoder(w).Encode(e)
+}
+
+// epgXML is the same schedule as epg.json as an XMLTV guide for
+// distributors, continuous for GuideDays ahead (see renderXMLTV).
+func (h *Handler) epgXML(w http.ResponseWriter, r *http.Request) {
+	sc, err := ParseScope(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	now := h.svc.now()
+	e, err := h.svc.EPG(r.Context(), sc, now)
+	if err != nil {
+		h.fail(w, sc, err)
+		return
+	}
+	until := now.Add(time.Duration(h.svc.opts.GuideDays) * 24 * time.Hour)
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	_, _ = w.Write(renderXMLTV(e, now, until, h.guideNote()))
+}
+
+// guideNote is appended to every programme description when the personal
+// feeds are on. Platform guides show the description; it is where a viewer
+// learns the channel can be customized before the bumper comes around.
+func (h *Handler) guideNote() string {
+	if h.feeds == nil {
+		return ""
+	}
+	return " · Customize this channel at " + h.feeds.mobilePageHost() + "/tv"
 }
 
 // fail maps service errors to responses.

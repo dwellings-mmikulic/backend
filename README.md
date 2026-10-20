@@ -169,7 +169,14 @@ instances — or a restart mid-stream — serve byte-identical playlists.
 GET /channels/master.m3u8[?zip=77494 | ?city=Katy&state=TX | ?state=TX]
 GET /channels/live.m3u8   (same filters; the master playlist points here)
 GET /channels/epg.json    (same filters; 30-minute programme blocks)
+GET /channels/epg.xml     (same filters; the same blocks as an XMLTV guide)
 ```
+
+`epg.xml` is the guide a FAST distributor ingests (XMLTV, timestamps as in
+Freebie TV's feeds): one 30-minute programme per block, continuous for
+`LINEAR_EPG_GUIDE_DAYS` (7) ahead. Blocks whose lineup is materialised
+carry the listing count and price range; later blocks carry a standing
+description, since a block's listings are only decided close to air time.
 
 No filter is the national channel. A ZIP with fewer than
 `LINEAR_MIN_SCOPE_CLIPS` (20) videos falls back to its city, then state, then
@@ -309,7 +316,7 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
   dashboard, after running it through *Search feed validator* there.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).
-- `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json` — linear channels, see [Linear channels](#linear-channels).
+- `GET /channels/master.m3u8`, `GET /channels/live.m3u8`, `GET /channels/epg.json`, `GET /channels/epg.xml` — linear channels, see [Linear channels](#linear-channels).
 - `GET /channels/resolve`, `GET /channels/stats` — see [Viewer tracking and channel resolve](#viewer-tracking-and-channel-resolve).
 - `GET /healthz` — liveness. On a `ROLE=worker` instance it is the only route,
   and answers 503 while the worker's circuit breaker is open.
@@ -424,7 +431,8 @@ runbook are in [`deploy/README.md`](deploy/README.md#fleet-worker-boxes).
 origin, used for the absolute URLs in the Roku feed; empty leaves the live
 channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 `LINEAR_LINEUP_HOURS` (`6`), `LINEAR_MIN_SCOPE_CLIPS` (`20`),
-`LINEAR_EPG_HORIZON_HOURS` (`24`), `LINEAR_BUMPER_INTERVAL_MINUTES` (`5`; `0`
+`LINEAR_EPG_HORIZON_HOURS` (`24`), `LINEAR_EPG_GUIDE_DAYS` (`7`),
+`LINEAR_BUMPER_INTERVAL_MINUTES` (`5`; `0`
 = no QR bumper), `LINEAR_AD_BREAK_INTERVAL_MINUTES` (`10`; `0` = no cued ad
 breaks).
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`

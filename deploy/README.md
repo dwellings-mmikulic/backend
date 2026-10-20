@@ -28,7 +28,8 @@ Push to `main` → GitHub Actions (`.github/workflows/publish-deploy.yml`):
 
 `deploy/nginx-dwellings.conf` puts an nginx `proxy_cache`
 (`dwellings_channels`, `/var/cache/nginx/dwellings`, 10 MB of keys) in front
-of `/channels/`: 2 s for `live.m3u8` and `master.m3u8`, 60 s for `epg.json`,
+of `/channels/`: 2 s for `live.m3u8` and `master.m3u8`, 60 s for `epg.json`
+and `epg.xml`,
 keyed on `$scheme$host$uri$is_args$args` so each channel filter is its own
 entry. `proxy_cache_lock on` collapses a thundering herd on a cold key into
 one origin request, and `proxy_cache_use_stale updating error timeout` keeps

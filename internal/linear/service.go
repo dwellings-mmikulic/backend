@@ -17,6 +17,10 @@ type Options struct {
 	LineupHours     int // max content per lineup version
 	MinScopeClips   int // a scope with fewer current clips falls back to its parent
 	EPGHorizonHours int // how far ahead the EPG materialises versions
+	// GuideDays is how many days ahead the XMLTV guide (/channels/epg.xml)
+	// schedules. Blocks past the materialised chain are listed with a
+	// standing description, so this does not build lineups.
+	GuideDays int
 	// BumperInterval is how much content airs between two QR bumpers. Zero
 	// means no bumpers; it is not defaulted, the config decides.
 	BumperInterval time.Duration
@@ -34,6 +38,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.EPGHorizonHours <= 0 {
 		o.EPGHorizonHours = 24
+	}
+	if o.GuideDays <= 0 {
+		o.GuideDays = 7
 	}
 	return o
 }

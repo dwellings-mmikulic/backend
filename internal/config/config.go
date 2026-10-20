@@ -171,6 +171,10 @@ type LinearConfig struct {
 	LineupHours     int // max content per lineup version
 	MinScopeClips   int // a scope with fewer clips falls back to its parent area
 	EPGHorizonHours int // how far ahead the EPG materialises the schedule
+	// GuideDays is how many days ahead the XMLTV guide (/channels/epg.xml)
+	// schedules; blocks past the materialised lineup get a standing
+	// description, so raising it builds no lineups.
+	GuideDays int
 	// BumperIntervalMinutes is how much content airs between two QR bumpers
 	// (see docs/superpowers/specs/2026-10-13-qr-bumper-design.md); 0 turns
 	// bumpers off for versions built from then on.
@@ -371,6 +375,7 @@ func Load() (*Config, error) {
 			LineupHours:            getenvInt("LINEAR_LINEUP_HOURS", 6),
 			MinScopeClips:          getenvInt("LINEAR_MIN_SCOPE_CLIPS", 20),
 			EPGHorizonHours:        getenvInt("LINEAR_EPG_HORIZON_HOURS", 24),
+			GuideDays:              getenvInt("LINEAR_EPG_GUIDE_DAYS", 7),
 			BumperIntervalMinutes:  getenvInt("LINEAR_BUMPER_INTERVAL_MINUTES", 5),
 			AdBreakIntervalMinutes: getenvInt("LINEAR_AD_BREAK_INTERVAL_MINUTES", 10),
 		},
