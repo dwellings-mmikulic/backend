@@ -39,13 +39,14 @@ The document mirrors the sample's elements:
 - one `<programme>` per 30-minute block from the block on air
   (`now − 1 block`) up to `now + LINEAR_EPG_GUIDE_DAYS` (7) days, with no
   gaps: `start`/`stop` as `2026-10-19T09:00:00.000+0000` (the sample's
-  shape, not the DTD's `20261019090000 +0000`), `title` = channel name,
-  `sub-title` = the short channel copy ("Explore real estate listings from
-  across the United States with Dwellings.TV"; on an area channel "in
-  Texas"), `desc` = Daniel's full copy (2026-10-20: QR in the corner, the
-  periodic QR / dwellings.tv/tv to customize, same Wi-Fi as the TV). The
-  `epg.json` "Customize this channel at …" note is not appended here, the
-  copy already says it, categories Lifestyle and Real
+  shape, not the DTD's `20261019090000 +0000`), `title` = "Explore real
+  estate listings from across the United States with Dwellings.TV" (on an
+  area channel "in Texas"), `desc` = Daniel's blurb (2026-10-20: "Featuring
+  an engaging video slideshow…", QR in the corner, the periodic QR /
+  dwellings.tv/tv to customize, same Wi-Fi as the TV). Roku's guide shows
+  exactly a title and a description, which is why the short copy is the
+  title and there is no `sub-title`. The `epg.json` "Customize this channel
+  at …" note is not appended here, the copy already says it, categories Lifestyle and Real
   Estate, `language` English, `length` 30 minutes, `episode-num
   system="assetID"` = `<key>@<YYYYMMDDTHHMM>` (unique per block), and the
   sample's `video`/`audio` blocks (1920x1080, stereo).

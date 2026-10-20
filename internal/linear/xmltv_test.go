@@ -83,7 +83,7 @@ func TestXMLTV_ContinuousBlocksToTheGuideHorizon(t *testing.T) {
 		if i > 0 && p.Start != doc.Programmes[i-1].Stop {
 			t.Fatalf("programme %d starts at %s, previous stopped at %s", i, p.Start, doc.Programmes[i-1].Stop)
 		}
-		if p.Channel != "zip:77494" || p.Title != "Homes for sale in 77494" || p.Length != "30" {
+		if p.Channel != "zip:77494" || p.Length != "30" {
 			t.Errorf("programme %d = %+v", i, p)
 		}
 		if p.Desc == "" || p.Asset == "" {
@@ -94,13 +94,17 @@ func TestXMLTV_ContinuousBlocksToTheGuideHorizon(t *testing.T) {
 		}
 	}
 	// Every block carries the same copy (Daniel, 2026-10-20): the short
-	// form as the sub-title, the full text as the description, with the
-	// area in place of "from across the United States" on an area channel.
+	// form is the programme title, the rest of the text the description,
+	// with the area in place of "from across the United States" on an area
+	// channel. No sub-title: Roku's guide shows a title and a description.
 	for i, p := range doc.Programmes {
-		if p.SubTitle != "Explore real estate listings in 77494 with Dwellings.TV" {
-			t.Fatalf("programme %d sub-title = %q", i, p.SubTitle)
+		if p.Title != "Explore real estate listings in 77494 with Dwellings.TV" {
+			t.Fatalf("programme %d title = %q", i, p.Title)
 		}
-		if p.Desc != guideCopyFor("in 77494") {
+		if p.SubTitle != "" {
+			t.Fatalf("programme %d has a sub-title %q", i, p.SubTitle)
+		}
+		if p.Desc != guideDesc {
 			t.Fatalf("programme %d desc = %q", i, p.Desc)
 		}
 	}
@@ -124,24 +128,22 @@ func TestXMLTV_NationalChannelUsesTheCopyVerbatim(t *testing.T) {
 	}
 	doc := parseXMLTV(t, renderXMLTV(e, t0, t0.Add(time.Hour)))
 	p := doc.Programmes[0]
-	if p.SubTitle != "Explore real estate listings from across the United States with Dwellings.TV" {
-		t.Errorf("sub-title = %q", p.SubTitle)
+	if p.Title != "Explore real estate listings from across the United States with Dwellings.TV" {
+		t.Errorf("title = %q", p.Title)
 	}
-	if p.Desc != guideCopyFor("from across the United States") {
+	if p.Desc != guideDesc {
 		t.Errorf("desc = %q", p.Desc)
 	}
-	if !strings.Contains(p.Desc, "http://dwellings.tv/tv") || !strings.Contains(p.Desc, "same Wi-Fi network") {
-		t.Errorf("desc is not the full copy: %q", p.Desc)
+	if doc.Channels[0].Name != "Homes for sale across the US" {
+		t.Errorf("channel display-name = %q", doc.Channels[0].Name)
 	}
 }
 
-// guideCopyFor is Daniel's copy with the area phrase filled in.
-func guideCopyFor(where string) string {
-	return "Explore real estate listings " + where + " with Dwellings.TV, featuring an engaging video slideshow of properties nationwide. " +
-		"Scan the QR code in the bottom-right corner to access additional details about any listing. " +
-		"Customize your viewing experience in real time using your mobile device by scanning the periodic on-screen QR code or visiting http://dwellings.tv/tv to get started immediately. " +
-		"Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel."
-}
+// guideDesc is Daniel's description copy, the same on every channel.
+const guideDesc = "Featuring an engaging video slideshow of properties nationwide. " +
+	"Scan the QR code in the bottom-right corner to access additional details about any listing. " +
+	"Customize your viewing experience in real time using your mobile device by scanning the periodic on-screen QR code or visiting http://dwellings.tv/tv to get started immediately. " +
+	"Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel."
 
 func TestHandler_EPGXML(t *testing.T) {
 	m := newMemStore()
@@ -189,7 +191,7 @@ func TestHandler_EPGXMLSameCopyWithFeedsOn(t *testing.T) {
 	}
 	doc := parseXMLTV(t, rec.Body.Bytes())
 	for i, p := range doc.Programmes {
-		if p.Desc != guideCopyFor("in 77494") {
+		if p.Desc != guideDesc {
 			t.Fatalf("programme %d desc = %q", i, p.Desc)
 		}
 	}
