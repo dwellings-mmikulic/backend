@@ -14,11 +14,11 @@ lineup built today for next week would not contain next week's listings.
 
 The resolution is that the guide schedules *blocks*, not listings. Every
 30-minute block of a channel is the same show — the area's homes for sale —
-so its title, length and category are known arbitrarily far ahead; only the
-listings inside it are decided close to air time. Blocks the lineup already
-covers carry the listing count and price range (as `epg.json` does); blocks
-beyond it carry a standing description. Nothing is built for the far blocks,
-so the guide horizon is independent of the lineup horizon.
+so its title, length and category are known arbitrarily far ahead. Every
+block carries the same static description (Marko, 2026-10-20: no listing
+counts or prices, since viewers customize their feed and the slot's content
+changes by the minute). Nothing is built for the blocks ahead, so the guide
+horizon is independent of the lineup horizon.
 
 ## Endpoint
 
@@ -40,8 +40,10 @@ The document mirrors the sample's elements:
   (`now − 1 block`) up to `now + LINEAR_EPG_GUIDE_DAYS` (7) days, with no
   gaps: `start`/`stop` as `2026-10-19T09:00:00.000+0000` (the sample's
   shape, not the DTD's `20261019090000 +0000`), `title` = channel name,
-  `desc` as above (plus the "Customize this channel at …/tv" note when the
-  personal feeds are on, as in `epg.json`), categories Lifestyle and Real
+  `desc` = the static description ("The newest homes for sale in Texas:
+  photos, price and details of every listing, around the clock"), plus the
+  "Customize this channel at …/tv" note when the personal feeds are on, as
+  in `epg.json`, categories Lifestyle and Real
   Estate, `language` English, `length` 30 minutes, `episode-num
   system="assetID"` = `<key>@<YYYYMMDDTHHMM>` (unique per block), and the
   sample's `video`/`audio` blocks (1920x1080, stereo).
@@ -56,6 +58,6 @@ Left out on purpose: `icon` (no channel artwork URL is configured yet),
 ## Testing
 
 Unit tests on the renderer (continuous blocks to the horizon, timestamp
-shape, summary vs standing description, unique asset ids, escaping of the
+shape, one static description on every block, unique asset ids, escaping of the
 note) and the handler (headers, prologue, 7-day default, 404 for an unknown
 area, note present only with feeds on). Config test for the new setting.

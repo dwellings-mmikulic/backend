@@ -92,14 +92,13 @@ func TestXMLTV_ContinuousBlocksToTheGuideHorizon(t *testing.T) {
 			t.Errorf("programme %d has no category", i)
 		}
 	}
-	// The blocks whose lineup is materialised carry the listing summary;
-	// the rest describe the channel in general terms.
-	if !strings.Contains(doc.Programmes[1].Desc, " listings · $") {
-		t.Errorf("materialised block desc = %q", doc.Programmes[1].Desc)
-	}
-	last := doc.Programmes[len(doc.Programmes)-1]
-	if strings.Contains(last.Desc, "listings · $") || !strings.Contains(last.Desc, "77494") {
-		t.Errorf("generic block desc = %q", last.Desc)
+	// Every block carries the same static description: what airs in a slot
+	// varies per viewer (personal feeds) and changes by the minute, so no
+	// block is described by its listings.
+	for i, p := range doc.Programmes {
+		if p.Desc != "The newest homes for sale in 77494: photos, price and details of every listing, around the clock" {
+			t.Fatalf("programme %d desc = %q", i, p.Desc)
+		}
 	}
 	// Asset ids are unique per block.
 	seen := map[string]bool{}

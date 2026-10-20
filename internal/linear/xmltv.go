@@ -67,24 +67,20 @@ type xmltvAudio struct {
 	Stereo  string `xml:"stereo"`
 }
 
-// renderXMLTV is the XMLTV guide of e: one programme per programBlock from
-// the block on air at now up to until, with no gaps. A guide ingest wants a
-// continuous schedule days ahead, while the lineup chain only reaches
-// EPGHorizonHours and is extended lazily, so blocks e already covers carry
-// its listing summary and the rest describe the channel in general terms.
-// That is what makes a guide possible for a channel whose content changes by
-// the minute: every block is the same show — the area's homes for sale — and
-// only its details are decided close to air time. note is appended to every
+// renderXMLTV is the XMLTV guide of e's channel: one programme per
+// programBlock from the block on air at now up to until, with no gaps. A
+// guide ingest wants a continuous schedule days ahead, while the lineup only
+// reaches EPGHorizonHours and what airs in a slot varies per viewer
+// (personal feeds) and changes by the minute — so no block is described by
+// its listings. Every block is the same show, the area's homes for sale, and
+// carries the same static description. That is what makes a guide possible
+// for a channel whose content changes constantly. note is appended to every
 // description ("" for none).
 func renderXMLTV(e EPG, now, until time.Time, note string) []byte {
 	now, until = now.UTC(), until.UTC()
 	sc, _ := ParseKey(e.Channel.Scope)
 	key := e.Channel.Key
-
-	known := make(map[time.Time]Program, len(e.Programs))
-	for _, p := range e.Programs {
-		known[p.Start.UTC()] = p
-	}
+	desc := sc.guideDescription() + note
 
 	doc := xmltvTV{
 		Date:       now.Format("2006-01-02"),
@@ -94,16 +90,12 @@ func renderXMLTV(e EPG, now, until time.Time, note string) []byte {
 	}
 	minutes := strconv.Itoa(int(programBlock / time.Minute))
 	for b := now.Truncate(programBlock).Add(-programBlock); b.Before(until); b = b.Add(programBlock) {
-		desc := sc.guideDescription()
-		if p, ok := known[b]; ok {
-			desc = p.Description
-		}
 		doc.Programmes = append(doc.Programmes, xmltvProgramme{
 			Start:   b.Format(xmltvTime),
 			Stop:    b.Add(programBlock).Format(xmltvTime),
 			Channel: key,
 			Title:   xmltvText{Lang: "en", Text: e.Channel.Name},
-			Desc:    xmltvText{Lang: "en", Text: desc + note},
+			Desc:    xmltvText{Lang: "en", Text: desc},
 			Categories: []xmltvText{
 				{Lang: "en", Text: "Lifestyle"},
 				{Lang: "en", Text: "Real Estate"},
@@ -130,8 +122,7 @@ func renderXMLTV(e EPG, now, until time.Time, note string) []byte {
 	return buf.Bytes()
 }
 
-// guideDescription is the standing description of a block whose lineup is
-// not materialised yet.
+// guideDescription is the static description of every guide block.
 func (s Scope) guideDescription() string {
 	return "The newest homes for sale in " + s.areaName() + ": photos, price and details of every listing, around the clock"
 }
