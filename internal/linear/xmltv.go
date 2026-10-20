@@ -133,5 +133,5 @@ func renderXMLTV(e EPG, now, until time.Time, note string) []byte {
 // guideDescription is the standing description of a block whose lineup is
 // not materialised yet.
 func (s Scope) guideDescription() string {
-	return "The newest homes for sale in " + s.areaName() + ": photos, price and details of every listing, around the clock."
+	return "The newest homes for sale in " + s.areaName() + ": photos, price and details of every listing, around the clock"
 }
