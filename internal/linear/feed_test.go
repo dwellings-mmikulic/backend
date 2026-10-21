@@ -294,6 +294,12 @@ func TestFeed_TVPage(t *testing.T) {
 		if !strings.Contains(body, "Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel.") {
 			t.Errorf("%s: page is missing the same-Wi-Fi notice", p)
 		}
+		// Marko, 2026-10-21: a quiet share row for the channel itself. It
+		// shares the public site, never the household's /tv/ link, because
+		// that link controls their TV.
+		if !strings.Contains(body, `id="share"`) || !strings.Contains(body, "navigator.share") || !strings.Contains(body, `SHARE_URL = "https://dwellings.tv/"`) {
+			t.Errorf("%s: page is missing the share row", p)
+		}
 		// Daniel, 2026-10-15: no in-page player and no "watch here" copy;
 		// platforms will not carry a channel that pulls viewers to our site.
 		if strings.Contains(body, "No TV nearby") || strings.Contains(body, "hls.min.js") || strings.Contains(body, "<video") {
