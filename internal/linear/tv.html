@@ -9,7 +9,14 @@
   * { box-sizing:border-box; }
   body { margin:0; font:16px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background:var(--bg); color:var(--text); }
   main { max-width:480px; margin:0 auto; padding:24px 16px 48px; }
-  h1 { font-size:22px; margin:0 0 4px; }
+  .logo { display:inline-flex; align-items:center; gap:10px; margin:0 0 6px; color:#fff; text-decoration:none; }
+  .logo svg { width:46px; height:46px; flex-shrink:0; }
+  .logo-text { display:flex; flex-direction:column; align-items:center; line-height:1; }
+  .logo-word { font-family:"Poppins", "Inter", -apple-system, BlinkMacSystemFont, sans-serif; font-weight:500; font-size:1.35rem; letter-spacing:-0.01em; }
+  .logo-word span { color:#2b8cff; }
+  .logo-tag { display:flex; align-items:center; gap:7px; margin-top:6px; font-family:"Poppins", "Inter", -apple-system, BlinkMacSystemFont, sans-serif; font-size:0.42rem; font-weight:500; letter-spacing:0.3em; text-transform:uppercase; color:#3b8ee0; white-space:nowrap; }
+  .logo-tag::before, .logo-tag::after { content:""; width:16px; height:1px; background:#3b8ee0; }
+  footer { margin-top:32px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; text-align:center; }
   .muted { color:var(--muted); font-size:14px; }
   .card { background:var(--card); border-radius:14px; padding:16px; margin:16px 0; }
   .big { font-size:20px; font-weight:600; }
@@ -26,8 +33,32 @@
 </head>
 <body>
 <main>
-  <h1>Dwellings TV</h1>
-  <div class="muted">Pick the area your TV shows homes from.</div>
+  <a href="https://dwellings.tv/" class="logo" aria-label="Dwellings.TV home">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -6 112 112" aria-hidden="true">
+      <defs>
+        <filter id="g" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g filter="url(#g)">
+        <g fill="none" stroke="#3AA8FF" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4 H50 A44 46 0 0 1 50 96 H4 Z"/>
+          <path d="M20.5 96 V52 L45 27 L60.5 39.5 V32 H67.5 V45 L74 50.5 V70"/>
+        </g>
+        <g fill="#4FC3FF">
+          <rect x="40.5" y="45" width="5.8" height="5.8" rx="0.8"/><rect x="48" y="45" width="5.8" height="5.8" rx="0.8"/>
+          <rect x="40.5" y="52.5" width="5.8" height="5.8" rx="0.8"/><rect x="48" y="52.5" width="5.8" height="5.8" rx="0.8"/>
+          <path d="M41.5 70.5 Q39.5 69.3 39.5 71.6 V85.4 Q39.5 87.7 41.5 86.5 L56.5 79.6 Q58.5 78.5 56.5 77.4 Z"/>
+        </g>
+      </g>
+    </svg>
+    <span class="logo-text">
+      <span class="logo-word">Dwellings<span>.TV</span></span>
+      <span class="logo-tag">Lounge with Listings</span>
+    </span>
+  </a>
+  <h1 class="muted" style="font-size:16px;font-weight:400;margin:0">Pick the area your TV shows homes from.</h1>
 
   <div class="card">
     <div class="muted">Your TV is showing homes in</div>
@@ -44,6 +75,7 @@
     <div id="status" class="status"></div>
   </div>
 
+  <footer>Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel.</footer>
 </main>
 <script>
 (function () {
