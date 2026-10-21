@@ -286,6 +286,14 @@ func TestFeed_TVPage(t *testing.T) {
 		if !strings.Contains(body, "/feed/areas") {
 			t.Errorf("%s: page is missing the areas call", p)
 		}
+		// Marko, 2026-10-21: the dwellings.tv logo top left (inlined, so the
+		// page is whole on any origin) and the same-Wi-Fi notice at the bottom.
+		if !strings.Contains(body, `class="logo"`) || !strings.Contains(body, "<svg") || !strings.Contains(body, "Dwellings<span>.TV</span>") {
+			t.Errorf("%s: page is missing the logo", p)
+		}
+		if !strings.Contains(body, "Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel.") {
+			t.Errorf("%s: page is missing the same-Wi-Fi notice", p)
+		}
 		// Daniel, 2026-10-15: no in-page player and no "watch here" copy;
 		// platforms will not carry a channel that pulls viewers to our site.
 		if strings.Contains(body, "No TV nearby") || strings.Contains(body, "hls.min.js") || strings.Contains(body, "<video") {
