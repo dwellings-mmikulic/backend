@@ -21,6 +21,8 @@ type memStore struct {
 	spans    map[viewer.ID][]Span
 	bumpers  map[int64]Bumper
 	anchors  map[[2]string]Anchor // household hex, channel key
+
+	spansCalls, anchorCalls int // store reads, for the caching tests
 }
 
 type memClip struct {
@@ -256,6 +258,7 @@ func (m *memStore) ListingsByClipID(_ context.Context, ids []int64) ([]Listing, 
 func (m *memStore) Spans(_ context.Context, h viewer.ID) ([]Span, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.spansCalls++
 	if len(m.spans[h]) == 0 {
 		return nil, nil
 	}
@@ -315,6 +318,7 @@ func (m *memStore) ListCities(_ context.Context, min int) ([]City, error) {
 func (m *memStore) Anchor(_ context.Context, h viewer.ID, channel string) (*Anchor, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.anchorCalls++
 	if a, ok := m.anchors[[2]string{h.String(), channel}]; ok {
 		return &a, nil
 	}

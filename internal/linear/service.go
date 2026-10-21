@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/dwellingtw/backend/internal/viewer"
 )
 
 // Options tune channel assembly. Zero values take the defaults below.
@@ -73,6 +75,31 @@ type Service struct {
 	citiesMu sync.Mutex
 	cities   []City
 	citiesAt time.Time // when cities was last loaded
+
+	// Per-household state a customized playlist poll needs (see ttlCache).
+	// households holds a household's spans, or an empty slice for an id no
+	// feed exists for: a platform that fills ip= for every viewer asks
+	// about every viewer, and most never scanned the QR.
+	households *ttlCache[viewer.ID, []Span]
+	anchors    *ttlCache[anchorKey, *Anchor]
+}
+
+const (
+	// householdTTL bounds how long a household's spans and anchors are
+	// served from memory. A write on this box is served at once (the writer
+	// forgets the entry); a write on another box within the TTL.
+	householdTTL = cacheTTL
+	// householdMaxEntries caps each per-household cache. Entries are a few
+	// hundred bytes, so this is tens of MB at most, and it must hold every
+	// household polling at once or the caches thrash: a platform that fills
+	// ip= asks about every viewer, not only those who customized.
+	householdMaxEntries = 1 << 16
+)
+
+// anchorKey identifies a household's anchor on a channel.
+type anchorKey struct {
+	household viewer.ID
+	channel   string
 }
 
 // contentTTL is how long HasContent reuses its answer.
@@ -85,7 +112,10 @@ type cached struct {
 
 // New creates a Service.
 func New(store Store, opts Options, log *slog.Logger) *Service {
-	return &Service{store: store, opts: opts.withDefaults(), now: time.Now, log: log, cache: map[string]cached{}}
+	s := &Service{store: store, opts: opts.withDefaults(), now: time.Now, log: log, cache: map[string]cached{}}
+	s.households = newTTLCache[viewer.ID, []Span](householdMaxEntries, householdTTL, func() time.Time { return s.now() })
+	s.anchors = newTTLCache[anchorKey, *Anchor](householdMaxEntries, householdTTL, func() time.Time { return s.now() })
+	return s
 }
 
 // cacheGet returns the cached versions of key when the entry is younger than
