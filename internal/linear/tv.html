@@ -16,6 +16,12 @@
   .logo-word span { color:#2b8cff; }
   .logo-tag { display:flex; align-items:center; gap:7px; margin-top:6px; font-family:"Poppins", "Inter", -apple-system, BlinkMacSystemFont, sans-serif; font-size:0.42rem; font-weight:500; letter-spacing:0.3em; text-transform:uppercase; color:#3b8ee0; white-space:nowrap; }
   .logo-tag::before, .logo-tag::after { content:""; width:16px; height:1px; background:#3b8ee0; }
+  .share { text-align:center; margin-top:28px; }
+  .share .muted { margin-bottom:10px; }
+  .share button { width:auto; margin:0; padding:10px 20px; font-size:15px; background:transparent; color:var(--text); border:1px solid var(--line); }
+  .share .links { display:none; justify-content:center; gap:18px; margin-top:12px; font-size:15px; }
+  .share .links a { color:var(--accent); text-decoration:none; }
+  .share.alt button { display:none; } .share.alt .links { display:flex; }
   footer { margin-top:32px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; text-align:center; }
   .muted { color:var(--muted); font-size:14px; }
   .card { background:var(--card); border-radius:14px; padding:16px; margin:16px 0; }
@@ -73,6 +79,17 @@
     <div id="cities" class="list"></div>
     <button id="go" disabled>Show this area on my TV</button>
     <div id="status" class="status"></div>
+  </div>
+
+  <div id="share" class="share">
+    <div class="muted">Know someone who would enjoy Dwellings.TV?</div>
+    <button id="share-btn" type="button">Share the channel</button>
+    <div class="links">
+      <a id="share-x" target="_blank" rel="noopener">X</a>
+      <a id="share-fb" target="_blank" rel="noopener">Facebook</a>
+      <a id="share-copy" href="#">Copy link</a>
+    </div>
+    <div id="share-status" class="status" style="text-align:center"></div>
   </div>
 
   <footer>Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel.</footer>
@@ -145,6 +162,27 @@
         show(f);
       })
       .catch(function () { setStatus("Something went wrong. Please try again.", "err"); update(); });
+  });
+  var SHARE_URL = "https://dwellings.tv/";
+  var SHARE_TEXT = "Dwellings.TV - Lounge With Listings. Browse homes for sale from your couch, free on Roku.";
+  function shareStatus(msg) {
+    $("share-status").textContent = msg;
+    if (msg) setTimeout(function () { $("share-status").textContent = ""; }, 3000);
+  }
+  function copyLink() {
+    var done = function () { shareStatus("Link copied"); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(SHARE_URL).then(done, function () { window.prompt("Copy this link", SHARE_URL); });
+    else window.prompt("Copy this link", SHARE_URL);
+  }
+  $("share-x").href = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(SHARE_TEXT) + "&url=" + encodeURIComponent(SHARE_URL);
+  $("share-fb").href = "https://www.facebook.com/sharer/sharer.php?u=" + encodeURIComponent(SHARE_URL);
+  $("share-copy").addEventListener("click", function (e) { e.preventDefault(); copyLink(); });
+  $("share-btn").addEventListener("click", function () {
+    if (navigator.share) {
+      navigator.share({ title: "Dwellings.TV", text: SHARE_TEXT, url: SHARE_URL }).catch(function () {});
+    } else {
+      $("share").className = "share alt";
+    }
   });
   load();
 })();
