@@ -291,6 +291,10 @@ func TestFeed_TVPage(t *testing.T) {
 		if !strings.Contains(body, `class="logo"`) || !strings.Contains(body, "<svg") || !strings.Contains(body, "Dwellings<span>.TV</span>") {
 			t.Errorf("%s: page is missing the logo", p)
 		}
+		// Daniel, 2026-10-21: the intro line and the button label.
+		if !strings.Contains(body, "Enter a zip code or city to customize your stream.") || !strings.Contains(body, ">Apply Location<") {
+			t.Errorf("%s: page is missing Daniel's copy", p)
+		}
 		if !strings.Contains(body, "Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel.") {
 			t.Errorf("%s: page is missing the same-Wi-Fi notice", p)
 		}
