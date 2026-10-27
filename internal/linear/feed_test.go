@@ -22,7 +22,7 @@ type feedTestAudience struct{}
 func (feedTestAudience) LastChannel(context.Context, viewer.ID, time.Time) (string, bool, error) {
 	return "", false, nil
 }
-func (feedTestAudience) Stats(context.Context, string, time.Time) (viewer.Stats, error) {
+func (feedTestAudience) Stats(context.Context, string, string, time.Time) (viewer.Stats, error) {
 	return viewer.Stats{}, nil
 }
 
