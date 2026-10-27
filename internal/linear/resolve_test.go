@@ -16,15 +16,17 @@ import (
 )
 
 type fakeAudience struct {
-	last  map[viewer.ID]string
-	stats viewer.Stats
+	last     map[viewer.ID]string
+	stats    viewer.Stats
+	platform string // of the last Stats call
 }
 
 func (f *fakeAudience) LastChannel(_ context.Context, id viewer.ID, _ time.Time) (string, bool, error) {
 	ch, ok := f.last[id]
 	return ch, ok, nil
 }
-func (f *fakeAudience) Stats(context.Context, string, time.Time) (viewer.Stats, error) {
+func (f *fakeAudience) Stats(_ context.Context, _, platform string, _ time.Time) (viewer.Stats, error) {
+	f.platform = platform
 	return f.stats, nil
 }
 

@@ -161,6 +161,11 @@ CREATE TABLE IF NOT EXISTS viewer_clients (
 CREATE INDEX IF NOT EXISTS idx_viewer_clients_last_seen
     ON viewer_clients (last_seen);
 
+-- platform: the partner feed (/channels/<platform>/…) a viewer came through,
+-- '' for our own; see docs/superpowers/specs/2026-10-27-platform-feeds-design.md.
+ALTER TABLE viewer_heartbeats ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT '';
+ALTER TABLE viewer_clients    ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT '';
+
 -- Personal feeds (see docs/superpowers/specs/2026-10-09-personal-feeds-qr-design.md).
 -- bumpers: our own clips between listings — the QR bumper (see
 -- docs/superpowers/specs/2026-10-13-qr-bumper-design.md) and the ad-break
