@@ -15,7 +15,6 @@ type SearchFeed struct {
 	Version                      string        `json:"version"`
 	DefaultLanguage              string        `json:"defaultLanguage"`
 	DefaultAvailabilityCountries []string      `json:"defaultAvailabilityCountries"`
-	NextPageURL                  string        `json:"nextPageUrl,omitempty"`
 	Assets                       []SearchAsset `json:"assets"`
 }
 
