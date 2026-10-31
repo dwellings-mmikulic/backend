@@ -28,7 +28,7 @@ func (s *Service) AnchoredPlaylist(ctx context.Context, h viewer.ID, sc Scope, n
 		return nil, err
 	}
 	key := sc.Key()
-	a, err := s.store.Anchor(ctx, h, key)
+	a, err := s.cachedAnchor(ctx, h, key)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func (s *Service) AnchoredPlaylist(ctx context.Context, h viewer.ID, sc Scope, n
 			return nil, err
 		}
 	}
-	personal, _, err := s.personalSegments(ctx, h, now)
+	personal, _, err := s.personalSegments(ctx, spans, now)
 	if err != nil {
 		return nil, err
 	}
@@ -65,6 +65,24 @@ func (s *Service) AnchoredPlaylist(ctx context.Context, h viewer.ID, sc Scope, n
 	var buf bytes.Buffer
 	writePlaylist(&buf, liveWindow.trim(segs))
 	return buf.Bytes(), nil
+}
+
+// cachedAnchor is h's anchor on channel key, or nil. An anchor is written
+// once and never changes, so one found is served from memory for
+// householdTTL; nil is not cached, the caller creates the anchor at once.
+func (s *Service) cachedAnchor(ctx context.Context, h viewer.ID, key string) (*Anchor, error) {
+	k := anchorKey{h, key}
+	if a, ok := s.anchors.get(k); ok {
+		return a, nil
+	}
+	a, err := s.store.Anchor(ctx, h, key)
+	if err != nil {
+		return nil, err
+	}
+	if a != nil {
+		s.anchors.put(k, a)
+	}
+	return a, nil
 }
 
 // anchor creates and stores h's anchor on channel key at now, then re-reads
@@ -98,6 +116,7 @@ func (s *Service) anchor(ctx context.Context, h viewer.ID, spans []Span, key str
 	if stored == nil {
 		return nil, fmt.Errorf("household %s: anchor on %s vanished after insert", h, key)
 	}
+	s.anchors.put(anchorKey{h, key}, stored)
 	s.log.Info("channel anchor created", "household", h.String(), "channel", key, "starts_at", S)
 	return stored, nil
 }
