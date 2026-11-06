@@ -5,11 +5,8 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strconv"
 	"time"
 
 	httpSwagger "github.com/swaggo/http-swagger"
@@ -20,24 +17,12 @@ import (
 	"github.com/dwellingtw/backend/internal/property"
 )
 
-// feedSource provides one page of the listings whose videos are ready, newest
-// first, continuing after the keyset position when it is set, and whether a
-// further page exists.
+// feedSource provides the fixed set of listings the Roku Search feed carries.
 type feedSource interface {
-	ListReadyForFeed(ctx context.Context, limit int, after *property.FeedKey) ([]property.Property, bool, error)
+	ListSearchFeed(ctx context.Context) ([]property.Property, error)
 }
 
-// Page sizes of /roku/search-feed.json. Roku's crawler walks nextPageUrl
-// links through the whole catalogue (close to a million listings), so page
-// count is not a concern but page weight is: at ~0.55 KB per asset the
-// default is ~280 KB and the cap ~1.1 MB, each well under a second to serve.
-const (
-	defaultSearchLimit = 500
-	maxSearchLimit     = 2000
-)
-
-// feedCacheControl lets Bunny and browsers hold a page for five minutes; a
-// listing rendered in the meantime shows up on the next refresh.
+// feedCacheControl lets Bunny and browsers hold the feed for five minutes.
 const feedCacheControl = "public, max-age=300"
 
 // Server is the HTTP server of the api role.
@@ -94,74 +79,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-// handleSearchFeed serves the Roku Search feed: the published listings in
-// the catalogue format Roku ingests for its home-screen search, one page at
-// a time. Roku follows nextPageUrl from the first page through the last, so
-// the first page is the URL to register in the developer dashboard. The Roku
-// app itself reads /api/v1/properties, not this.
+// handleSearchFeed serves the Roku Search feed: a fixed set of published
+// listings (see property.ListSearchFeed) in the catalogue format Roku ingests
+// for its home-screen search, all on one page with no nextPageUrl. Query
+// parameters are ignored, so old paged URLs get the same page. The Roku app
+// itself reads /api/v1/properties, not this.
 func (s *Server) handleSearchFeed(w http.ResponseWriter, r *http.Request) {
-	limit, after, err := parseFeedParams(r.URL.Query(), defaultSearchLimit, maxSearchLimit)
-	if err != nil {
-		writeFeedError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	props, hasMore, err := s.repo.ListReadyForFeed(r.Context(), limit, after)
+	props, err := s.repo.ListSearchFeed(r.Context())
 	if err != nil {
 		s.log.Error("search feed query failed", "error", err)
 		writeFeedError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	doc := feed.BuildSearch(props, s.now())
-	if hasMore && len(props) > 0 {
-		doc.NextPageURL = nextPageURL(r, feed.EncodeCursor(&props[len(props)-1]), limit)
-	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", feedCacheControl)
 	if err := json.NewEncoder(w).Encode(doc); err != nil {
 		s.log.Error("search feed encode failed", "error", err)
 	}
-}
-
-// parseFeedParams reads ?limit= (1..maxLimit, default defaultLimit; above
-// the cap is clamped, not refused) and ?cursor= (the token inside a previous
-// page's nextPageUrl).
-func parseFeedParams(q url.Values, defaultLimit, maxLimit int) (int, *property.FeedKey, error) {
-	limit := defaultLimit
-	if raw := q.Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 {
-			return 0, nil, errors.New("limit must be a positive integer")
-		}
-		limit = min(n, maxLimit)
-	}
-	var after *property.FeedKey
-	if tok := q.Get("cursor"); tok != "" {
-		key, err := feed.DecodeCursor(tok)
-		if err != nil {
-			return 0, nil, err
-		}
-		after = key
-	}
-	return limit, after, nil
-}
-
-// nextPageURL is the absolute URL of the following page, built from the
-// request as nginx forwarded it (X-Forwarded-Proto + Host). Roku's schema
-// requires nextPageUrl to be absolute.
-func nextPageURL(r *http.Request, cursor string, limit int) string {
-	scheme := r.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		scheme = "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-	}
-	q := url.Values{}
-	q.Set("cursor", cursor)
-	q.Set("limit", strconv.Itoa(limit))
-	return scheme + "://" + r.Host + r.URL.Path + "?" + q.Encode()
 }
 
 func writeFeedError(w http.ResponseWriter, status int, msg string) {

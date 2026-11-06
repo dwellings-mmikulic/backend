@@ -33,7 +33,9 @@ func (f *fakeStore) Purge(_ context.Context, before time.Time) (int64, error) {
 func (f *fakeStore) LastChannel(context.Context, ID, time.Time) (string, bool, error) {
 	return "", false, nil
 }
-func (f *fakeStore) Stats(context.Context, string, time.Time) (Stats, error) { return Stats{}, nil }
+func (f *fakeStore) Stats(context.Context, string, string, time.Time) (Stats, error) {
+	return Stats{}, nil
+}
 func (f *fakeStore) Clients(context.Context, time.Time, int) ([]ClientSeen, error) {
 	return nil, nil
 }

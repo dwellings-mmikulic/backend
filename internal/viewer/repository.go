@@ -35,18 +35,20 @@ func (r *Repository) InsertHeartbeats(ctx context.Context, hb []Heartbeat) error
 	minutes := make([]time.Time, len(hb))
 	ips := make([]string, len(hb))
 	agents := make([]string, len(hb))
+	plats := make([]string, len(hb))
 	for i, b := range hb {
 		hashes[i] = b.Viewer[:]
 		channels[i] = b.Channel
 		minutes[i] = b.Minute
 		ips[i] = b.Client.IP
 		agents[i] = b.Client.UserAgent
+		plats[i] = b.Client.Platform
 	}
 	const ins = `
-INSERT INTO viewer_heartbeats (viewer_hash, channel_key, minute)
-SELECT * FROM unnest($1::bytea[], $2::text[], $3::timestamptz[])
+INSERT INTO viewer_heartbeats (viewer_hash, channel_key, minute, platform)
+SELECT * FROM unnest($1::bytea[], $2::text[], $3::timestamptz[], $4::text[])
 ON CONFLICT DO NOTHING`
-	if _, err := tx.Exec(ctx, ins, hashes, channels, minutes); err != nil {
+	if _, err := tx.Exec(ctx, ins, hashes, channels, minutes, plats); err != nil {
 		return fmt.Errorf("insert heartbeats: %w", err)
 	}
 	// Latest minute per viewer wins; ties keep whichever unnest yields last,
@@ -63,17 +65,19 @@ ON CONFLICT (viewer_hash) DO UPDATE
 		return fmt.Errorf("upsert last channel: %w", err)
 	}
 	// Only the seen range is kept, so a batch replayed after a failed flush
-	// changes nothing.
+	// changes nothing. A client seen through two feeds keeps the platform
+	// of its latest batch (max picks one within a batch).
 	const clients = `
-INSERT INTO viewer_clients (ip, user_agent, channel_key, first_seen, last_seen)
-SELECT ip, ua, c, min(m), max(m)
-  FROM unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[]) AS t(ip, ua, c, m)
+INSERT INTO viewer_clients (ip, user_agent, channel_key, first_seen, last_seen, platform)
+SELECT ip, ua, c, min(m), max(m), max(p)
+  FROM unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[], $5::text[]) AS t(ip, ua, c, m, p)
  WHERE ip <> ''
  GROUP BY ip, ua, c
 ON CONFLICT (ip, user_agent, channel_key) DO UPDATE
    SET first_seen = LEAST(viewer_clients.first_seen, EXCLUDED.first_seen),
-       last_seen  = GREATEST(viewer_clients.last_seen, EXCLUDED.last_seen)`
-	if _, err := tx.Exec(ctx, clients, ips, agents, channels, minutes); err != nil {
+       last_seen  = GREATEST(viewer_clients.last_seen, EXCLUDED.last_seen),
+       platform   = EXCLUDED.platform`
+	if _, err := tx.Exec(ctx, clients, ips, agents, channels, minutes, plats); err != nil {
 		return fmt.Errorf("upsert clients: %w", err)
 	}
 	return tx.Commit(ctx)
@@ -94,15 +98,16 @@ func (r *Repository) LastChannel(ctx context.Context, id ID, since time.Time) (s
 }
 
 // Stats implements Store.
-func (r *Repository) Stats(ctx context.Context, channel string, now time.Time) (Stats, error) {
+func (r *Repository) Stats(ctx context.Context, channel, platform string, now time.Time) (Stats, error) {
 	const q = `
 SELECT count(DISTINCT viewer_hash) FILTER (WHERE minute >= $2::timestamptz - interval '2 minutes'),
        count(DISTINCT viewer_hash) FILTER (WHERE minute >= $2::timestamptz - interval '24 hours'),
        count(DISTINCT viewer_hash)
   FROM viewer_heartbeats
- WHERE channel_key = $1 AND minute >= $2::timestamptz - interval '7 days'`
+ WHERE channel_key = $1 AND minute >= $2::timestamptz - interval '7 days'
+   AND ($3 = '' OR platform = $3)`
 	var s Stats
-	if err := r.pool.QueryRow(ctx, q, channel, now).Scan(&s.Concurrent, &s.Unique24h, &s.Unique7d); err != nil {
+	if err := r.pool.QueryRow(ctx, q, channel, now, platform).Scan(&s.Concurrent, &s.Unique24h, &s.Unique7d); err != nil {
 		return Stats{}, fmt.Errorf("stats %s: %w", channel, err)
 	}
 	return s, nil
@@ -111,7 +116,7 @@ SELECT count(DISTINCT viewer_hash) FILTER (WHERE minute >= $2::timestamptz - int
 // Clients implements Store.
 func (r *Repository) Clients(ctx context.Context, since time.Time, limit int) ([]ClientSeen, error) {
 	const q = `
-SELECT ip, user_agent, channel_key, first_seen, last_seen
+SELECT ip, user_agent, channel_key, platform, first_seen, last_seen
   FROM viewer_clients
  WHERE last_seen >= $1
  ORDER BY last_seen DESC, ip, channel_key
@@ -122,7 +127,7 @@ SELECT ip, user_agent, channel_key, first_seen, last_seen
 	}
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ClientSeen, error) {
 		var c ClientSeen
-		err := row.Scan(&c.IP, &c.UserAgent, &c.Channel, &c.FirstSeen, &c.LastSeen)
+		err := row.Scan(&c.IP, &c.UserAgent, &c.Channel, &c.Platform, &c.FirstSeen, &c.LastSeen)
 		return c, err
 	})
 	if err != nil {

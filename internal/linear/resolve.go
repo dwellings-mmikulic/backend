@@ -16,7 +16,7 @@ import (
 // Audience is what the resolver reads about viewers (viewer.Store).
 type Audience interface {
 	LastChannel(ctx context.Context, id viewer.ID, since time.Time) (string, bool, error)
-	Stats(ctx context.Context, channel string, now time.Time) (viewer.Stats, error)
+	Stats(ctx context.Context, channel, platform string, now time.Time) (viewer.Stats, error)
 }
 
 // Tracker receives a heartbeat per live-playlist request (viewer.Recorder).
@@ -59,7 +59,9 @@ func (h *Handler) track(r *http.Request, sc Scope, now time.Time) {
 	if h.viewers == nil || h.viewers.Tracker == nil {
 		return
 	}
-	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, viewer.NewClient(r))
+	c := viewer.NewClient(r)
+	c.Platform = r.PathValue("platform") // checked by platformOnly; "" on our own routes
+	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, c)
 }
 
 // resolveResponse is the body of /channels/resolve.
@@ -234,7 +236,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s, err := h.viewers.Audience.Stats(r.Context(), sc.Key(), h.svc.now())
+	s, err := h.viewers.Audience.Stats(r.Context(), sc.Key(), r.PathValue("platform"), h.svc.now())
 	if err != nil {
 		h.log.Error("stats failed", "channel", sc.Key(), "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

@@ -309,12 +309,14 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
   `assets[]` of `type: "shortForm"`, id and `playId` both the zpid (Roku
   hands `playId` back to the app as the deep link `contentId`,
   `mediaType=shortFormVideo`), genre `house/garden`, rating `USA_PR` `NR`,
-  main image = first photo, `license: free`, `quality: fhd`, US only. Keyset
-  paged, newest render first: `?limit=` 1–2,000 (default 500, ~280 KB a
-  page) and `?cursor=`; the spec's root `nextPageUrl` carries the link, which
-  Roku's crawler follows to the last page; it is absent on the last page.
-  Pages are cacheable for five minutes. Register
-  the first-page URL under *App → Search feeds* in the Roku developer
+  main image = first photo, `license: free`, `quality: fhd`, US only. One page, a
+  fixed set of 3,000 listings (~1.7 MB): the newest published renders at the
+  first request, pinned in `search_feed_pins` and never changed after. A
+  pinned listing that is re-rendering drops out until it is ready again;
+  nothing replaces it. `TRUNCATE search_feed_pins` to pick a fresh set. No
+  `nextPageUrl`, and query parameters are ignored. Cacheable for five
+  minutes. Register
+  the URL under *App → Search feeds* in the Roku developer
   dashboard, after running it through *Search feed validator* there.
 - `GET /api/v1/properties`, `GET /api/v1/properties/{zpid}` — public listings API, see [API](#api) below.
 - `GET /swagger/index.html` — interactive Swagger UI for the public API (spec at `/swagger/doc.json`).

@@ -27,11 +27,18 @@ ALTER TABLE properties ADD COLUMN IF NOT EXISTS video_rendered_at   TIMESTAMPTZ;
 ALTER TABLE properties ADD COLUMN IF NOT EXISTS video_duration_secs INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_properties_video_status ON properties (video_status);
--- The Roku feed pages the published listings newest render first; this
--- covers the keyset ordering so every page is an index range scan.
+-- The published listings, newest render first: the order the Roku Search
+-- feed's listings are pinned in (search_feed_pins below).
 CREATE INDEX IF NOT EXISTS idx_properties_feed
     ON properties (video_rendered_at DESC, id DESC)
     WHERE video_status = 'ready' AND video_url IS NOT NULL;
+
+-- The listings the Roku Search feed carries: pinned once, then fixed (see
+-- property.ListSearchFeed). TRUNCATE it to pin a fresh set.
+CREATE TABLE IF NOT EXISTS search_feed_pins (
+    property_id BIGINT PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,
+    pinned_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- Enrichment columns: fetched once per property from the Zillow
 -- property-details API, then served from the DB forever (see
@@ -160,6 +167,11 @@ CREATE TABLE IF NOT EXISTS viewer_clients (
 );
 CREATE INDEX IF NOT EXISTS idx_viewer_clients_last_seen
     ON viewer_clients (last_seen);
+
+-- platform: the partner feed (/channels/<platform>/…) a viewer came through,
+-- '' for our own; see docs/superpowers/specs/2026-10-27-platform-feeds-design.md.
+ALTER TABLE viewer_heartbeats ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT '';
+ALTER TABLE viewer_clients    ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT '';
 
 -- Personal feeds (see docs/superpowers/specs/2026-10-09-personal-feeds-qr-design.md).
 -- bumpers: our own clips between listings — the QR bumper (see

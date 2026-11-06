@@ -145,32 +145,31 @@ func buildCountQuery(f Filter) (string, []any) {
 	return "SELECT COUNT(*) FROM properties" + where, args
 }
 
-// FeedKey is the keyset position of the last row of the previous Roku feed
-// page: the feed is ordered newest render first, with id as the tiebreaker.
-type FeedKey struct {
-	RenderedAt time.Time
-	ID         int64
-}
+// SearchFeedSize is how many listings the Roku Search feed carries. Roku
+// wants one page of a few thousand items, so the feed is a fixed set rather
+// than the whole catalogue.
+const SearchFeedSize = 3000
 
-// feedColumns are what the Roku feed needs per listing; id and
-// video_rendered_at feed the next-page cursor.
-const feedColumns = `id, zpid, sale_price, address, city, state, zip,
-       home_size_sqft, lot_size_sqft, bedrooms, bathrooms, detail_url,
-       image_urls, COALESCE(video_url,''), COALESCE(video_duration_secs,0),
-       video_rendered_at`
+// feedColumns are what the Roku Search feed needs per listing.
+const feedColumns = `p.id, p.zpid, p.sale_price, p.address, p.city, p.state, p.zip,
+       p.home_size_sqft, p.lot_size_sqft, p.bedrooms, p.bathrooms, p.detail_url,
+       p.image_urls, COALESCE(p.video_url,''), COALESCE(p.video_duration_secs,0),
+       p.video_rendered_at`
 
-// buildFeedQuery renders one page of the Roku feed: published listings,
-// newest render first, continuing after the keyset position when after is
-// set. It asks for limit+1 rows so the caller can tell whether a next page
-// exists without a second query. idx_properties_feed covers the whole
-// ordering, so each page is an index range scan however deep it is.
-func buildFeedQuery(limit int, after *FeedKey) (string, []any) {
-	q := "SELECT " + feedColumns + " FROM properties WHERE " + publishedPredicate
-	var args []any
-	if after != nil {
-		args = append(args, after.RenderedAt, after.ID)
-		q += " AND (video_rendered_at, id) < ($1, $2)"
-	}
-	q += fmt.Sprintf(" ORDER BY video_rendered_at DESC, id DESC LIMIT %d", limit+1)
-	return q, args
-}
+// pinSearchFeedQuery fills search_feed_pins once: the SearchFeedSize newest
+// published renders at that moment. The NOT EXISTS guard makes it a no-op
+// for good after the first run, so the feed's list never changes on its own;
+// truncating the table picks a fresh set on the next request.
+var pinSearchFeedQuery = fmt.Sprintf(`
+INSERT INTO search_feed_pins (property_id)
+SELECT id FROM properties
+WHERE %s AND NOT EXISTS (SELECT 1 FROM search_feed_pins)
+ORDER BY video_rendered_at DESC, id DESC
+LIMIT %d`, publishedPredicate, SearchFeedSize)
+
+// searchFeedQuery reads the pinned listings that are still published, in a
+// fixed order. A pinned listing whose video is re-rendering drops out until
+// it is ready again; nothing takes its place.
+var searchFeedQuery = "SELECT " + feedColumns +
+	" FROM search_feed_pins s JOIN properties p ON p.id = s.property_id WHERE " +
+	"p.video_status = 'ready' AND p.video_url IS NOT NULL ORDER BY p.id"

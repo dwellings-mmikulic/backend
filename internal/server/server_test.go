@@ -3,11 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,34 +69,16 @@ func TestPublisherFeedIsGone(t *testing.T) {
 	}
 }
 
-// stubFeed pages over props in memory the way the repository does: after is
-// the position of the previous page's last row, and limit+1 rows are read to
-// learn whether another page exists.
+// stubFeed serves props as the pinned set and counts the calls.
 type stubFeed struct {
 	props []property.Property
-	calls []feedCall
+	err   error
+	calls int
 }
 
-type feedCall struct {
-	limit int
-	after *property.FeedKey
-}
-
-func (s *stubFeed) ListReadyForFeed(_ context.Context, limit int, after *property.FeedKey) ([]property.Property, bool, error) {
-	s.calls = append(s.calls, feedCall{limit, after})
-	start := 0
-	if after != nil {
-		for i, p := range s.props {
-			if p.ID == after.ID {
-				start = i + 1
-			}
-		}
-	}
-	rest := s.props[start:]
-	if len(rest) > limit {
-		return rest[:limit], true, nil
-	}
-	return rest, false, nil
+func (s *stubFeed) ListSearchFeed(context.Context) ([]property.Property, error) {
+	s.calls++
+	return s.props, s.err
 }
 
 func rendered(i int) *time.Time {
@@ -137,97 +119,50 @@ func getSearch(t *testing.T, s *Server, target string) (*httptest.ResponseRecord
 	return rec, page
 }
 
-func TestSearchFeed_FirstPageIsCappedAndLinksToTheNext(t *testing.T) {
-	repo := &stubFeed{props: listings(defaultSearchLimit + 50)}
+func TestSearchFeed_IsOnePageOfThePinnedSet(t *testing.T) {
+	repo := &stubFeed{props: listings(2500)}
 	s := newFeedServer(repo)
 	rec, page := getSearch(t, s, "/roku/search-feed.json")
 
-	if page.Version != "1" || len(page.Assets) != defaultSearchLimit {
-		t.Fatalf("version %s, %d assets, want \"1\" and the default limit %d", page.Version, len(page.Assets), defaultSearchLimit)
+	if page.Version != "1" || len(page.Assets) != 2500 {
+		t.Fatalf("version %s, %d assets, want \"1\" and all 2500 pinned listings", page.Version, len(page.Assets))
 	}
-	if page.Assets[0].ID != "1" || page.Assets[defaultSearchLimit-1].ID != strconv.Itoa(defaultSearchLimit) {
-		t.Errorf("page order wrong: first %s last %s", page.Assets[0].ID, page.Assets[defaultSearchLimit-1].ID)
+	for i, a := range page.Assets {
+		if a.ID != strconv.Itoa(i+1) {
+			t.Fatalf("asset %d = %s, want %d (the pinned order)", i, a.ID, i+1)
+		}
 	}
-	if !strings.HasPrefix(page.NextPageURL, "https://api.example.com/roku/search-feed.json?cursor=") ||
-		!strings.HasSuffix(page.NextPageURL, "&limit="+strconv.Itoa(defaultSearchLimit)) {
-		t.Errorf("nextPageUrl = %q", page.NextPageURL)
+	if strings.Contains(rec.Body.String(), "nextPageUrl") {
+		t.Error("the feed is a single page and must not advertise a next one")
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != feedCacheControl {
 		t.Errorf("Cache-Control = %q", cc)
 	}
-	if len(repo.calls) != 1 || repo.calls[0].limit != defaultSearchLimit || repo.calls[0].after != nil {
-		t.Errorf("repo calls = %+v, want one first-page call with the default limit", repo.calls)
+	if repo.calls != 1 {
+		t.Errorf("repo calls = %d, want 1", repo.calls)
 	}
 }
 
-func TestSearchFeed_FollowsNextPageURLToTheEnd(t *testing.T) {
-	repo := &stubFeed{props: listings(25)}
-	s := newFeedServer(repo)
-	var seen []string
-	next := "/roku/search-feed.json?limit=10"
-	for pages := 0; ; pages++ {
-		if pages > 5 {
-			t.Fatal("pagination never ended")
-		}
-		rec, page := getSearch(t, s, next)
-		for _, a := range page.Assets {
-			seen = append(seen, a.ID)
-		}
-		if page.NextPageURL == "" {
-			if strings.Contains(rec.Body.String(), "nextPageUrl") {
-				t.Errorf("last page must omit nextPageUrl, not blank it:\n%s", rec.Body.String())
-			}
-			break
-		}
-		u, err := url.Parse(page.NextPageURL)
-		if err != nil {
-			t.Fatalf("nextPageUrl %q: %v", page.NextPageURL, err)
-		}
-		next = u.RequestURI()
-	}
-	if len(seen) != 25 {
-		t.Fatalf("saw %d assets across pages, want all 25: %v", len(seen), seen)
-	}
-	for i, id := range seen {
-		if id != strconv.Itoa(i+1) {
-			t.Fatalf("asset %d = %s, want %d (pages must not skip or repeat)", i, id, i+1)
-		}
-	}
-	if len(repo.calls) != 3 || repo.calls[1].after == nil || repo.calls[1].after.ID != 10 {
-		t.Errorf("repo calls = %+v, want 3 pages of 10 with the second starting after id 10", repo.calls)
-	}
-}
-
-func TestSearchFeed_ExactFitHasNoNextLink(t *testing.T) {
+// Roku may still hold a paged URL from before the feed was one page; every
+// URL gets the same page.
+func TestSearchFeed_OldPagingParamsAreIgnored(t *testing.T) {
 	s := newFeedServer(&stubFeed{props: listings(3)})
-	rec, page := getSearch(t, s, "/roku/search-feed.json?limit=3")
-	if page.NextPageURL != "" || strings.Contains(rec.Body.String(), "nextPageUrl") {
-		t.Errorf("exact fit must not advertise a next page:\n%s", rec.Body.String())
+	for _, target := range []string{"/roku/search-feed.json?limit=1", "/roku/search-feed.json?cursor=garbage!&limit=0"} {
+		_, page := getSearch(t, s, target)
+		if len(page.Assets) != 3 {
+			t.Errorf("GET %s = %d assets, want all 3", target, len(page.Assets))
+		}
 	}
 }
 
-func TestSearchFeed_LimitIsClamped(t *testing.T) {
-	repo := &stubFeed{props: listings(1)}
-	s := newFeedServer(repo)
-	getSearch(t, s, "/roku/search-feed.json?limit=99999")
-	if repo.calls[0].limit != maxSearchLimit {
-		t.Errorf("limit above the cap must be clamped to %d, got %d", maxSearchLimit, repo.calls[0].limit)
+func TestSearchFeed_RepoErrorIs500(t *testing.T) {
+	s := newFeedServer(&stubFeed{err: errors.New("db down")})
+	rec := httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/roku/search-feed.json", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
 	}
-}
-
-func TestSearchFeed_BadParamsAre400(t *testing.T) {
-	s := newFeedServer(&stubFeed{props: listings(1)})
-	for _, target := range []string{"/roku/search-feed.json?limit=0", "/roku/search-feed.json?limit=abc", "/roku/search-feed.json?cursor=garbage!"} {
-		rec := httptest.NewRecorder()
-		s.srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("GET %s = %d, want 400", target, rec.Code)
-		}
-		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-			t.Errorf("GET %s Content-Type = %q, want JSON", target, ct)
-		}
-		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
-			t.Errorf("GET %s Cache-Control = %q, want no-store", target, cc)
-		}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store so an error is not cached", cc)
 	}
 }

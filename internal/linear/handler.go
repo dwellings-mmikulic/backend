@@ -41,15 +41,22 @@ func nonEmpty(s string) *string {
 	return &s
 }
 
-// Register mounts the channel routes.
+// Register mounts the channel routes. The channel itself is also served
+// under /channels/<platform>/ for each partner platform (see
+// viewer.KnownPlatform): the same playlists and guide, with the viewers who
+// come through it counted under that platform.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /channels/master.m3u8", h.master)
-	mux.HandleFunc("GET /channels/live.m3u8", h.live)
-	mux.HandleFunc("GET /channels/epg.json", h.epg)
-	mux.HandleFunc("GET /channels/epg.xml", h.epgXML)
+	for _, prefix := range []string{"/channels/", "/channels/{platform}/"} {
+		mux.HandleFunc("GET "+prefix+"master.m3u8", h.platformOnly(h.master))
+		mux.HandleFunc("GET "+prefix+"live.m3u8", h.platformOnly(h.live))
+		mux.HandleFunc("GET "+prefix+"epg.json", h.platformOnly(h.epg))
+		mux.HandleFunc("GET "+prefix+"epg.xml", h.platformOnly(h.epgXML))
+		if h.viewers != nil {
+			mux.HandleFunc("GET "+prefix+"stats", h.platformOnly(h.stats))
+		}
+	}
 	if h.viewers != nil {
 		mux.HandleFunc("GET /channels/resolve", h.resolve)
-		mux.HandleFunc("GET /channels/stats", h.stats)
 		mux.HandleFunc("GET /channels/beat", h.beat)
 		if h.viewers.Clients != nil && h.viewers.AdminKey != "" {
 			mux.HandleFunc("GET /admin/viewers", h.adminViewers)
@@ -57,6 +64,18 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		if h.feeds != nil {
 			h.registerFeeds(mux)
 		}
+	}
+}
+
+// platformOnly answers 404 when the route's {platform} segment is not a
+// known platform; the routes without the segment pass straight through.
+func (h *Handler) platformOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if p := r.PathValue("platform"); p != "" && !viewer.KnownPlatform(p) {
+			writeError(w, http.StatusNotFound, "unknown platform")
+			return
+		}
+		next(w, r)
 	}
 }
 

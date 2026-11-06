@@ -19,6 +19,7 @@ type Heartbeat struct {
 type Client struct {
 	IP        string // public client address; "" is not stored
 	UserAgent string
+	Platform  string // partner feed it came through (/channels/<platform>/…); "" = our own
 }
 
 // ClientSeen is one client address seen on a channel.
@@ -26,6 +27,7 @@ type ClientSeen struct {
 	IP        string    `json:"ip"`
 	UserAgent string    `json:"user_agent"`
 	Channel   string    `json:"channel"`
+	Platform  string    `json:"platform"`
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 }
@@ -44,8 +46,9 @@ type Store interface {
 	InsertHeartbeats(ctx context.Context, hb []Heartbeat) error
 	// LastChannel is the channel the viewer last polled, if seen since.
 	LastChannel(ctx context.Context, id ID, since time.Time) (channel string, ok bool, err error)
-	// Stats is the audience of a channel at now.
-	Stats(ctx context.Context, channel string, now time.Time) (Stats, error)
+	// Stats is the audience of a channel at now; a non-empty platform counts
+	// only the viewers who came through that platform's feed.
+	Stats(ctx context.Context, channel, platform string, now time.Time) (Stats, error)
 	// Clients lists the client addresses seen since, most recent first.
 	Clients(ctx context.Context, since time.Time, limit int) ([]ClientSeen, error)
 	// Purge deletes heartbeats and client rows older than before.

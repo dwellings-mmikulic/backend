@@ -22,7 +22,7 @@ type feedTestAudience struct{}
 func (feedTestAudience) LastChannel(context.Context, viewer.ID, time.Time) (string, bool, error) {
 	return "", false, nil
 }
-func (feedTestAudience) Stats(context.Context, string, time.Time) (viewer.Stats, error) {
+func (feedTestAudience) Stats(context.Context, string, string, time.Time) (viewer.Stats, error) {
 	return viewer.Stats{}, nil
 }
 
@@ -285,6 +285,24 @@ func TestFeed_TVPage(t *testing.T) {
 		}
 		if !strings.Contains(body, "/feed/areas") {
 			t.Errorf("%s: page is missing the areas call", p)
+		}
+		// Marko, 2026-10-21: the dwellings.tv logo top left (inlined, so the
+		// page is whole on any origin) and the same-Wi-Fi notice at the bottom.
+		if !strings.Contains(body, `class="logo"`) || !strings.Contains(body, "<svg") || !strings.Contains(body, "Dwellings<span>.TV</span>") {
+			t.Errorf("%s: page is missing the logo", p)
+		}
+		// Daniel, 2026-10-21: the intro line and the button label.
+		if !strings.Contains(body, "Enter a zip code or city to customize your stream.") || !strings.Contains(body, ">Apply Location<") {
+			t.Errorf("%s: page is missing Daniel's copy", p)
+		}
+		if !strings.Contains(body, "Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel.") {
+			t.Errorf("%s: page is missing the same-Wi-Fi notice", p)
+		}
+		// Marko, 2026-10-21: a quiet share row for the channel itself. It
+		// shares the public site, never the household's /tv/ link, because
+		// that link controls their TV.
+		if !strings.Contains(body, `id="share"`) || !strings.Contains(body, "navigator.share") || !strings.Contains(body, `SHARE_URL = "https://dwellings.tv/"`) {
+			t.Errorf("%s: page is missing the share row", p)
 		}
 		// Daniel, 2026-10-15: no in-page player and no "watch here" copy;
 		// platforms will not carry a channel that pulls viewers to our site.

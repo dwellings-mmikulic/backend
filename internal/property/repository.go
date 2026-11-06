@@ -162,14 +162,20 @@ SELECT zpid, image_urls FROM properties
 	return out, nil
 }
 
-// ListReadyForFeed returns one page of the Roku feed: up to limit published
-// listings (see publishedPredicate), newest video first, continuing after the
-// keyset position when after is set, and whether another page exists.
-func (r *Repository) ListReadyForFeed(ctx context.Context, limit int, after *FeedKey) ([]Property, bool, error) {
-	q, args := buildFeedQuery(limit, after)
-	rows, err := r.pool.Query(ctx, q, args...)
+// lockSearchFeedPins serialises the one-time pinning of the search feed
+// across the fleet, so two instances cannot both pin a set.
+const lockSearchFeedPins int64 = 0x6477656c6c706e73 // "dwellpns"
+
+// ListSearchFeed returns the fixed set of listings the Roku Search feed
+// carries (see searchFeedQuery). The first call on an empty database pins the
+// set (see pinSearchFeedQuery); later calls only read it.
+func (r *Repository) ListSearchFeed(ctx context.Context) ([]Property, error) {
+	if err := r.pinSearchFeed(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, searchFeedQuery)
 	if err != nil {
-		return nil, false, fmt.Errorf("list ready for feed: %w", err)
+		return nil, fmt.Errorf("list search feed: %w", err)
 	}
 	defer rows.Close()
 
@@ -182,22 +188,39 @@ func (r *Repository) ListReadyForFeed(ctx context.Context, limit int, after *Fee
 			&p.HomeSizeSqft, &p.LotSizeSqft, &p.Bedrooms, &p.Bathrooms, &p.DetailURL,
 			&p.ImageURLs, &p.VideoURL, &p.VideoDurationSecs, &renderedAt,
 		); err != nil {
-			return nil, false, fmt.Errorf("scan feed row: %w", err)
+			return nil, fmt.Errorf("scan search feed row: %w", err)
 		}
 		p.VideoStatus = VideoReady
 		p.VideoRenderedAt = renderedAt
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("iterate feed rows: %w", err)
+		return nil, fmt.Errorf("iterate search feed rows: %w", err)
 	}
+	return out, nil
+}
 
-	hasMore := false
-	if len(out) > limit {
-		out = out[:limit]
-		hasMore = true
+// pinSearchFeed pins the search feed's listings if none are pinned yet.
+func (r *Repository) pinSearchFeed(ctx context.Context) error {
+	var pinned bool
+	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM search_feed_pins)`).Scan(&pinned); err != nil {
+		return fmt.Errorf("check search feed pins: %w", err)
 	}
-	return out, hasMore, nil
+	if pinned {
+		return nil
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin search feed pin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockSearchFeedPins); err != nil {
+		return fmt.Errorf("lock search feed pins: %w", err)
+	}
+	if _, err := tx.Exec(ctx, pinSearchFeedQuery); err != nil {
+		return fmt.Errorf("pin search feed: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // Exists reports whether a property with the given zpid is already stored.

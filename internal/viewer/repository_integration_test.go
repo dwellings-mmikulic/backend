@@ -60,12 +60,34 @@ func TestRepository_Integration(t *testing.T) {
 		t.Errorf("older batch rolled last channel back to %q", ch)
 	}
 
-	s, err := repo.Stats(ctx, "us", now)
+	s, err := repo.Stats(ctx, "us", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.Concurrent != 1 || s.Unique24h != 2 || s.Unique7d != 2 {
 		t.Errorf("stats = %+v, want concurrent 1, 24h 2, 7d 2", s)
+	}
+
+	// A platform's stats count only the viewers who came through its feed.
+	c3 := ID{3}
+	cine := Client{IP: "198.51.100.7", UserAgent: "Roku/DVP-15.3", Platform: "cineplex"}
+	if err := repo.InsertHeartbeats(ctx, []Heartbeat{{c3, "us", now, cine}}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := repo.Stats(ctx, "us", "cineplex", now); err != nil || s.Concurrent != 1 || s.Unique7d != 1 {
+		t.Errorf("cineplex stats = %+v %v, want 1 viewer", s, err)
+	}
+	if s, _ := repo.Stats(ctx, "us", "", now); s.Unique7d != 3 {
+		t.Errorf("all-platform 7d = %d, want 3", s.Unique7d)
+	}
+	if cs, err := repo.Clients(ctx, now.Add(-time.Minute), 10); err != nil || len(cs) == 0 || cs[0].IP != cine.IP || cs[0].Platform != "cineplex" {
+		t.Errorf("cineplex client = %+v %v", cs, err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM viewer_heartbeats WHERE viewer_hash = $1`, c3[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM viewer_clients WHERE ip = $1`, cine.IP); err != nil {
+		t.Fatal(err)
 	}
 
 	// One row per (ip, user agent, channel) with the seen range; b had no

@@ -9,7 +9,20 @@
   * { box-sizing:border-box; }
   body { margin:0; font:16px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background:var(--bg); color:var(--text); }
   main { max-width:480px; margin:0 auto; padding:24px 16px 48px; }
-  h1 { font-size:22px; margin:0 0 4px; }
+  .logo { display:inline-flex; align-items:center; gap:10px; margin:0 0 6px; color:#fff; text-decoration:none; }
+  .logo svg { width:46px; height:46px; flex-shrink:0; }
+  .logo-text { display:flex; flex-direction:column; align-items:center; line-height:1; }
+  .logo-word { font-family:"Poppins", "Inter", -apple-system, BlinkMacSystemFont, sans-serif; font-weight:500; font-size:1.35rem; letter-spacing:-0.01em; }
+  .logo-word span { color:#2b8cff; }
+  .logo-tag { display:flex; align-items:center; gap:7px; margin-top:6px; font-family:"Poppins", "Inter", -apple-system, BlinkMacSystemFont, sans-serif; font-size:0.42rem; font-weight:500; letter-spacing:0.3em; text-transform:uppercase; color:#3b8ee0; white-space:nowrap; }
+  .logo-tag::before, .logo-tag::after { content:""; width:16px; height:1px; background:#3b8ee0; }
+  .share { text-align:center; margin-top:28px; }
+  .share .muted { margin-bottom:10px; }
+  .share button { width:auto; margin:0; padding:10px 20px; font-size:15px; background:transparent; color:var(--text); border:1px solid var(--line); }
+  .share .links { display:none; justify-content:center; gap:18px; margin-top:12px; font-size:15px; }
+  .share .links a { color:var(--accent); text-decoration:none; }
+  .share.alt button { display:none; } .share.alt .links { display:flex; }
+  footer { margin-top:32px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; text-align:center; }
   .muted { color:var(--muted); font-size:14px; }
   .card { background:var(--card); border-radius:14px; padding:16px; margin:16px 0; }
   .big { font-size:20px; font-weight:600; }
@@ -26,8 +39,32 @@
 </head>
 <body>
 <main>
-  <h1>Dwellings TV</h1>
-  <div class="muted">Pick the area your TV shows homes from.</div>
+  <a href="https://dwellings.tv/" class="logo" aria-label="Dwellings.TV home">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -6 112 112" aria-hidden="true">
+      <defs>
+        <filter id="g" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g filter="url(#g)">
+        <g fill="none" stroke="#3AA8FF" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4 H50 A44 46 0 0 1 50 96 H4 Z"/>
+          <path d="M20.5 96 V52 L45 27 L60.5 39.5 V32 H67.5 V45 L74 50.5 V70"/>
+        </g>
+        <g fill="#4FC3FF">
+          <rect x="40.5" y="45" width="5.8" height="5.8" rx="0.8"/><rect x="48" y="45" width="5.8" height="5.8" rx="0.8"/>
+          <rect x="40.5" y="52.5" width="5.8" height="5.8" rx="0.8"/><rect x="48" y="52.5" width="5.8" height="5.8" rx="0.8"/>
+          <path d="M41.5 70.5 Q39.5 69.3 39.5 71.6 V85.4 Q39.5 87.7 41.5 86.5 L56.5 79.6 Q58.5 78.5 56.5 77.4 Z"/>
+        </g>
+      </g>
+    </svg>
+    <span class="logo-text">
+      <span class="logo-word">Dwellings<span>.TV</span></span>
+      <span class="logo-tag">Lounge with Listings</span>
+    </span>
+  </a>
+  <h1 class="muted" style="font-size:16px;font-weight:400;margin:0">Enter a zip code or city to customize your stream.</h1>
 
   <div class="card">
     <div class="muted">Your TV is showing homes in</div>
@@ -40,10 +77,22 @@
     <label for="city">or search a city</label>
     <input id="city" placeholder="e.g. Los Angeles" autocomplete="off">
     <div id="cities" class="list"></div>
-    <button id="go" disabled>Show this area on my TV</button>
+    <button id="go" disabled>Apply Location</button>
     <div id="status" class="status"></div>
   </div>
 
+  <div id="share" class="share">
+    <div class="muted">Know someone who would enjoy Dwellings.TV?</div>
+    <button id="share-btn" type="button">Share the channel</button>
+    <div class="links">
+      <a id="share-x" target="_blank" rel="noopener">X</a>
+      <a id="share-fb" target="_blank" rel="noopener">Facebook</a>
+      <a id="share-copy" href="#">Copy link</a>
+    </div>
+    <div id="share-status" class="status" style="text-align:center"></div>
+  </div>
+
+  <footer>Your mobile device must be connected to the same Wi-Fi network as your TV to customize the channel.</footer>
 </main>
 <script>
 (function () {
@@ -113,6 +162,27 @@
         show(f);
       })
       .catch(function () { setStatus("Something went wrong. Please try again.", "err"); update(); });
+  });
+  var SHARE_URL = "https://dwellings.tv/";
+  var SHARE_TEXT = "Dwellings.TV - Lounge With Listings. Browse homes for sale from your couch, free on Roku.";
+  function shareStatus(msg) {
+    $("share-status").textContent = msg;
+    if (msg) setTimeout(function () { $("share-status").textContent = ""; }, 3000);
+  }
+  function copyLink() {
+    var done = function () { shareStatus("Link copied"); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(SHARE_URL).then(done, function () { window.prompt("Copy this link", SHARE_URL); });
+    else window.prompt("Copy this link", SHARE_URL);
+  }
+  $("share-x").href = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(SHARE_TEXT) + "&url=" + encodeURIComponent(SHARE_URL);
+  $("share-fb").href = "https://www.facebook.com/sharer/sharer.php?u=" + encodeURIComponent(SHARE_URL);
+  $("share-copy").addEventListener("click", function (e) { e.preventDefault(); copyLink(); });
+  $("share-btn").addEventListener("click", function () {
+    if (navigator.share) {
+      navigator.share({ title: "Dwellings.TV", text: SHARE_TEXT, url: SHARE_URL }).catch(function () {});
+    } else {
+      $("share").className = "share alt";
+    }
   });
   load();
 })();
