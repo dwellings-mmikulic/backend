@@ -126,14 +126,30 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 // channelPlaylist is the live playlist of sc — or, when the request carries
 // a public ip= and a household exists for it, that household's feed anchored
 // to sc (a platform fetching on a viewer's behalf; see the QR bumper spec).
-// The household is only ever created by the mobile page, so a viewer who
-// never scanned the QR sees the channel as advertised.
+// On /channels/… the household is only ever created by the mobile page, so a
+// viewer who never scanned the QR sees the channel as advertised.
+//
+// On a platform's path (/channels/<platform>/…) the player is the viewer's
+// own box fetching the playlist directly, with no ip= in the URL, so the
+// connecting address is the home: its household is created on first
+// contact, defaulting to the address's area as the personal feeds do, and
+// its feed is served. nginx keys the platform playlists' cache on the
+// client address for this reason. A non-public connecting address (a
+// stitcher or proxy) is nobody's home and gets the channel as advertised.
 func (h *Handler) channelPlaylist(r *http.Request, sc Scope, now time.Time) ([]byte, error) {
 	if h.feeds != nil && h.viewers != nil {
 		if ip := viewer.QueryIP(r.URL.Query()); ip != "" {
 			body, err := h.svc.AnchoredPlaylist(r.Context(), h.viewers.Hasher.Household(ip), sc, now)
 			if !errors.Is(err, ErrUnknownHousehold) {
 				return body, err
+			}
+		} else if r.PathValue("platform") != "" {
+			if ip := viewer.PublicIP(viewer.ClientIP(r)); ip != "" {
+				id := h.viewers.Hasher.Household(ip)
+				if _, err := h.ensure(r, id); err != nil {
+					return nil, err
+				}
+				return h.svc.AnchoredPlaylist(r.Context(), id, sc, now)
 			}
 		}
 	}

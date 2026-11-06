@@ -31,7 +31,9 @@ Push to `main` → GitHub Actions (`.github/workflows/publish-deploy.yml`):
 of `/channels/`: 2 s for `live.m3u8` and `master.m3u8`, 60 s for `epg.json`
 and `epg.xml`,
 keyed on `$scheme$host$uri$is_args$args` so each channel filter is its own
-entry. `proxy_cache_lock on` collapses a thundering herd on a cold key into
+entry. A platform's live playlist (`/channels/<platform>/live.m3u8`) adds
+`$remote_addr` to the key: it is the connecting home's own feed (see the
+platform feeds spec), so one entry per box, still 2 s. `proxy_cache_lock on` collapses a thundering herd on a cold key into
 one origin request, and `proxy_cache_use_stale updating error timeout` keeps
 serving the last playlist through a restart or a slow query.
 
