@@ -20,7 +20,22 @@ Every channel route is also served under `/channels/<platform>/`:
 Scope (`zip`, `city`+`state`, `state`), `sid` and `ip` work exactly as on
 `/channels/…`. The content is the same channel; what differs is the URL (a
 partner's ad stitcher or SSAI setup can be pointed at it alone) and the
-audience accounting. `/channels/resolve`, `/channels/beat` and the personal
+audience accounting.
+
+**Connecting address as the home (2026-11-06).** A platform's player is the
+viewer's own box fetching `live.m3u8` directly (Cineplex's Roku app; every
+request in the logs came from a residential address with no query string),
+so the platform cannot append `ip=`. On `/channels/<platform>/live.m3u8`
+without a public `ip=`, the connecting address is therefore the household:
+created on first contact with the IP geo default (city → state → national,
+as `/feed/` does), then served as that home's anchored feed. A home that
+picked an area on the QR page keeps it. A non-public connecting address
+(a stitcher or proxy on a private network) gets the channel as advertised
+and no household. `/channels/live.m3u8` keeps its rule: never keyed on the
+connection. nginx caches the platform live playlist per client address
+(`deploy/nginx-dwellings.conf`), 2 s as before. Should a platform ever
+front the feed with a stitcher, its address becomes every viewer's home;
+the platform must then pass `ip=` instead. `/channels/resolve`, `/channels/beat` and the personal
 feeds have no platform form.
 
 Platforms are a closed list in code (`viewer.KnownPlatform`; today only

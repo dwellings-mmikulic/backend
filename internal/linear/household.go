@@ -17,16 +17,30 @@ var ErrUnknownHousehold = errors.New("unknown household")
 // the library grows, and the mobile page fetches it on every open.
 const citiesTTL = 10 * time.Minute
 
-// Household returns h's spans, oldest first.
+// Household returns h's spans, oldest first. The answer — including "no
+// such household" — is served from memory for householdTTL; writers call
+// forgetHousehold.
 func (s *Service) Household(ctx context.Context, h viewer.ID) ([]Span, error) {
-	spans, err := s.store.Spans(ctx, h)
-	if err != nil {
-		return nil, err
+	spans, ok := s.households.get(h)
+	if !ok {
+		var err error
+		if spans, err = s.store.Spans(ctx, h); err != nil {
+			return nil, err
+		}
+		if spans == nil {
+			spans = []Span{}
+		}
+		s.households.put(h, spans)
 	}
 	if len(spans) == 0 {
 		return nil, ErrUnknownHousehold
 	}
 	return spans, nil
+}
+
+// forgetHousehold drops what is cached for h after a write to its spans.
+func (s *Service) forgetHousehold(h viewer.ID) {
+	s.households.forget(h)
 }
 
 // EnsureHousehold returns h's spans, creating span 0 at now when h is new.
@@ -35,12 +49,12 @@ func (s *Service) Household(ctx context.Context, h viewer.ID) ([]Span, error) {
 // national, else national. Span 0 has zero offsets: a fresh feed's counters
 // are its channel's own.
 func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates []Scope, now time.Time) ([]Span, error) {
-	spans, err := s.store.Spans(ctx, h)
-	if err != nil {
-		return nil, err
-	}
-	if len(spans) > 0 {
+	spans, err := s.Household(ctx, h)
+	if err == nil {
 		return spans, nil
+	}
+	if !errors.Is(err, ErrUnknownHousehold) {
+		return nil, err
 	}
 	sp := Span{Household: h, N: 0, Scope: Scope{}.Key(), Source: SourceDefault, StartsAt: now, CreatedAt: now}
 	for _, c := range candidates {
@@ -61,6 +75,7 @@ func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates [
 	}
 	// Re-read: a concurrent first request may have won the insert, and its
 	// row is the one every later request will see.
+	s.forgetHousehold(h)
 	return s.Household(ctx, h)
 }
 
@@ -129,13 +144,10 @@ func (s *Service) contribution(ctx context.Context, sp Span, end time.Time) ([]s
 	return shifted(segs[i:], sp), nil
 }
 
-// personalSegments is the household's feed at now, untrimmed: the spans'
-// contributions oldest first, each ended by now. airing is the span on air.
-func (s *Service) personalSegments(ctx context.Context, h viewer.ID, now time.Time) ([]segment, Span, error) {
-	spans, err := s.Household(ctx, h)
-	if err != nil {
-		return nil, Span{}, err
-	}
+// personalSegments is the feed of the household with spans at now,
+// untrimmed: the spans' contributions oldest first, each ended by now.
+// airing is the span on air.
+func (s *Service) personalSegments(ctx context.Context, spans []Span, now time.Time) ([]segment, Span, error) {
 	airing := spans[0]
 	var segs []segment
 	for k, sp := range spans {
@@ -163,7 +175,11 @@ func (s *Service) personalSegments(ctx context.Context, h viewer.ID, now time.Ti
 // contributions, oldest first, trimmed to the usual window. airing is the
 // span on air at now.
 func (s *Service) PersonalPlaylist(ctx context.Context, h viewer.ID, now time.Time) ([]byte, Span, error) {
-	segs, airing, err := s.personalSegments(ctx, h, now)
+	spans, err := s.Household(ctx, h)
+	if err != nil {
+		return nil, Span{}, err
+	}
+	segs, airing, err := s.personalSegments(ctx, spans, now)
 	if err != nil {
 		return nil, Span{}, err
 	}
@@ -374,5 +390,6 @@ func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now 
 		return nil, err
 	}
 	s.log.Info("household feed switched", "span", sp.N, "scope", sp.Scope, "requested", sp.Requested, "starts_at", sp.StartsAt)
+	s.forgetHousehold(h)
 	return s.Household(ctx, h)
 }

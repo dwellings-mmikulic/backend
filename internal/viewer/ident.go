@@ -80,7 +80,13 @@ func SID(q url.Values) string {
 // (10.0.0.90), which thousands of homes share and which would hide the
 // public address the request really came from.
 func QueryIP(q url.Values) string {
-	ip := net.ParseIP(strings.TrimSpace(q.Get("ip")))
+	return PublicIP(q.Get("ip"))
+}
+
+// PublicIP is s as a canonical public address, or "" when s is not an
+// address or not a public one (private, loopback, link-local, CGNAT).
+func PublicIP(s string) string {
+	ip := net.ParseIP(strings.TrimSpace(s))
 	if ip == nil || !isPublic(ip) {
 		return ""
 	}
