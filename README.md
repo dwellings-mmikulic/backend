@@ -309,7 +309,8 @@ an IP. `concurrent` is distinct viewers in the last two minutes.
   `assets[]` of `type: "shortForm"`, id and `playId` both the zpid (Roku
   hands `playId` back to the app as the deep link `contentId`,
   `mediaType=shortFormVideo`), genre `house/garden`, rating `USA_PR` `NR`,
-  main image = first photo, `license: free`, `quality: fhd`, US only. One page, a
+  main image = first photo cropped to 16:9 by the Bunny Optimizer
+  (`?aspect_ratio=16:9`; Roku rejects other ratios), `license: free`, `quality: fhd`, US only. One page, a
   fixed set of 3,000 listings (~1.7 MB): the newest published renders at the
   first request, pinned in `search_feed_pins` and never changed after. A
   pinned listing that is re-rendering drops out until it is ready again;

@@ -53,7 +53,9 @@ func TestBuildSearch_Shape(t *testing.T) {
 	if a.Genres[0] != "house/garden" || a.AdvisoryRatings[0].Source != "USA_PR" || a.AdvisoryRatings[0].Value != "NR" {
 		t.Errorf("genre/rating = %v %v", a.Genres, a.AdvisoryRatings)
 	}
-	if a.Images[0].Type != "main" || a.Images[0].URL != "https://cdn/properties/43590635/0.jpg" {
+	// Roku accepts a main image only at 16:9 or 2:3; listing photos are mostly
+	// 4:3, so the CDN is asked to crop the poster.
+	if a.Images[0].Type != "main" || a.Images[0].URL != "https://cdn/properties/43590635/0.jpg?aspect_ratio=16:9" {
 		t.Errorf("image = %+v", a.Images)
 	}
 	if a.DurationInSeconds != 120 {

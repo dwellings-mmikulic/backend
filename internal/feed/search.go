@@ -78,7 +78,12 @@ const (
 	searchQuality   = "fhd"
 	searchLicense   = "free"
 	searchTag       = "real estate"
-	maxTextLen      = 200 // Roku's cap on titles and short descriptions
+	maxTextLen      = 200 // Roku's limit on titles and short descriptions
+
+	// posterCrop asks the Bunny Optimizer to centre-crop the first photo to
+	// 16:9. Roku rejects a main image at any ratio but 16:9 or 2:3, and
+	// listing photos are mostly 4:3.
+	posterCrop = "?aspect_ratio=16:9"
 )
 
 // BuildSearch renders one page of the Roku Search feed from ready listings.
@@ -113,7 +118,7 @@ func BuildSearch(props []property.Property, now time.Time) SearchFeed {
 			Genres:            []string{searchGenre},
 			Tags:              []string{searchTag},
 			AdvisoryRatings:   []AdvisoryRating{{Source: searchRatingSrc, Value: searchRating}},
-			Images:            []SearchImage{{Type: "main", URL: p.ImageURLs[0], Languages: []string{searchLanguage}}},
+			Images:            []SearchImage{{Type: "main", URL: p.ImageURLs[0] + posterCrop, Languages: []string{searchLanguage}}},
 			DurationInSeconds: p.VideoDurationSecs,
 			Content: SearchContent{PlayOptions: []PlayOption{{
 				License: searchLicense, Quality: searchQuality, PlayID: p.ZPID,
