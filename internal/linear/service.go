@@ -214,6 +214,38 @@ func (s *Service) current(ctx context.Context, key string, t time.Time, src *lin
 	return cur, prev, nil
 }
 
+const (
+	// versionRetention is how long an ended lineup version is kept. The
+	// playlists read at most two minutes back and the guide only forward;
+	// two days leaves room to look into a report about what aired.
+	versionRetention = 48 * time.Hour
+	// maintenanceInterval is how often RunMaintenance purges.
+	maintenanceInterval = time.Hour
+)
+
+// RunMaintenance deletes ended lineup versions on an interval until ctx is
+// done. Any anonymous request for a real ZIP or city starts a chain of
+// versions under that key, so without this the table grows with every place
+// anyone has ever named.
+func (s *Service) RunMaintenance(ctx context.Context) {
+	t := time.NewTicker(maintenanceInterval)
+	defer t.Stop()
+	for {
+		if n, err := s.store.PurgeVersions(ctx, s.now().Add(-versionRetention)); err != nil {
+			if ctx.Err() == nil {
+				s.log.Warn("lineup purge failed", "error", err)
+			}
+		} else if n > 0 {
+			s.log.Info("ended lineup versions purged", "rows", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 // ErrUnknownArea reports a filter that names a place the library has never
 // heard of, as opposed to a real place with no content yet.
 var ErrUnknownArea = errors.New("unknown area")

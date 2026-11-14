@@ -20,6 +20,9 @@ type Client struct {
 	IP        string // public client address; "" is not stored
 	UserAgent string
 	Platform  string // partner feed it came through (/channels/<platform>/…); "" = our own
+	// From is the address the request came from, which Record limits rows
+	// by. It is not stored. "" is not limited.
+	From string
 }
 
 // ClientSeen is one client address seen on a channel.
@@ -61,6 +64,12 @@ type Options struct {
 	PurgeInterval time.Duration // 1h
 	Retention     time.Duration // 30 days
 	MaxPending    int           // 100k distinct (viewer, channel, minute) rows
+	// MaxPendingPerAddress is how many of those rows one connecting address
+	// may hold between two flushes (200). Without it one client inventing
+	// viewers fills the whole buffer and every other viewer's beat is
+	// dropped. A home has a handful of devices. A shared address with more
+	// active viewers than this loses the excess.
+	MaxPendingPerAddress int
 }
 
 func (o Options) withDefaults() Options {
@@ -76,6 +85,9 @@ func (o Options) withDefaults() Options {
 	if o.MaxPending <= 0 {
 		o.MaxPending = 100_000
 	}
+	if o.MaxPendingPerAddress <= 0 {
+		o.MaxPendingPerAddress = 200
+	}
 	return o
 }
 
@@ -87,7 +99,8 @@ type Recorder struct {
 	log   *slog.Logger
 
 	mu      sync.Mutex
-	pending map[Heartbeat]struct{}
+	pending map[Heartbeat]string // row → the address it came from
+	perAddr map[string]int       // address → rows pending from it
 }
 
 // NewRecorder creates a Recorder. log may be nil.
@@ -95,14 +108,17 @@ func NewRecorder(store Store, opts Options, log *slog.Logger) *Recorder {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Recorder{store: store, opts: opts.withDefaults(), log: log, pending: map[Heartbeat]struct{}{}}
+	return &Recorder{store: store, opts: opts.withDefaults(), log: log, pending: map[Heartbeat]string{}, perAddr: map[string]int{}}
 }
 
 // Record notes that id polled channel at t from c. Repeats within the same
-// minute collapse into one row. When the buffer is full (the store is
-// unreachable for a long time) new beats are dropped rather than growing
-// memory.
+// minute collapse into one row. A beat is dropped when its connecting
+// address (c.From) already holds MaxPendingPerAddress rows, or when the
+// whole buffer is full (the store is unreachable for a long time), rather
+// than growing memory.
 func (r *Recorder) Record(id ID, channel string, t time.Time, c Client) {
+	from := c.From
+	c.From = ""
 	hb := Heartbeat{Viewer: id, Channel: channel, Minute: t.UTC().Truncate(time.Minute), Client: c}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -112,7 +128,13 @@ func (r *Recorder) Record(id ID, channel string, t time.Time, c Client) {
 	if len(r.pending) >= r.opts.MaxPending {
 		return
 	}
-	r.pending[hb] = struct{}{}
+	if from != "" {
+		if r.perAddr[from] >= r.opts.MaxPendingPerAddress {
+			return
+		}
+		r.perAddr[from]++
+	}
+	r.pending[hb] = from
 }
 
 // Pending is the number of buffered rows.
@@ -141,7 +163,16 @@ func (r *Recorder) Flush(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	for _, hb := range batch {
+		from, ok := r.pending[hb]
+		if !ok {
+			continue
+		}
 		delete(r.pending, hb)
+		if from != "" {
+			if r.perAddr[from]--; r.perAddr[from] <= 0 {
+				delete(r.perAddr, from)
+			}
+		}
 	}
 	r.mu.Unlock()
 	return nil

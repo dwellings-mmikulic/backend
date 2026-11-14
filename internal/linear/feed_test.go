@@ -29,20 +29,46 @@ func (feedTestAudience) Stats(context.Context, string, string, time.Time) (viewe
 func feedMux(store Store, now time.Time) (*Service, *http.ServeMux) {
 	svc := testService(store, now)
 	h := NewHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	h.EnableViewers(ViewerOptions{Hasher: viewer.NewHasher("salt", false), Audience: feedTestAudience{}, PublicBaseURL: "https://api.example.test"})
+	h.EnableViewers(ViewerOptions{Hasher: platformHasher(), Audience: feedTestAudience{}, PublicBaseURL: "https://api.example.test"})
 	h.EnableFeeds(FeedOptions{MobileBaseURL: "https://tv.example.test", QRShowSeconds: 60, QREverySeconds: 300})
 	mux := http.NewServeMux()
 	h.Register(mux)
 	return svc, mux
 }
 
+// platformAddr is the address of a platform's server in these tests: the
+// one connecting address whose ip= parameter is believed.
+const platformAddr = "198.51.100.1"
+
+// pageOrigin is the origin of the mobile page (feedMux's MobileBaseURL).
+const pageOrigin = "https://tv.example.test"
+
+func platformHasher() *viewer.Hasher {
+	nets, err := viewer.ParseCIDRs(platformAddr)
+	if err != nil {
+		panic(err)
+	}
+	h := viewer.NewHasher("salt", false)
+	h.TrustIPParamFrom(nets)
+	return h
+}
+
+// do sends a request with no Origin header, as the TV app does.
 func do(mux *http.ServeMux, method, path, ip string, body string) *httptest.ResponseRecorder {
+	return doFrom(mux, method, path, ip, "", body)
+}
+
+// doFrom is do as a browser page on origin would send it.
+func doFrom(mux *http.ServeMux, method, path, ip, origin string, body string) *httptest.ResponseRecorder {
 	var r io.Reader
 	if body != "" {
 		r = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, path, r)
 	req.Header.Set("X-Real-IP", ip)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -122,8 +148,8 @@ func TestFeed_GetAndChoose(t *testing.T) {
 	var me struct {
 		ID, Scope, Name, Requested, Source, Live string
 	}
-	rec := do(mux, "GET", "/feed/me", "203.0.113.5", "")
-	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+	rec := doFrom(mux, "GET", "/feed/me", "203.0.113.5", pageOrigin, "")
+	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
 		t.Fatalf("status %d headers %v", rec.Code, rec.Header())
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &me)
@@ -187,8 +213,14 @@ func TestFeed_ErrorsCarryCORS(t *testing.T) {
 		{"POST", "/feed/" + id, `{"zip":"12345"}`, 404},
 		{"POST", "/feed/" + id, `{"zip":"1234"}`, 400},
 	} {
-		rec := do(mux, c.method, c.path, "203.0.113.5", c.body)
-		if rec.Code != c.want || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		rec := doFrom(mux, c.method, c.path, "203.0.113.5", pageOrigin, c.body)
+		// The personal playlist is public to whoever holds its id, like the
+		// channels. The routes that speak for a home name the page's origin.
+		wantACAO := pageOrigin
+		if strings.HasPrefix(c.path, "/feed/live.m3u8") {
+			wantACAO = "*"
+		}
+		if rec.Code != c.want || rec.Header().Get("Access-Control-Allow-Origin") != wantACAO {
 			t.Errorf("%s %s: status %d (want %d), ACAO %q", c.method, c.path, rec.Code, c.want, rec.Header().Get("Access-Control-Allow-Origin"))
 		}
 	}
@@ -339,6 +371,120 @@ func TestFeed_EPGDescriptionsCarryTheCustomizeURL(t *testing.T) {
 		if strings.Contains(p.Description, "https://") {
 			t.Errorf("description %q should show the bare host, not the scheme", p.Description)
 		}
+	}
+}
+
+// /feed/me hands out the feed id of the network the browser is on, and the
+// id is all it takes to change that TV's feed. Only the mobile page may read
+// it from a browser, and only it may post a choice.
+func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	addClips(m, austin, 101, 40)
+	_, mux := feedMux(m, t0)
+	home := "203.0.113.5"
+	id := hhRe.FindStringSubmatch(do(mux, "GET", "/feed/master.m3u8", home, "").Body.String())[1]
+
+	for _, path := range []string{"/feed/me", "/feed/master.m3u8", "/feed/qr.png", "/feed/" + id} {
+		for origin, want := range map[string]string{
+			pageOrigin:                        pageOrigin,
+			"https://www.tv.example.test":     "https://www.tv.example.test",
+			"https://evil.example":            "",
+			"https://tv.example.test.evil.io": "",
+			"http://tv.example.test":          "",
+			"null":                            "",
+			"":                                "",
+		} {
+			rec := doFrom(mux, "GET", path, home, origin, "")
+			if rec.Code != 200 {
+				t.Fatalf("GET %s from %q: status %d", path, origin, rec.Code)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != want {
+				t.Errorf("GET %s from %q: Access-Control-Allow-Origin %q, want %q", path, origin, got, want)
+			}
+			if rec.Header().Get("Vary") != "Origin" {
+				t.Errorf("GET %s from %q: Vary %q", path, origin, rec.Header().Get("Vary"))
+			}
+		}
+	}
+
+	// A page elsewhere cannot post a choice, whatever content type it uses.
+	body := `{"city":"austin","state":"tx"}`
+	req := httptest.NewRequest("POST", "/feed/"+id, strings.NewReader(body))
+	req.Header.Set("X-Real-IP", "198.51.100.77")
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("POST from another origin: status %d, ACAO %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+	var f struct{ Scope string }
+	_ = json.Unmarshal(do(mux, "GET", "/feed/"+id, home, "").Body.Bytes(), &f)
+	if f.Scope == "city:austin:tx" {
+		t.Fatal("the refused post changed the home's feed")
+	}
+	// The page itself, the TV app (no Origin) and a same-origin page still can.
+	if rec := doFrom(mux, "POST", "/feed/"+id, home, pageOrigin, body); rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
+		t.Errorf("POST from the page: status %d, ACAO %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if rec := do(mux, "POST", "/feed/"+id, home, `{"zip":"77494"}`); rec.Code != 200 {
+		t.Errorf("POST without Origin: status %d", rec.Code)
+	}
+	if rec := doFrom(mux, "POST", "/feed/"+id, home, "http://example.com", body); rec.Code != 200 {
+		t.Errorf("same-origin POST (httptest host is example.com): status %d", rec.Code)
+	}
+	// The preflight answers the page and nobody else.
+	if rec := doFrom(mux, "OPTIONS", "/feed/"+id, home, pageOrigin, ""); rec.Code != 204 || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin || rec.Header().Get("Access-Control-Allow-Methods") == "" {
+		t.Errorf("preflight from the page: %d %v", rec.Code, rec.Header())
+	}
+	if rec := doFrom(mux, "OPTIONS", "/feed/"+id, home, "https://evil.example", ""); rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Errorf("preflight from another origin was answered: %v", rec.Header())
+	}
+}
+
+func TestFeed_ExtraAllowedOrigins(t *testing.T) {
+	o := FeedOptions{MobileBaseURL: "https://www.dwellings.tv", AllowedOrigins: []string{"https://app.example/"}}
+	for origin, want := range map[string]bool{
+		"https://dwellings.tv": true, "https://www.dwellings.tv": true, "https://app.example": true,
+		"https://dwellings.tv.evil.io": false, "http://dwellings.tv": false, "": false, "*": false,
+	} {
+		if got := o.allowsOrigin(origin); got != want {
+			t.Errorf("allowsOrigin(%q) = %v, want %v", origin, got, want)
+		}
+	}
+}
+
+// ip= names whose feed is served and whose views are recorded. From an
+// address that is not a platform's it must change nothing.
+func TestHandler_IPParamFromAStrangerIsIgnored(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	addClips(m, austin, 101, 40)
+	svc, mux := feedMux(m, t0)
+	home, stranger := "203.0.113.7", "198.51.100.200"
+	if rec := do(mux, "GET", "/feed/me", home, ""); rec.Code != 200 {
+		t.Fatalf("/feed/me: %d", rec.Code)
+	}
+	id := viewer.NewHasher("salt", false).Household(home)
+	if _, err := svc.Choose(context.Background(), id, katy, t0); err != nil {
+		t.Fatal(err)
+	}
+	svc.now = func() time.Time { return t0.Add(5 * time.Minute) }
+	rec := do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+home, stranger, "")
+	plain := do(mux, "GET", "/channels/live.m3u8?zip=78701", stranger, "")
+	if rec.Code != 200 || rec.Body.String() != plain.Body.String() {
+		t.Fatalf("a stranger's ip= changed the playlist:\n%s\n---\n%s", rec.Body.String(), plain.Body.String())
+	}
+	if a, _ := m.Anchor(context.Background(), id, "zip:78701"); a != nil {
+		t.Fatalf("a stranger's ip= created an anchor for the home: %+v", a)
+	}
+	// The master does not hand the claimed address on either.
+	if body := do(mux, "GET", "/channels/master.m3u8?zip=78701&sid=tv-1&ip="+home, stranger, "").Body.String(); !strings.HasSuffix(body, "\nlive.m3u8?sid=tv-1&zip=78701\n") {
+		t.Errorf("master carried a stranger's ip=:\n%s", body)
+	}
+	if body := do(mux, "GET", "/channels/master.m3u8?zip=78701&sid=tv-1&ip="+home, platformAddr, "").Body.String(); !strings.HasSuffix(body, "\nlive.m3u8?ip="+home+"&sid=tv-1&zip=78701\n") {
+		t.Errorf("master dropped a platform's ip=:\n%s", body)
 	}
 }
 

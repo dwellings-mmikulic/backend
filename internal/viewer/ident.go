@@ -28,6 +28,7 @@ type Hasher struct {
 	salt        string
 	rotateDaily bool
 	now         func() time.Time
+	trusted     []*net.IPNet // connecting addresses whose ip= is believed
 }
 
 // NewHasher creates a Hasher. With rotateDaily, the UTC date is mixed into
@@ -36,10 +37,34 @@ func NewHasher(salt string, rotateDaily bool) *Hasher {
 	return &Hasher{salt: salt, rotateDaily: rotateDaily, now: time.Now}
 }
 
+// TrustIPParamFrom sets the connecting addresses whose ip= query parameter
+// is believed: the servers of a platform that fetches playlists on its
+// viewers' behalf. Call before serving. With none set, ip= is ignored and
+// every viewer is the address the request came from.
+func (h *Hasher) TrustIPParamFrom(nets []*net.IPNet) { h.trusted = nets }
+
+// TrustsIPParam reports whether r comes from an address whose ip= is
+// believed.
+func (h *Hasher) TrustsIPParam(r *http.Request) bool {
+	if len(h.trusted) == 0 {
+		return false
+	}
+	ip := net.ParseIP(ClientIP(r))
+	if ip == nil {
+		return false
+	}
+	for _, n := range h.trusted {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // ID identifies the request's viewer: by a valid sid query parameter, else
-// by a valid ip query parameter, else by client IP.
+// by RequestIP.
 func (h *Hasher) ID(r *http.Request) ID {
-	return h.IDAt(SID(r.URL.Query()), RequestIP(r), h.now())
+	return h.IDAt(SID(r.URL.Query()), h.RequestIP(r), h.now())
 }
 
 // maxSIDLen caps a session id; a Roku RIDA is a 36-character UUID.
@@ -72,15 +97,27 @@ func SID(q url.Values) string {
 	return s
 }
 
-// QueryIP is the ip query parameter in canonical form when it is a public
-// IP address, else "". Streaming platforms fill it through a macro (e.g.
-// ip={RokuIP}) so the viewer is known even when a server of theirs, not the
-// device, makes the request. An unfilled macro is ignored, and so is a
-// private address: Roku fills its macro with the device's LAN address
-// (10.0.0.90), which thousands of homes share and which would hide the
-// public address the request really came from.
-func QueryIP(q url.Values) string {
+// ParseQueryIP is the ip query parameter in canonical form when it is a
+// public IP address, else "". It only reads the value: whether to believe it
+// is Hasher.QueryIP's decision. An unfilled macro is not an address, and a
+// private address is ignored: Roku fills its macro with the device's LAN
+// address (10.0.0.90), which thousands of homes share and which would hide
+// the public address the request really came from.
+func ParseQueryIP(q url.Values) string {
 	return PublicIP(q.Get("ip"))
+}
+
+// QueryIP is the viewer address a platform passed in ip=, or "". A platform
+// whose servers fetch playlists for its viewers fills it (e.g. ip={RokuIP})
+// so the viewer is known although the request comes from the platform. The
+// value decides whose feed is served and whose views are recorded, so it is
+// believed only from the addresses set with TrustIPParamFrom. From anyone
+// else it would let a client pass for any home it can name.
+func (h *Hasher) QueryIP(r *http.Request) string {
+	if !h.TrustsIPParam(r) {
+		return ""
+	}
+	return ParseQueryIP(r.URL.Query())
 }
 
 // PublicIP is s as a canonical public address, or "" when s is not an
@@ -104,11 +141,36 @@ func isPublic(ip net.IP) bool {
 }
 
 // RequestIP is the viewer's address: QueryIP when set, else ClientIP.
-func RequestIP(r *http.Request) string {
-	if ip := QueryIP(r.URL.Query()); ip != "" {
+func (h *Hasher) RequestIP(r *http.Request) string {
+	if ip := h.QueryIP(r); ip != "" {
 		return ip
 	}
 	return ClientIP(r)
+}
+
+// ParseCIDRs reads a comma- or space-separated list of networks. A bare
+// address is the network of that one address.
+func ParseCIDRs(s string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if !strings.Contains(f, "/") {
+			ip := net.ParseIP(f)
+			if ip == nil {
+				return nil, fmt.Errorf("viewer: %q is not an address or network", f)
+			}
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			f = fmt.Sprintf("%s/%d", ip, bits)
+		}
+		_, n, err := net.ParseCIDR(f)
+		if err != nil {
+			return nil, fmt.Errorf("viewer: %q is not an address or network", f)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // IDAt is ID with explicit inputs. sid wins over ip when non-empty; the two
@@ -157,13 +219,20 @@ const maxUserAgentLen = 256
 
 // NewClient is the raw client behind r: RequestIP and the User-Agent,
 // trimmed to maxUserAgentLen and made safe for a PostgreSQL text column.
-func NewClient(r *http.Request) Client {
+// From is the connecting address, which the recorder limits rows by. It is
+// left empty for a platform whose ip= is believed: its servers speak for
+// many homes.
+func (h *Hasher) NewClient(r *http.Request) Client {
 	ua := strings.TrimSpace(r.UserAgent())
 	if len(ua) > maxUserAgentLen {
 		ua = ua[:maxUserAgentLen]
 	}
 	ua = strings.ToValidUTF8(strings.ReplaceAll(ua, "\x00", ""), "")
-	return Client{IP: RequestIP(r), UserAgent: ua}
+	c := Client{IP: h.RequestIP(r), UserAgent: ua}
+	if !h.TrustsIPParam(r) {
+		c.From = ClientIP(r)
+	}
+	return c
 }
 
 // ClientIP is the address the request came from as seen by the edge:

@@ -1,6 +1,7 @@
 package geo
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -153,5 +154,116 @@ func TestFreeIPAPI_SlowAPIIsAMiss(t *testing.T) {
 	}
 	if time.Since(start) > 250*time.Millisecond {
 		t.Errorf("Locate blocked for %s", time.Since(start))
+	}
+}
+
+func TestFreeIPAPI_BudgetLimitsUpstreamRequests(t *testing.T) {
+	var calls int32
+	srv := fakeAPI(t, &calls, func(string) (int, string) { return 200, usBody })
+	c := NewFreeIPAPI(srv.URL+"/api/v1", nil)
+	c.SetMaxPerMinute(12) // and so 2 in any 10 s
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	ip := func(i int) net.IP { return net.ParseIP(fmt.Sprintf("8.8.%d.%d", i/250, i%250)) }
+
+	// Five new addresses at once: two are asked, three are not, and those
+	// three are told so.
+	answered := 0
+	for i := range 5 {
+		if _, ok, got := c.LocateStatus(ip(i)); got {
+			answered++
+			if !ok {
+				t.Errorf("address %d: answered without a location", i)
+			}
+		}
+	}
+	if answered != 2 || atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("answered %d, upstream calls %d, want 2 and 2", answered, calls)
+	}
+	// An address that was not asked is not remembered as a miss: once there
+	// is budget again it is looked up.
+	now = now.Add(11 * time.Second)
+	if _, ok, got := c.LocateStatus(ip(4)); !ok || !got {
+		t.Fatalf("address 4 after the budget recovered: ok %v, answered %v", ok, got)
+	}
+	// An address already known costs nothing, however often it asks.
+	for range 100 {
+		if _, ok, got := c.LocateStatus(ip(0)); !ok || !got {
+			t.Fatal("a cached address stopped answering")
+		}
+	}
+	if atomic.LoadInt32(&calls) != 3 {
+		t.Fatalf("upstream calls %d, want 3", calls)
+	}
+	// Over a whole minute of invented addresses the minute limit holds.
+	start := now
+	for i := 100; now.Sub(start) < 59*time.Second; i++ {
+		c.LocateStatus(ip(i))
+		now = now.Add(500 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&calls); got > 3+12 {
+		t.Fatalf("upstream calls %d in a minute, limit 12 (plus the 3 before)", got)
+	}
+}
+
+func TestFreeIPAPI_NoBudgetWhenSetToZero(t *testing.T) {
+	var calls int32
+	srv := fakeAPI(t, &calls, func(string) (int, string) { return 200, usBody })
+	c := NewFreeIPAPI(srv.URL+"/api/v1", nil)
+	c.SetMaxPerMinute(0)
+	for i := range 80 {
+		if _, _, answered := c.LocateStatus(net.ParseIP(fmt.Sprintf("8.8.4.%d", i))); !answered {
+			t.Fatalf("lookup %d not answered without a budget", i)
+		}
+	}
+	if atomic.LoadInt32(&calls) != 80 {
+		t.Errorf("upstream calls %d, want 80", calls)
+	}
+}
+
+func TestFreeIPAPI_DefaultBudgetIsUnderTheKeylessAllowance(t *testing.T) {
+	var calls int32
+	srv := fakeAPI(t, &calls, func(string) (int, string) { return 200, usBody })
+	c := NewFreeIPAPI(srv.URL+"/api/v1", nil)
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	for i := range 600 {
+		c.LocateStatus(net.ParseIP(fmt.Sprintf("8.9.%d.%d", i/250, i%250)))
+		now = now.Add(100 * time.Millisecond) // 600 addresses over one minute
+	}
+	if got := atomic.LoadInt32(&calls); got > 60 || got < 30 {
+		t.Errorf("upstream calls %d in a minute, want at most the allowance of 60 and most of the budget used", got)
+	}
+}
+
+func TestFreeIPAPI_LocateStatusTellsAMissFromNoAnswer(t *testing.T) {
+	var calls int32
+	status := 200
+	body := `{"countryCode":"AU","zipCode":"4000","cityName":"Sydney","regionCode":"NSW"}`
+	srv := fakeAPI(t, &calls, func(string) (int, string) { return status, body })
+	c := NewFreeIPAPI(srv.URL+"/api/v1", nil)
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+
+	if _, ok, answered := c.LocateStatus(net.ParseIP("1.1.1.1")); ok || !answered {
+		t.Errorf("abroad: ok %v, answered %v; want a miss that is an answer", ok, answered)
+	}
+	if _, ok, answered := c.LocateStatus(net.ParseIP("10.0.0.5")); ok || !answered {
+		t.Errorf("private address: ok %v, answered %v; want a miss that is an answer", ok, answered)
+	}
+	status = 429
+	if _, ok, answered := c.LocateStatus(net.ParseIP("8.8.8.8")); ok || answered {
+		t.Errorf("refused by the API: ok %v, answered %v; want no answer", ok, answered)
+	}
+	// The failure is remembered for a minute, still as no answer, then the
+	// address is asked again.
+	before := atomic.LoadInt32(&calls)
+	if _, _, answered := c.LocateStatus(net.ParseIP("8.8.8.8")); answered || atomic.LoadInt32(&calls) != before {
+		t.Error("a remembered failure must stay unanswered and cost no request")
+	}
+	status, body = 200, usBody
+	now = now.Add(failureTTL + time.Second)
+	if loc, ok, answered := c.LocateStatus(net.ParseIP("8.8.8.8")); !ok || !answered || loc.Zip != "94035" {
+		t.Errorf("after the failure expired: %+v ok %v answered %v", loc, ok, answered)
 	}
 }

@@ -18,7 +18,7 @@ func TestHousehold_ServesSpansFromCacheUntilTTL(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, nil, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, nil, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	m.spansCalls = 0
@@ -53,7 +53,7 @@ func TestHousehold_UnknownIsCachedUntilCreated(t *testing.T) {
 		t.Fatalf("unknown household read from the store %d times, want 1", m.spansCalls)
 	}
 	// The first scan creates the feed: the next poll must see it at once.
-	if _, err := s.EnsureHousehold(context.Background(), hh, nil, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, nil, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	spans, err := s.Household(context.Background(), hh)
@@ -68,7 +68,7 @@ func TestChoose_InvalidatesTheHouseholdCache(t *testing.T) {
 	addClips(m, austin, 100, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{3}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Household(context.Background(), hh); err != nil { // warm the cache
@@ -93,7 +93,7 @@ func TestAnchoredPlaylist_PollsWithoutStoreReads(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{4}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	ch := Scope{Zip: "77494"}

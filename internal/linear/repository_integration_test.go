@@ -383,3 +383,68 @@ func assertVersionEqual(t *testing.T, got, want *Version) {
 func normalise(city string) string {
 	return strings.ToLower(strings.Join(strings.Fields(city), " "))
 }
+
+// PurgeVersions deletes ended versions but never a channel's newest. The
+// versions here end in 2001 and the purge asks for "before 2002", so on a
+// database with other lineups it touches none of them. Skipped unless
+// TEST_DATABASE_URL is set.
+func TestRepository_PurgeVersions_Integration(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set TEST_DATABASE_URL to run the linear repository integration test")
+	}
+	ctx := context.Background()
+	pool, err := db.Connect(ctx, url, 0)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	busy, idle := "it-purge-busy:"+suffix, "it-purge-idle:"+suffix
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `DELETE FROM channel_lineups WHERE channel_key = ANY($1)`, []string{busy, idle}); err != nil {
+			t.Errorf("cleanup lineups: %v", err)
+		}
+	})
+	r := NewRepository(pool)
+	base := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	add := func(key string, n int, start time.Time) {
+		t.Helper()
+		v := &Version{Key: key, Version: n, Scope: "us", StartsAt: start, EndsAt: start.Add(6 * time.Hour),
+			StartSeq: int64(n) * 100, StartItem: int64(n) * 10, ItemIDs: []int64{1}, ItemMS: []int{6000}, ItemSegs: []int{2}}
+		if ok, err := r.InsertVersion(ctx, v); err != nil || !ok {
+			t.Fatalf("insert %s v%d: ok=%v err=%v", key, n, ok, err)
+		}
+	}
+	for n := 1; n <= 4; n++ {
+		add(busy, n, base.Add(time.Duration(n-1)*6*time.Hour))
+	}
+	add(idle, 1, base)
+
+	// Before version 3 ends: versions 1 and 2 of the busy channel go.
+	n, err := r.PurgeVersions(ctx, base.Add(13*time.Hour))
+	if err != nil || n != 2 {
+		t.Fatalf("first purge deleted %d, %v; want 2", n, err)
+	}
+	left, err := r.LatestVersions(ctx, busy, 10)
+	if err != nil || len(left) != 2 || left[0].Version != 4 || left[1].Version != 3 {
+		t.Fatalf("busy channel after the first purge: %v, %v", versionNumbers(left), err)
+	}
+	// Long after everything ended: only each channel's newest stays.
+	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0)); err != nil || n != 1 {
+		t.Fatalf("second purge deleted %d, %v; want 1", n, err)
+	}
+	for key, want := range map[string]int{busy: 4, idle: 1} {
+		left, err := r.LatestVersions(ctx, key, 10)
+		if err != nil || len(left) != 1 || left[0].Version != want {
+			t.Errorf("%s after the second purge: %v, %v; want only version %d", key, versionNumbers(left), err, want)
+		}
+	}
+	// Nothing left to delete: a repeat is a no-op.
+	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0)); err != nil || n != 0 {
+		t.Errorf("repeat purge deleted %d, %v", n, err)
+	}
+}

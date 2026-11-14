@@ -241,7 +241,9 @@ platform that fetches `/channels/live.m3u8?…&ip=<viewer public IP>` per
 viewer gets, once that viewer has opened the mobile page from the same
 network, their personal feed in place of the channel, with continuous HLS
 counters; without `ip=`, or before the page was ever opened, the channel is
-served as advertised.
+served as advertised. `ip=` is believed only from the platform's own
+servers, listed in `VIEWER_IP_PARAM_TRUSTED_CIDRS`; from any other address
+it is ignored (see "Viewer tracking and channel resolve").
 
 Set `LINEAR_ENABLED=false` to turn all of this off.
 
@@ -256,14 +258,22 @@ A viewer is a salted SHA-256 of the `sid` query parameter if present — an
 app sends its device/advertising id (Roku RIDA) — else of the `ip` query
 parameter, else of the client IP. `ip` is for platforms that fill a macro
 (`master.m3u8?ip={RokuIP}`) because a server of theirs, not the device, may
-fetch the stream. A `sid` outside 1–64 of `A-Za-z0-9._:-` or made only of capitals
+fetch the stream. It names whose feed is served and whose views are
+recorded, so it counts only when the request comes from an address or
+network in `VIEWER_IP_PARAM_TRUSTED_CIDRS` (comma separated, empty by
+default: `ip` is then ignored from everyone and a viewer is the address the
+request came from). A `sid` outside 1–64 of `A-Za-z0-9._:-` or made only of capitals
 and underscores, or an `ip` that is not a public address, is ignored: an
 unfilled macro (`{RIDA}`, `ROKU_ADS_TRACKING_ID`), and the LAN address
 Roku puts in its macro (`10.0.0.90`), which would hide the public address the
 request came from. `master.m3u8` carries both on to its `live.m3u8` reference, so a
 player given only the master URL is still identified. Viewers are recorded once per minute per
 channel in `viewer_heartbeats`, batched every 30 s and purged after
-`VIEWER_RETENTION_DAYS`.
+`VIEWER_RETENTION_DAYS`. One connecting address can hold at most
+`VIEWER_MAX_PENDING_PER_ADDRESS` (`200`) rows between two flushes, so a
+client inventing viewers cannot crowd the others out of the buffer; a
+platform whose `ip=` is believed is not limited this way. `/channels/beat`
+answers 404 for a place that does not exist, like the playlists.
 
 The raw public client address and user agent behind the heartbeats are kept
 in `viewer_clients` (one row per ip, user agent and channel, with first and
@@ -461,8 +471,21 @@ minutes), not straight from the CDN. Make the file with
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
 `VIEWER_RETENTION_DAYS` (`30`), `FREEIPAPI_URL`
-(`https://free.freeipapi.com/api/v1`; empty = no geo) and
-`VIEWER_ADMIN_KEY` (empty = no `/admin/viewers`).
+(`https://free.freeipapi.com/api/v1`; empty = no geo),
+`FREEIPAPI_MAX_PER_MINUTE` (`45`, with a sixth of it per 10 s; `0` = no
+limit, for a paid server), `VIEWER_IP_PARAM_TRUSTED_CIDRS` (empty),
+`VIEWER_MAX_PENDING_PER_ADDRESS` (`200`) and
+`VIEWER_ADMIN_KEY` (empty = no `/admin/viewers`). `FEED_ALLOWED_ORIGINS`
+(empty) lists page origins besides `MOBILE_BASE_URL` (with and without
+`www.`) whose scripts may read a home's feed (`/feed/me`, `/feed/<id>`):
+those answers name the caller's origin when it is allowed and none
+otherwise, and a `POST /feed/<id>` from a page on another origin is refused.
+
+A home whose location lookup could not be made when it first connected (an
+outage, or the lookup budget spent) is served national and stored as
+`pending`; the first later request for which the lookup answers moves it to
+its area, or settles it on national. Lineup versions that ended more than
+two days ago are deleted hourly, except each channel's newest.
 
 `AD_PREROLL_URL` and `AD_MIDROLL_URL` (both empty) are the VAST ad tags from
 the ad server. The backend never calls them: `/api/v1/properties`,

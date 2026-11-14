@@ -90,26 +90,36 @@ func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	playlistHeaders(w)
-	writeMaster(w, mediaURI(sc, r.URL.Query()))
+	writeMaster(w, mediaURI(sc, r.URL.Query(), h.queryIP(r)))
 }
 
 // mediaURI is the media playlist reference of sc. It is rebuilt from the
 // parsed scope rather than echoing the request's raw query, so unknown or
 // duplicated parameters, odd casing and stray whitespace cannot be reflected
-// into the playlist body. A valid sid and ip are carried along: the media
-// playlist is the request that is tracked, and a player given only a master
-// URL (a third-party app) would otherwise drop them. So is music=, which
-// turns the channel music on or off for one player.
-func mediaURI(sc Scope, q url.Values) string {
+// into the playlist body. A valid sid and a believed ip (Hasher.QueryIP, ""
+// when there is none) are carried along: the media playlist is the request
+// that is tracked, and a player given only a master URL (a third-party app)
+// would otherwise drop them. So is music=, which turns the channel music on
+// or off for one player.
+func mediaURI(sc Scope, q url.Values, ip string) string {
 	v := scopeValues(sc)
 	if sid := viewer.SID(q); sid != "" {
 		v.Set("sid", sid)
 	}
-	if ip := viewer.QueryIP(q); ip != "" {
+	if ip != "" {
 		v.Set("ip", ip)
 	}
 	carryMusic(v, q)
 	return "live.m3u8" + encodeQuery(v)
+}
+
+// queryIP is the viewer address a platform passed in ip=, when the request
+// comes from an address whose ip= is believed (viewer.Hasher.QueryIP).
+func (h *Handler) queryIP(r *http.Request) string {
+	if h.viewers == nil {
+		return ""
+	}
+	return h.viewers.Hasher.QueryIP(r)
 }
 
 func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
@@ -130,8 +140,10 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 }
 
 // channelPlaylist is the live playlist of sc — or, when the request carries
-// a public ip= and a household exists for it, that household's feed anchored
-// to sc (a platform fetching on a viewer's behalf; see the QR bumper spec).
+// a believed ip= and a household exists for it, that household's feed
+// anchored to sc (a platform fetching on a viewer's behalf; see the QR
+// bumper spec). An ip= from any other address is ignored: it would hand the
+// caller the feed of whatever home it names.
 // On /channels/… the household is only ever created by the mobile page, so a
 // viewer who never scanned the QR sees the channel as advertised.
 //
@@ -144,7 +156,7 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 // stitcher or proxy) is nobody's home and gets the channel as advertised.
 func (h *Handler) channelPlaylist(r *http.Request, sc Scope, now time.Time) ([]byte, error) {
 	if h.feeds != nil && h.viewers != nil {
-		if ip := viewer.QueryIP(r.URL.Query()); ip != "" {
+		if ip := h.viewers.Hasher.QueryIP(r); ip != "" {
 			body, err := h.svc.AnchoredPlaylist(r.Context(), h.viewers.Hasher.Household(ip), sc, now)
 			if !errors.Is(err, ErrUnknownHousehold) {
 				return body, err

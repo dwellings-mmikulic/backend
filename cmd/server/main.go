@@ -225,6 +225,7 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 			BumperInterval:  time.Duration(cfg.Linear.BumperIntervalMinutes) * time.Minute,
 			AdBreakInterval: time.Duration(cfg.Linear.AdBreakIntervalMinutes) * time.Minute,
 		}, log)
+		go svc.RunMaintenance(ctx)
 		h := linear.NewHandler(svc, log)
 		h.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
 		if cfg.Linear.MusicFile != "" {
@@ -241,6 +242,7 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 				MobileBaseURL:  cfg.Feed.MobileBaseURL,
 				QRShowSeconds:  cfg.Feed.QRShowSeconds,
 				QREverySeconds: cfg.Feed.QREverySeconds,
+				AllowedOrigins: cfg.Feed.AllowedOrigins,
 			})
 			log.Info("personal feeds enabled", "mobile_base_url", cfg.Feed.MobileBaseURL, "qr_show_s", cfg.Feed.QRShowSeconds, "qr_every_s", cfg.Feed.QREverySeconds)
 		}
@@ -290,11 +292,19 @@ func startHealth(cfg *config.Config, sched *scheduler.Scheduler, log *slog.Logge
 func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log *slog.Logger) linear.ViewerOptions {
 	repo := viewer.NewRepository(pool)
 	rec := viewer.NewRecorder(repo, viewer.Options{
-		Retention: time.Duration(cfg.Viewer.RetentionDays) * 24 * time.Hour,
+		Retention:            time.Duration(cfg.Viewer.RetentionDays) * 24 * time.Hour,
+		MaxPendingPerAddress: cfg.Viewer.MaxPendingPerAddress,
 	}, log)
 	go rec.Run(ctx)
+	hasher := viewer.NewHasher(cfg.Viewer.Salt, cfg.Viewer.RotateDaily)
+	// config.Load has checked the list, so an error here cannot happen.
+	if trusted, err := viewer.ParseCIDRs(cfg.Viewer.IPParamTrustedCIDRs); err != nil {
+		log.Error("VIEWER_IP_PARAM_TRUSTED_CIDRS ignored", "error", err)
+	} else {
+		hasher.TrustIPParamFrom(trusted)
+	}
 	o := linear.ViewerOptions{
-		Hasher:         viewer.NewHasher(cfg.Viewer.Salt, cfg.Viewer.RotateDaily),
+		Hasher:         hasher,
 		Tracker:        rec,
 		Audience:       repo,
 		PublicBaseURL:  cfg.PublicBaseURL,
@@ -303,11 +313,14 @@ func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, 
 		AdminKey:       cfg.Viewer.AdminKey,
 	}
 	if cfg.Viewer.FreeIPAPIURL != "" {
-		o.Geo = geo.NewFreeIPAPI(cfg.Viewer.FreeIPAPIURL, log)
+		lookup := geo.NewFreeIPAPI(cfg.Viewer.FreeIPAPIURL, log)
+		lookup.SetMaxPerMinute(cfg.Viewer.FreeIPAPIMaxPerMinute)
+		o.Geo = lookup
 	} else {
 		log.Warn("FREEIPAPI_URL is empty: no IP location, every viewer defaults to the national channel")
 	}
-	log.Info("viewer tracking enabled", "rotate_daily", cfg.Viewer.RotateDaily, "retention_days", cfg.Viewer.RetentionDays, "geoip", o.Geo != nil, "admin_viewers", o.AdminKey != "")
+	log.Info("viewer tracking enabled", "rotate_daily", cfg.Viewer.RotateDaily, "retention_days", cfg.Viewer.RetentionDays, "geoip", o.Geo != nil, "admin_viewers", o.AdminKey != "",
+		"ip_param_trusted", cfg.Viewer.IPParamTrustedCIDRs != "", "geoip_max_per_minute", cfg.Viewer.FreeIPAPIMaxPerMinute)
 	return o
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dwellingtw/backend/internal/geo"
 	"github.com/dwellingtw/backend/internal/qrcode"
 	"github.com/dwellingtw/backend/internal/viewer"
 )
@@ -22,10 +23,91 @@ type FeedOptions struct {
 	MobileBaseURL  string // origin of the mobile page, for the QR (https://dwellings.tv)
 	QRShowSeconds  int    // how long the Roku app shows the QR
 	QREverySeconds int    // how often
+	// AllowedOrigins are further page origins (scheme://host) that may read
+	// a home's feed from a browser, besides MobileBaseURL's.
+	AllowedOrigins []string
 }
 
 // EnableFeeds turns on the personal feeds. Call before Register.
 func (h *Handler) EnableFeeds(o FeedOptions) { h.feeds = &o }
+
+// allowsOrigin reports whether a page on origin may read the feed routes
+// that speak for the connecting home: the mobile page's own origin, with
+// and without "www.", and the ones listed in AllowedOrigins.
+func (o *FeedOptions) allowsOrigin(origin string) bool {
+	origin = strings.TrimRight(origin, "/")
+	if origin == "" {
+		return false
+	}
+	if u, err := url.Parse(o.MobileBaseURL); err == nil && u.Host != "" {
+		host := strings.TrimPrefix(u.Host, "www.")
+		if origin == u.Scheme+"://"+host || origin == u.Scheme+"://www."+host {
+			return true
+		}
+	}
+	for _, a := range o.AllowedOrigins {
+		if origin == strings.TrimRight(a, "/") {
+			return true
+		}
+	}
+	return false
+}
+
+// feedCORS wraps a feed route whose answer speaks for the connecting home
+// or changes a home's feed. /feed/me hands out the feed id of whatever
+// network the browser is on, and the id is the capability to change that
+// TV's feed, so only the mobile page may read these answers from a browser:
+// the response names the caller's origin when it is an allowed one and no
+// origin otherwise (never "*"). A POST from a page on any other origin is
+// refused outright. Requests without an Origin header (the TV app, curl)
+// and same-origin requests are untouched.
+func (h *Handler) feedCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		allowed := h.feeds.allowsOrigin(origin)
+		sameOrigin := origin == "" || strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://") == r.Host
+		cw := &feedCORSWriter{ResponseWriter: w}
+		if allowed {
+			cw.origin = origin
+		}
+		if r.Method == http.MethodPost && !allowed && !sameOrigin {
+			writeError(cw, http.StatusForbidden, "origin not allowed")
+			return
+		}
+		next(cw, r)
+	}
+}
+
+// feedCORSWriter sets the cross-origin header when the response starts, so
+// it holds whatever the handler and the shared error writer put there.
+type feedCORSWriter struct {
+	http.ResponseWriter
+	origin string
+	done   bool
+}
+
+func (c *feedCORSWriter) fix() {
+	if c.done {
+		return
+	}
+	c.done = true
+	hd := c.Header()
+	hd.Del("Access-Control-Allow-Origin")
+	hd.Add("Vary", "Origin")
+	if c.origin != "" {
+		hd.Set("Access-Control-Allow-Origin", c.origin)
+	}
+}
+
+func (c *feedCORSWriter) WriteHeader(status int) {
+	c.fix()
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func (c *feedCORSWriter) Write(b []byte) (int, error) {
+	c.fix()
+	return c.ResponseWriter.Write(b)
+}
 
 // mobilePageHost is MobileBaseURL as a viewer would type it: no scheme, no
 // trailing slash ("dwellings.tv").
@@ -36,14 +118,14 @@ func (o *FeedOptions) mobilePageHost() string {
 }
 
 func (h *Handler) registerFeeds(mux *http.ServeMux) {
-	mux.HandleFunc("GET /feed/master.m3u8", h.feedMaster)
+	mux.HandleFunc("GET /feed/master.m3u8", h.feedCORS(h.feedMaster))
 	mux.HandleFunc("GET /feed/live.m3u8", h.feedLive)
-	mux.HandleFunc("GET /feed/qr.png", h.feedQR)
-	mux.HandleFunc("GET /feed/me", h.feedMe)
+	mux.HandleFunc("GET /feed/qr.png", h.feedCORS(h.feedQR))
+	mux.HandleFunc("GET /feed/me", h.feedCORS(h.feedMe))
 	mux.HandleFunc("GET /feed/areas", h.feedAreas)
-	mux.HandleFunc("GET /feed/{id}", h.feedGet)
-	mux.HandleFunc("POST /feed/{id}", h.feedChoose)
-	mux.HandleFunc("OPTIONS /feed/{id}", h.feedPreflight)
+	mux.HandleFunc("GET /feed/{id}", h.feedCORS(h.feedGet))
+	mux.HandleFunc("POST /feed/{id}", h.feedCORS(h.feedChoose))
+	mux.HandleFunc("OPTIONS /feed/{id}", h.feedCORS(h.feedPreflight))
 	mux.HandleFunc("GET /tv/", h.tvPage)
 	mux.HandleFunc("GET /tv/{id}", h.tvPage)
 }
@@ -64,20 +146,32 @@ func (h *Handler) household(r *http.Request) viewer.ID {
 }
 
 // ensure creates the household's feed on first contact, defaulting to the
-// IP's area when the geo database is present.
+// IP's area when the geo database is present. A lookup that could not be
+// made (an outage, the request budget spent) is passed on as such, so the
+// national default it leaves is not stored as final.
 func (h *Handler) ensure(r *http.Request, id viewer.ID) ([]Span, error) {
 	var cands []Scope
-	if h.viewers.Geo != nil {
-		if loc, ok := h.viewers.Geo.Locate(net.ParseIP(viewer.ClientIP(r))); ok {
+	located := true
+	if g := h.viewers.Geo; g != nil {
+		ip := net.ParseIP(viewer.ClientIP(r))
+		var loc geo.Location
+		var ok bool
+		if sl, hasStatus := g.(geo.StatusLookup); hasStatus {
+			loc, ok, located = sl.LocateStatus(ip)
+		} else {
+			loc, ok = g.Locate(ip)
+		}
+		if ok {
 			cands = geoCandidates(loc)
 		}
 	}
-	return h.svc.EnsureHousehold(r.Context(), id, cands, h.svc.now())
+	return h.svc.EnsureHousehold(r.Context(), id, cands, located, h.svc.now())
 }
 
+// noStore marks a per-home answer as not cacheable. The cross-origin header
+// of these routes is set by feedCORS.
 func noStore(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 }
 
 // failFeed maps feed errors to responses.
@@ -169,10 +263,14 @@ func (h *Handler) writeFeed(w http.ResponseWriter, spans []Span) {
 	if sc, err := ParseKey(sp.Scope); err == nil {
 		name = sc.Name()
 	}
+	source := sp.Source
+	if source == SourcePending {
+		source = SourceDefault // to a client a default is a default
+	}
 	noStore(w)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(feedResponse{
-		ID: sp.Household.String(), Scope: sp.Scope, Name: name, Requested: sp.Requested, Source: sp.Source,
+		ID: sp.Household.String(), Scope: sp.Scope, Name: name, Requested: sp.Requested, Source: source,
 		UpdatedAt: sp.CreatedAt, Live: h.viewers.PublicBaseURL + "/feed/live.m3u8?hh=" + sp.Household.String(),
 	})
 }
@@ -237,7 +335,6 @@ func (h *Handler) feedChoose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) feedPreflight(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Access-Control-Max-Age", "600")

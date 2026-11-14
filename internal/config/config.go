@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"runtime"
@@ -212,6 +213,17 @@ type ViewerConfig struct {
 	// or a paid server's ".../api"); empty disables the IP geo default in
 	// /channels/resolve and the personal feeds.
 	FreeIPAPIURL string
+	// FreeIPAPIMaxPerMinute is the most lookups sent to the Free IP API in a
+	// minute (and a sixth of it in any 10 s). The keyless tier allows 60 a
+	// minute. 0 means no limit, for a paid server.
+	FreeIPAPIMaxPerMinute int
+	// IPParamTrustedCIDRs lists the addresses and networks whose ip= query
+	// parameter is believed: the servers of a platform that fetches
+	// playlists for its viewers. Empty means ip= is ignored from everyone.
+	IPParamTrustedCIDRs string
+	// MaxPendingPerAddress is how many heartbeat rows one connecting address
+	// may hold between two flushes.
+	MaxPendingPerAddress int
 	// AdminKey protects GET /admin/viewers, the listing of raw client
 	// addresses. Empty leaves the route unmounted.
 	AdminKey string
@@ -236,6 +248,9 @@ type FeedConfig struct {
 	// QRShowSeconds / QREverySeconds are the cadence reported to the app.
 	QRShowSeconds  int
 	QREverySeconds int
+	// AllowedOrigins are page origins besides MobileBaseURL's that may read
+	// a home's feed from a browser.
+	AllowedOrigins []string
 }
 
 // SearchCriteria defines what properties the scheduler discovers each cycle.
@@ -399,6 +414,10 @@ func Load() (*Config, error) {
 			RetentionDays: getenvInt("VIEWER_RETENTION_DAYS", 30),
 			AdminKey:      strings.TrimSpace(getenv("VIEWER_ADMIN_KEY", "")),
 			FreeIPAPIURL:  strings.TrimSpace(getenv("FREEIPAPI_URL", "https://free.freeipapi.com/api/v1")),
+
+			FreeIPAPIMaxPerMinute: getenvInt("FREEIPAPI_MAX_PER_MINUTE", 45),
+			IPParamTrustedCIDRs:   strings.TrimSpace(getenv("VIEWER_IP_PARAM_TRUSTED_CIDRS", "")),
+			MaxPendingPerAddress:  getenvInt("VIEWER_MAX_PENDING_PER_ADDRESS", 200),
 		},
 		Ads: AdsConfig{
 			PrerollURL: strings.TrimSpace(getenv("AD_PREROLL_URL", "")),
@@ -408,6 +427,7 @@ func Load() (*Config, error) {
 			MobileBaseURL:  strings.TrimRight(getenv("MOBILE_BASE_URL", "https://dwellings.tv"), "/"),
 			QRShowSeconds:  getenvInt("QR_SHOW_SECONDS", 60),
 			QREverySeconds: getenvInt("QR_EVERY_SECONDS", 300),
+			AllowedOrigins: strings.FieldsFunc(os.Getenv("FEED_ALLOWED_ORIGINS"), func(r rune) bool { return r == ',' || r == ' ' }),
 		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),
@@ -472,6 +492,19 @@ func Load() (*Config, error) {
 	for key, v := range map[string]string{"AD_PREROLL_URL": c.Ads.PrerollURL, "AD_MIDROLL_URL": c.Ads.MidrollURL} {
 		if v != "" && !isHTTPURL(v) {
 			return nil, fmt.Errorf("%s must be an absolute http(s) URL, got %q", key, v)
+		}
+	}
+	for _, f := range strings.FieldsFunc(c.Viewer.IPParamTrustedCIDRs, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if _, _, err := net.ParseCIDR(f); err != nil && net.ParseIP(f) == nil {
+			return nil, fmt.Errorf("VIEWER_IP_PARAM_TRUSTED_CIDRS: %q is not an address or network", f)
+		}
+	}
+	if c.Viewer.FreeIPAPIMaxPerMinute < 0 || c.Viewer.MaxPendingPerAddress < 1 {
+		return nil, fmt.Errorf("FREEIPAPI_MAX_PER_MINUTE (%d) must be >= 0 and VIEWER_MAX_PENDING_PER_ADDRESS (%d) >= 1", c.Viewer.FreeIPAPIMaxPerMinute, c.Viewer.MaxPendingPerAddress)
+	}
+	for _, o := range c.Feed.AllowedOrigins {
+		if u, err := url.Parse(o); err != nil || !isHTTPURL(o) || strings.Trim(u.Path, "/") != "" {
+			return nil, fmt.Errorf("FEED_ALLOWED_ORIGINS: %q must be an origin such as https://example.com", o)
 		}
 	}
 	if !isHTTPURL(c.Feed.MobileBaseURL) {

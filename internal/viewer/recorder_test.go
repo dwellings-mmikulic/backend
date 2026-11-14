@@ -3,6 +3,7 @@ package viewer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -91,6 +92,69 @@ func TestRecorder_PendingCap(t *testing.T) {
 	rec.Record(ID{3}, "us", now, Client{}) // dropped, not grown without bound
 	if rec.Pending() != 2 {
 		t.Errorf("pending = %d, want 2", rec.Pending())
+	}
+}
+
+func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
+	store := &fakeStore{}
+	rec := NewRecorder(store, Options{MaxPending: 100, MaxPendingPerAddress: 5}, nil)
+	now := time.Now()
+	flood := Client{IP: "198.51.100.9", From: "198.51.100.9"}
+	for i := range 1000 {
+		// A new viewer id, a new channel and a new claimed address each time.
+		c := flood
+		c.IP = fmt.Sprintf("203.0.%d.%d", i/250, i%250)
+		rec.Record(ID{byte(i), byte(i >> 8)}, fmt.Sprintf("zip:%05d", i), now, c)
+	}
+	if rec.Pending() != 5 {
+		t.Fatalf("one address holds %d rows, want its limit of 5", rec.Pending())
+	}
+	// Another home's beat still gets in, and a repeat of it costs nothing.
+	home := Client{IP: "203.0.113.5", From: "203.0.113.5"}
+	rec.Record(ID{0xAA}, "us", now, home)
+	rec.Record(ID{0xAA}, "us", now, home)
+	if rec.Pending() != 6 {
+		t.Fatalf("pending = %d, want the other home's beat recorded", rec.Pending())
+	}
+	// A platform speaking for many homes (From empty) is not limited by address.
+	for i := range 20 {
+		rec.Record(ID{0xBB, byte(i)}, "us", now, Client{IP: fmt.Sprintf("192.0.2.%d", i)})
+	}
+	if rec.Pending() != 26 {
+		t.Fatalf("pending = %d, want 26", rec.Pending())
+	}
+	// From is a limit key, not data: it is not stored.
+	if err := rec.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, hb := range store.beats {
+		if hb.Client.From != "" {
+			t.Fatalf("stored row carries From %q", hb.Client.From)
+		}
+	}
+	// After the flush the address has its allowance back.
+	for i := range 10 {
+		rec.Record(ID{0xCC, byte(i)}, "us", now, flood)
+	}
+	if rec.Pending() != 5 {
+		t.Errorf("after a flush pending = %d, want 5", rec.Pending())
+	}
+}
+
+func TestRecorder_FailedFlushKeepsTheAddressCount(t *testing.T) {
+	store := &fakeStore{fail: errors.New("down")}
+	rec := NewRecorder(store, Options{MaxPendingPerAddress: 3}, nil)
+	now := time.Now()
+	c := Client{From: "198.51.100.9"}
+	for i := range 5 {
+		rec.Record(ID{byte(i)}, "us", now, c)
+	}
+	if err := rec.Flush(context.Background()); err == nil {
+		t.Fatal("flush should fail")
+	}
+	rec.Record(ID{9}, "us", now, c)
+	if rec.Pending() != 3 {
+		t.Errorf("pending = %d, want 3: rows that were not written still count", rec.Pending())
 	}
 }
 

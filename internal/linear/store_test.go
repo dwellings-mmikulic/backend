@@ -225,6 +225,28 @@ func (m *memStore) InsertVersion(_ context.Context, v *Version) (bool, error) {
 	return true, nil
 }
 
+func (m *memStore) PurgeVersions(_ context.Context, t time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for key, vs := range m.versions {
+		newest := 0
+		for _, v := range vs {
+			newest = max(newest, v.Version)
+		}
+		keep := vs[:0]
+		for _, v := range vs {
+			if v.EndsAt.Before(t) && v.Version < newest {
+				n++
+				continue
+			}
+			keep = append(keep, v)
+		}
+		m.versions[key] = keep
+	}
+	return n, nil
+}
+
 func (m *memStore) ClipsByID(_ context.Context, ids []int64) (map[int64]ClipSegments, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

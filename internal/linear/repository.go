@@ -197,6 +197,19 @@ ON CONFLICT (channel_key, version) DO NOTHING`
 	return tag.RowsAffected() == 1, nil
 }
 
+// PurgeVersions implements Store.
+func (r *Repository) PurgeVersions(ctx context.Context, t time.Time) (int64, error) {
+	const q = `
+DELETE FROM channel_lineups c
+ WHERE c.ends_at < $1
+   AND c.version < (SELECT max(version) FROM channel_lineups WHERE channel_key = c.channel_key)`
+	tag, err := r.pool.Exec(ctx, q, t)
+	if err != nil {
+		return 0, fmt.Errorf("purge lineups: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ClipsByID implements Store. Positive ids are video_hls rows, negative ones
 // bumpers (bumperID); each entry is keyed by the id as given.
 func (r *Repository) ClipsByID(ctx context.Context, ids []int64) (map[int64]ClipSegments, error) {
