@@ -14,9 +14,24 @@ const (
 	// frameGrid is one video frame at 30 fps in 90 kHz ticks. Every clip's
 	// first picture sits on this grid.
 	frameGrid = 3000
-	// maxSegmentMS bounds a segment request; the channel's are under 10 s.
-	maxSegmentMS = 60_000
+	// MaxSegmentMS is the longest segment Remux accepts; the channel's are
+	// under 10 s.
+	MaxSegmentMS = 60_000
+	// MaxElapsedMS is the furthest into its clip a segment may start. The
+	// longest listing is under 15 minutes. The work Remux does grows with
+	// this number, so it must have a limit.
+	MaxElapsedMS = 3_600_000
+	// MaxStartMS is the latest wall-clock time Remux accepts (the year
+	// 4199). Past it the frame index would leave int64.
+	MaxStartMS = 1 << 46
 )
+
+// ValidTiming reports whether Remux accepts these segment timings.
+func ValidTiming(startMS int64, durMS, elapsedMS int) bool {
+	return durMS > 0 && durMS <= MaxSegmentMS &&
+		elapsedMS >= 0 && elapsedMS <= MaxElapsedMS &&
+		startMS >= int64(elapsedMS) && startMS <= MaxStartMS
+}
 
 // ErrNotRemuxable reports a video segment the music cannot be put into. The
 // caller should serve the segment as it is.
@@ -188,7 +203,7 @@ func appendFrame(dst []byte, frame []byte, pid int, pts int64, cc uint8) ([]byte
 //
 // ErrNotRemuxable when the segment has no AAC track to replace.
 func (l *Loop) Remux(video []byte, startMS int64, durMS, elapsedMS int) ([]byte, error) {
-	if durMS <= 0 || durMS > maxSegmentMS || elapsedMS < 0 || startMS < int64(elapsedMS) {
+	if !ValidTiming(startMS, durMS, elapsedMS) {
 		return nil, fmt.Errorf("segment timing out of range: start %d, duration %d, elapsed %d", startMS, durMS, elapsedMS)
 	}
 	if len(video) == 0 || len(video)%tsPacket != 0 {

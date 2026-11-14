@@ -56,6 +56,11 @@ const (
 	// musicSegmentTTL is how long a served segment may be cached. A segment
 	// is only on a playlist for under a minute.
 	musicSegmentTTL = 10 * time.Minute
+	// musicSegmentWindow is how far from the clock a segment's airing time
+	// may be. Playlists only list segments that ended within the last minute
+	// or so. Without this every airing time ever would be a segment to fetch
+	// and swap.
+	musicSegmentWindow = 10 * time.Minute
 )
 
 // musicSegmentPath is the only shape of CDN path the segment route fetches.
@@ -137,6 +142,9 @@ func (h *Handler) registerMusic(mux *http.ServeMux) {
 // musicSegment serves one video segment with the music in place of its own
 // sound. A segment the music cannot be put into is served as it is: a
 // stretch of the old sound is better than a hole in the picture.
+//
+// The timings in the address are checked before anything is fetched: they
+// come from whoever sends the request, and the work grows with them.
 func (h *Handler) musicSegment(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	parts := strings.Split(r.PathValue("spec"), "-")
@@ -147,7 +155,11 @@ func (h *Handler) musicSegment(w http.ResponseWriter, r *http.Request) {
 	start, err1 := strconv.ParseInt(parts[0], 10, 64)
 	dur, err2 := strconv.Atoi(parts[1])
 	elapsed, err3 := strconv.Atoi(parts[2])
-	if err1 != nil || err2 != nil || err3 != nil {
+	if err1 != nil || err2 != nil || err3 != nil || !music.ValidTiming(start, dur, elapsed) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if off := h.svc.now().Sub(time.UnixMilli(start)); off < -musicSegmentWindow || off > musicSegmentWindow {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
