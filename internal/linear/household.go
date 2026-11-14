@@ -53,8 +53,6 @@ func (s *Service) forgetHousehold(h viewer.ID) {
 // not, there are no candidates and national is all that can be served, but
 // that is not a fact about the home: the span is stored as SourcePending,
 // and the first later call with located true settles it (settlePending).
-// Without this a home that first connects during a lookup outage would be
-// national for good.
 func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates []Scope, located bool, now time.Time) ([]Span, error) {
 	spans, err := s.Household(ctx, h)
 	if err == nil {

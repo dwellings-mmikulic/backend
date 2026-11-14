@@ -218,8 +218,7 @@ const (
 	// versionRetention is how long an ended lineup version is kept. The
 	// playlists read at most two minutes back and the guide only forward;
 	// two days leaves room to look into a report about what aired.
-	versionRetention = 48 * time.Hour
-	// maintenanceInterval is how often RunMaintenance purges.
+	versionRetention    = 48 * time.Hour
 	maintenanceInterval = time.Hour
 )
 

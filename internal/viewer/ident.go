@@ -107,12 +107,11 @@ func ParseQueryIP(q url.Values) string {
 	return PublicIP(q.Get("ip"))
 }
 
-// QueryIP is the viewer address a platform passed in ip=, or "". A platform
-// whose servers fetch playlists for its viewers fills it (e.g. ip={RokuIP})
-// so the viewer is known although the request comes from the platform. The
-// value decides whose feed is served and whose views are recorded, so it is
-// believed only from the addresses set with TrustIPParamFrom. From anyone
-// else it would let a client pass for any home it can name.
+// QueryIP is the viewer address a platform passed in ip= (e.g.
+// ip={RokuIP}), or "". The value decides whose feed is served and whose
+// views are recorded, so it is believed only from the addresses set with
+// TrustIPParamFrom. From anyone else it would let a client pass for any
+// home it can name.
 func (h *Hasher) QueryIP(r *http.Request) string {
 	if !h.TrustsIPParam(r) {
 		return ""
@@ -219,9 +218,8 @@ const maxUserAgentLen = 256
 
 // NewClient is the raw client behind r: RequestIP and the User-Agent,
 // trimmed to maxUserAgentLen and made safe for a PostgreSQL text column.
-// From is the connecting address, which the recorder limits rows by. It is
-// left empty for a platform whose ip= is believed: its servers speak for
-// many homes.
+// From is left empty for a platform whose ip= is believed: its servers
+// speak for many homes.
 func (h *Hasher) NewClient(r *http.Request) Client {
 	ua := strings.TrimSpace(r.UserAgent())
 	if len(ua) > maxUserAgentLen {

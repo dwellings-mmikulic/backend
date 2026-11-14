@@ -109,7 +109,6 @@ func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 	if rec.Pending() != 5 {
 		t.Fatalf("one address holds %d rows, want its limit of 5", rec.Pending())
 	}
-	// Another home's beat still gets in, and a repeat of it costs nothing.
 	home := Client{IP: "203.0.113.5", From: "203.0.113.5"}
 	rec.Record(ID{0xAA}, "us", now, home)
 	rec.Record(ID{0xAA}, "us", now, home)
@@ -123,7 +122,6 @@ func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 	if rec.Pending() != 26 {
 		t.Fatalf("pending = %d, want 26", rec.Pending())
 	}
-	// From is a limit key, not data: it is not stored.
 	if err := rec.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +130,6 @@ func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 			t.Fatalf("stored row carries From %q", hb.Client.From)
 		}
 	}
-	// After the flush the address has its allowance back.
 	for i := range 10 {
 		rec.Record(ID{0xCC, byte(i)}, "us", now, flood)
 	}

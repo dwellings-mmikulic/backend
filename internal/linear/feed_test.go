@@ -408,7 +408,6 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 		}
 	}
 
-	// A page elsewhere cannot post a choice, whatever content type it uses.
 	body := `{"city":"austin","state":"tx"}`
 	req := httptest.NewRequest("POST", "/feed/"+id, strings.NewReader(body))
 	req.Header.Set("X-Real-IP", "198.51.100.77")
@@ -424,7 +423,6 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 	if f.Scope == "city:austin:tx" {
 		t.Fatal("the refused post changed the home's feed")
 	}
-	// The page itself, the TV app (no Origin) and a same-origin page still can.
 	if rec := doFrom(mux, "POST", "/feed/"+id, home, pageOrigin, body); rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
 		t.Errorf("POST from the page: status %d, ACAO %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
 	}
@@ -434,7 +432,6 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 	if rec := doFrom(mux, "POST", "/feed/"+id, home, "http://example.com", body); rec.Code != 200 {
 		t.Errorf("same-origin POST (httptest host is example.com): status %d", rec.Code)
 	}
-	// The preflight answers the page and nobody else.
 	if rec := doFrom(mux, "OPTIONS", "/feed/"+id, home, pageOrigin, ""); rec.Code != 204 || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin || rec.Header().Get("Access-Control-Allow-Methods") == "" {
 		t.Errorf("preflight from the page: %d %v", rec.Code, rec.Header())
 	}
@@ -479,7 +476,6 @@ func TestHandler_IPParamFromAStrangerIsIgnored(t *testing.T) {
 	if a, _ := m.Anchor(context.Background(), id, "zip:78701"); a != nil {
 		t.Fatalf("a stranger's ip= created an anchor for the home: %+v", a)
 	}
-	// The master does not hand the claimed address on either.
 	if body := do(mux, "GET", "/channels/master.m3u8?zip=78701&sid=tv-1&ip="+home, stranger, "").Body.String(); !strings.HasSuffix(body, "\nlive.m3u8?sid=tv-1&zip=78701\n") {
 		t.Errorf("master carried a stranger's ip=:\n%s", body)
 	}

@@ -113,8 +113,7 @@ func mediaURI(sc Scope, q url.Values, ip string) string {
 	return "live.m3u8" + encodeQuery(v)
 }
 
-// queryIP is the viewer address a platform passed in ip=, when the request
-// comes from an address whose ip= is believed (viewer.Hasher.QueryIP).
+// queryIP is viewer.Hasher.QueryIP, "" when viewers are not enabled.
 func (h *Handler) queryIP(r *http.Request) string {
 	if h.viewers == nil {
 		return ""

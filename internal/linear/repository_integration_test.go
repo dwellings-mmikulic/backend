@@ -433,7 +433,6 @@ func TestRepository_PurgeVersions_Integration(t *testing.T) {
 	if err != nil || len(left) != 2 || left[0].Version != 4 || left[1].Version != 3 {
 		t.Fatalf("busy channel after the first purge: %v, %v", versionNumbers(left), err)
 	}
-	// Long after everything ended: only each channel's newest stays.
 	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0)); err != nil || n != 1 {
 		t.Fatalf("second purge deleted %d, %v; want 1", n, err)
 	}
@@ -443,7 +442,6 @@ func TestRepository_PurgeVersions_Integration(t *testing.T) {
 			t.Errorf("%s after the second purge: %v, %v; want only version %d", key, versionNumbers(left), err, want)
 		}
 	}
-	// Nothing left to delete: a repeat is a no-op.
 	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0)); err != nil || n != 0 {
 		t.Errorf("repeat purge deleted %d, %v", n, err)
 	}

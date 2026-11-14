@@ -65,7 +65,6 @@ func TestResolve_IPParamFromAStrangerIsIgnored(t *testing.T) {
 	if len(g.asked) != 1 || g.asked[0] != stranger {
 		t.Fatalf("lookups = %v, want only the connecting address", g.asked)
 	}
-	// Invented addresses cost no lookups beyond the caller's own.
 	for _, ip := range []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"} {
 		serveViewers(t, m, o, "/channels/resolve?ip="+ip, stranger)
 	}
@@ -74,7 +73,6 @@ func TestResolve_IPParamFromAStrangerIsIgnored(t *testing.T) {
 			t.Fatalf("an invented ip= was looked up: %v", g.asked)
 		}
 	}
-	// A platform's server is still believed.
 	got = decodeResolve(t, serveViewers(t, m, o, "/channels/resolve?ip="+home, platformAddr))
 	if got["source"] != "last_watched" || got["scope"] != "state:fl" {
 		t.Errorf("a platform's ip= was not believed: %v", got)
@@ -102,7 +100,6 @@ func TestBeat_RecordsTheConnectingAddressAndOnlyRealPlaces(t *testing.T) {
 	if b := tr.beats[1]; b.Client.IP != "203.0.113.44" || b.Client.From != "" {
 		t.Errorf("platform beat = %+v", b)
 	}
-	// A place that does not exist is refused and stores nothing.
 	if rec := serveViewers(t, m, o, "/channels/beat?zip=00000", stranger); rec.Code != http.StatusNotFound || len(tr.beats) != 2 {
 		t.Errorf("beat for an unknown ZIP: status %d, %d beats", rec.Code, len(tr.beats))
 	}
@@ -127,7 +124,6 @@ func TestEnsureHousehold_PendingDefaultIsSettledWhenTheLookupAnswers(t *testing.
 	if err != nil || len(spans) != 1 || spans[0].Scope != "us" || spans[0].Source != SourcePending {
 		t.Fatalf("first contact during an outage: %+v, %v", spans, err)
 	}
-	// Still down: nothing changes.
 	now = t0.Add(time.Minute)
 	if spans, err = s.EnsureHousehold(ctx, h, nil, false, now); err != nil || len(spans) != 1 || spans[0].Source != SourcePending {
 		t.Fatalf("second contact during the outage: %+v, %v", spans, err)
@@ -143,12 +139,10 @@ func TestEnsureHousehold_PendingDefaultIsSettledWhenTheLookupAnswers(t *testing.
 	if len(spans) != 2 || last.Scope != katy.Key() || last.Source != SourceGeo || last.Requested != katy.Key() || !last.StartsAt.After(t0) {
 		t.Fatalf("after the lookup answered: %+v", spans)
 	}
-	// Settled: later calls leave it alone, whatever they are told.
 	now = t0.Add(10 * time.Minute)
 	if again, err := s.EnsureHousehold(ctx, h, []Scope{austin}, true, now); err != nil || len(again) != 2 || again[1].Scope != katy.Key() {
 		t.Fatalf("a settled home was moved again: %+v, %v", again, err)
 	}
-	// The playlist plays through the switch.
 	if _, _, err := s.PersonalPlaylist(ctx, h, now); err != nil {
 		t.Fatalf("playlist after settling: %v", err)
 	}
@@ -268,7 +262,6 @@ func TestPurgeVersions_KeepsWhatTheChannelsNeed(t *testing.T) {
 	if count("zip:77001") != 1 {
 		t.Fatalf("idle channel has %d versions, want its newest only", count("zip:77001"))
 	}
-	// Both still play, and the busy one's counters carry on.
 	live := now.Add(2 * time.Minute)
 	a, err := s.Playlist(ctx, katy, live)
 	if err != nil {

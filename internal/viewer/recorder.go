@@ -67,8 +67,7 @@ type Options struct {
 	// MaxPendingPerAddress is how many of those rows one connecting address
 	// may hold between two flushes (200). Without it one client inventing
 	// viewers fills the whole buffer and every other viewer's beat is
-	// dropped. A home has a handful of devices. A shared address with more
-	// active viewers than this loses the excess.
+	// dropped.
 	MaxPendingPerAddress int
 }
 

@@ -186,7 +186,6 @@ func TestFreeIPAPI_BudgetLimitsUpstreamRequests(t *testing.T) {
 	if _, ok, got := c.LocateStatus(ip(4)); !ok || !got {
 		t.Fatalf("address 4 after the budget recovered: ok %v, answered %v", ok, got)
 	}
-	// An address already known costs nothing, however often it asks.
 	for range 100 {
 		if _, ok, got := c.LocateStatus(ip(0)); !ok || !got {
 			t.Fatal("a cached address stopped answering")
@@ -195,7 +194,6 @@ func TestFreeIPAPI_BudgetLimitsUpstreamRequests(t *testing.T) {
 	if atomic.LoadInt32(&calls) != 3 {
 		t.Fatalf("upstream calls %d, want 3", calls)
 	}
-	// Over a whole minute of invented addresses the minute limit holds.
 	start := now
 	for i := 100; now.Sub(start) < 59*time.Second; i++ {
 		c.LocateStatus(ip(i))

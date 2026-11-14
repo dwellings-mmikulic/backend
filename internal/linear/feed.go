@@ -53,14 +53,12 @@ func (o *FeedOptions) allowsOrigin(origin string) bool {
 	return false
 }
 
-// feedCORS wraps a feed route whose answer speaks for the connecting home
-// or changes a home's feed. /feed/me hands out the feed id of whatever
-// network the browser is on, and the id is the capability to change that
-// TV's feed, so only the mobile page may read these answers from a browser:
-// the response names the caller's origin when it is an allowed one and no
-// origin otherwise (never "*"). A POST from a page on any other origin is
-// refused outright. Requests without an Origin header (the TV app, curl)
-// and same-origin requests are untouched.
+// feedCORS wraps the feed routes that speak for the connecting home or
+// change a home's feed. /feed/me hands out the feed id of whatever network
+// the browser is on, and the id is the capability to change that TV's feed,
+// so the response names the caller's origin only when it is an allowed one
+// (never "*"), and a POST from a page on any other origin is refused.
+// Requests without an Origin header (the TV app) are untouched.
 func (h *Handler) feedCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -168,8 +166,6 @@ func (h *Handler) ensure(r *http.Request, id viewer.ID) ([]Span, error) {
 	return h.svc.EnsureHousehold(r.Context(), id, cands, located, h.svc.now())
 }
 
-// noStore marks a per-home answer as not cacheable. The cross-origin header
-// of these routes is set by feedCORS.
 func noStore(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 }
