@@ -6,6 +6,7 @@ package viewer
 // value and a route, so the list is closed: a new partner is a new entry.
 var platforms = map[string]bool{
 	"cineplex": true, // Cineplex Media's apps (the "Monthly Sponsor" row)
+	"aeibehce": true, // no partner: the channel with the channel music on (LINEAR_MUSIC_PLATFORMS)
 }
 
 // KnownPlatform reports whether name is a platform's path segment. Names are

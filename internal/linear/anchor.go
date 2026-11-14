@@ -63,7 +63,7 @@ func (s *Service) AnchoredPlaylist(ctx context.Context, h viewer.ID, sc Scope, n
 		return nil, ErrNoContent
 	}
 	var buf bytes.Buffer
-	writePlaylist(&buf, liveWindow.trim(segs))
+	renderPlaylist(ctx, &buf, liveWindow.trim(segs))
 	return buf.Bytes(), nil
 }
 

@@ -439,7 +439,25 @@ channel out of the feed. The linear channels read `LINEAR_ENABLED` (`true`),
 `LINEAR_EPG_HORIZON_HOURS` (`24`), `LINEAR_EPG_GUIDE_DAYS` (`7`),
 `LINEAR_BUMPER_INTERVAL_MINUTES` (`5`; `0`
 = no QR bumper), `LINEAR_AD_BREAK_INTERVAL_MINUTES` (`10`; `0` = no cued ad
-breaks).
+breaks), `LINEAR_MUSIC_FILE` (empty = no channel music),
+`LINEAR_MUSIC_DEFAULT` (`false`) and `LINEAR_MUSIC_PLATFORMS` (empty), see
+"Channel music" below.
+
+For channel music, `LINEAR_MUSIC_FILE` names one ADTS AAC file (44.1 kHz
+stereo AAC-LC, like the listing encodes) that plays as a loop on the wall
+clock in place of the sound of every listing, bumper and slate, straight
+through every change of listing. No stored file changes: a playlist with the
+music on lists each segment as
+`/channels/m/<airs at, ms>-<length, ms>-<offset in clip, ms>/hls/…/seg-NNN.ts`,
+and that route fetches the segment from the CDN and swaps its sound
+(`internal/music`). A segment the swap cannot handle is served as it is.
+`music=1` or `music=0` on a master or live playlist URL decides for that
+player; otherwise the music is on when `LINEAR_MUSIC_DEFAULT` is true or the
+request came in on a platform path named in `LINEAR_MUSIC_PLATFORMS` (comma
+separated; `/channels/aeibehce/` is the path kept for this). With the music on, segment
+traffic goes through this origin (nginx caches each swapped segment for 10
+minutes), not straight from the CDN. Make the file with
+`ffmpeg -i music.wav -vn -c:a aac -b:a 160k -ar 44100 -ac 2 -f adts music.aac`.
 Viewer tracking reads `VIEWER_TRACKING_ENABLED` (`true`), `VIEWER_SALT`
 (required while on), `VIEWER_SALT_ROTATE_DAILY` (`false`),
 `VIEWER_RETENTION_DAYS` (`30`), `FREEIPAPI_URL`

@@ -271,7 +271,7 @@ func (s *Service) Playlist(ctx context.Context, sc Scope, now time.Time) ([]byte
 		return nil, ErrNoContent
 	}
 	var buf bytes.Buffer
-	writePlaylist(&buf, segs)
+	renderPlaylist(ctx, &buf, segs)
 	return buf.Bytes(), nil
 }
 

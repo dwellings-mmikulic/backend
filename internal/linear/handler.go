@@ -19,6 +19,7 @@ type Handler struct {
 	log     *slog.Logger
 	viewers *ViewerOptions // nil until EnableViewers
 	feeds   *FeedOptions   // nil until EnableFeeds
+	music   *MusicOptions  // nil until EnableMusic
 
 	preRollAd, midRollAd *string // VAST tags for /channels/resolve; nil = none
 }
@@ -54,6 +55,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		if h.viewers != nil {
 			mux.HandleFunc("GET "+prefix+"stats", h.platformOnly(h.stats))
 		}
+	}
+	if h.music != nil {
+		h.registerMusic(mux)
 	}
 	if h.viewers != nil {
 		mux.HandleFunc("GET /channels/resolve", h.resolve)
@@ -94,7 +98,8 @@ func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
 // duplicated parameters, odd casing and stray whitespace cannot be reflected
 // into the playlist body. A valid sid and ip are carried along: the media
 // playlist is the request that is tracked, and a player given only a master
-// URL (a third-party app) would otherwise drop them.
+// URL (a third-party app) would otherwise drop them. So is music=, which
+// turns the channel music on or off for one player.
 func mediaURI(sc Scope, q url.Values) string {
 	v := scopeValues(sc)
 	if sid := viewer.SID(q); sid != "" {
@@ -103,6 +108,7 @@ func mediaURI(sc Scope, q url.Values) string {
 	if ip := viewer.QueryIP(q); ip != "" {
 		v.Set("ip", ip)
 	}
+	carryMusic(v, q)
 	return "live.m3u8" + encodeQuery(v)
 }
 
@@ -113,7 +119,7 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.svc.now()
-	body, err := h.channelPlaylist(r, sc, now)
+	body, err := h.channelPlaylist(h.withMusic(r), sc, now)
 	if err != nil {
 		h.fail(w, sc, err)
 		return
