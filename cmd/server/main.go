@@ -297,12 +297,7 @@ func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, 
 	}, log)
 	go rec.Run(ctx)
 	hasher := viewer.NewHasher(cfg.Viewer.Salt, cfg.Viewer.RotateDaily)
-	// config.Load has checked the list, so an error here cannot happen.
-	if trusted, err := viewer.ParseCIDRs(cfg.Viewer.IPParamTrustedCIDRs); err != nil {
-		log.Error("VIEWER_IP_PARAM_TRUSTED_CIDRS ignored", "error", err)
-	} else {
-		hasher.TrustIPParamFrom(trusted)
-	}
+	hasher.TrustIPParamFrom(cfg.Viewer.IPParamTrusted)
 	o := linear.ViewerOptions{
 		Hasher:         hasher,
 		Tracker:        rec,
@@ -320,7 +315,7 @@ func viewerOptions(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, 
 		log.Warn("FREEIPAPI_URL is empty: no IP location, every viewer defaults to the national channel")
 	}
 	log.Info("viewer tracking enabled", "rotate_daily", cfg.Viewer.RotateDaily, "retention_days", cfg.Viewer.RetentionDays, "geoip", o.Geo != nil, "admin_viewers", o.AdminKey != "",
-		"ip_param_trusted", cfg.Viewer.IPParamTrustedCIDRs != "", "geoip_max_per_minute", cfg.Viewer.FreeIPAPIMaxPerMinute)
+		"ip_param_trusted", len(cfg.Viewer.IPParamTrusted), "geoip_max_per_minute", cfg.Viewer.FreeIPAPIMaxPerMinute)
 	return o
 }
 

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/dwellingtw/backend/internal/geo"
 )
 
 // Config holds all runtime configuration, loaded from environment variables.
@@ -217,10 +219,10 @@ type ViewerConfig struct {
 	// minute (and a sixth of it in any 10 s). The keyless tier allows 60 a
 	// minute. 0 means no limit, for a paid server.
 	FreeIPAPIMaxPerMinute int
-	// IPParamTrustedCIDRs lists the addresses and networks whose ip= query
+	// IPParamTrusted are the addresses and networks whose ip= query
 	// parameter is believed: the servers of a platform that fetches
 	// playlists for its viewers. Empty means ip= is ignored from everyone.
-	IPParamTrustedCIDRs string
+	IPParamTrusted []*net.IPNet
 	// MaxPendingPerAddress is how many heartbeat rows one connecting address
 	// may hold between two flushes.
 	MaxPendingPerAddress int
@@ -405,7 +407,7 @@ func Load() (*Config, error) {
 			AdBreakIntervalMinutes: getenvInt("LINEAR_AD_BREAK_INTERVAL_MINUTES", 10),
 			MusicFile:              os.Getenv("LINEAR_MUSIC_FILE"),
 			MusicDefault:           getenvBool("LINEAR_MUSIC_DEFAULT", false),
-			MusicPlatforms:         strings.FieldsFunc(os.Getenv("LINEAR_MUSIC_PLATFORMS"), func(r rune) bool { return r == ',' || r == ' ' }),
+			MusicPlatforms:         splitList(os.Getenv("LINEAR_MUSIC_PLATFORMS")),
 		},
 		Viewer: ViewerConfig{
 			Enabled:       getenvBool("VIEWER_TRACKING_ENABLED", true),
@@ -415,8 +417,7 @@ func Load() (*Config, error) {
 			AdminKey:      strings.TrimSpace(getenv("VIEWER_ADMIN_KEY", "")),
 			FreeIPAPIURL:  strings.TrimSpace(getenv("FREEIPAPI_URL", "https://free.freeipapi.com/api/v1")),
 
-			FreeIPAPIMaxPerMinute: getenvInt("FREEIPAPI_MAX_PER_MINUTE", 45),
-			IPParamTrustedCIDRs:   strings.TrimSpace(getenv("VIEWER_IP_PARAM_TRUSTED_CIDRS", "")),
+			FreeIPAPIMaxPerMinute: getenvInt("FREEIPAPI_MAX_PER_MINUTE", geo.DefaultMaxPerMinute),
 			MaxPendingPerAddress:  getenvInt("VIEWER_MAX_PENDING_PER_ADDRESS", 200),
 		},
 		Ads: AdsConfig{
@@ -427,7 +428,7 @@ func Load() (*Config, error) {
 			MobileBaseURL:  strings.TrimRight(getenv("MOBILE_BASE_URL", "https://dwellings.tv"), "/"),
 			QRShowSeconds:  getenvInt("QR_SHOW_SECONDS", 60),
 			QREverySeconds: getenvInt("QR_EVERY_SECONDS", 300),
-			AllowedOrigins: strings.FieldsFunc(os.Getenv("FEED_ALLOWED_ORIGINS"), func(r rune) bool { return r == ',' || r == ' ' }),
+			AllowedOrigins: splitList(os.Getenv("FEED_ALLOWED_ORIGINS")),
 		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),
@@ -494,10 +495,8 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("%s must be an absolute http(s) URL, got %q", key, v)
 		}
 	}
-	for _, f := range strings.FieldsFunc(c.Viewer.IPParamTrustedCIDRs, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if _, _, err := net.ParseCIDR(f); err != nil && net.ParseIP(f) == nil {
-			return nil, fmt.Errorf("VIEWER_IP_PARAM_TRUSTED_CIDRS: %q is not an address or network", f)
-		}
+	if c.Viewer.IPParamTrusted, err = parseCIDRs(os.Getenv("VIEWER_IP_PARAM_TRUSTED_CIDRS")); err != nil {
+		return nil, fmt.Errorf("VIEWER_IP_PARAM_TRUSTED_CIDRS: %w", err)
 	}
 	if c.Viewer.FreeIPAPIMaxPerMinute < 0 || c.Viewer.MaxPendingPerAddress < 1 {
 		return nil, fmt.Errorf("FREEIPAPI_MAX_PER_MINUTE (%d) must be >= 0 and VIEWER_MAX_PENDING_PER_ADDRESS (%d) >= 1", c.Viewer.FreeIPAPIMaxPerMinute, c.Viewer.MaxPendingPerAddress)
@@ -552,6 +551,32 @@ func getenvBool(key string, def bool) bool {
 		return b
 	}
 	return def
+}
+
+// parseCIDRs reads a list of networks. A bare address is the network of
+// that one address.
+func parseCIDRs(s string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, f := range splitList(s) {
+		if ip := net.ParseIP(f); ip != nil {
+			bits := 8 * net.IPv6len
+			if ip.To4() != nil {
+				bits = 8 * net.IPv4len
+			}
+			f = fmt.Sprintf("%s/%d", ip, bits)
+		}
+		_, n, err := net.ParseCIDR(f)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an address or network", f)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// splitList reads a comma- or space-separated list.
+func splitList(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' })
 }
 
 func getenvInt(key string, def int) int {

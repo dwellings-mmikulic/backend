@@ -73,18 +73,12 @@ func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates [
 	if !located {
 		sp.Source = SourcePending
 	}
-	for _, c := range candidates {
-		eff, _, err := s.resolveScope(ctx, c)
-		if err != nil {
-			if errors.Is(err, ErrNoContent) {
-				continue
-			}
-			return nil, err
-		}
-		if eff != (Scope{}) {
-			sp.Scope, sp.Requested, sp.Source = eff.Key(), c.Key(), SourceGeo
-			break
-		}
+	eff, i, err := s.firstLocal(ctx, candidates)
+	if err != nil {
+		return nil, err
+	}
+	if i >= 0 {
+		sp.Scope, sp.Requested, sp.Source = eff.Key(), candidates[i].Key(), SourceGeo
 	}
 	if _, err := s.store.InsertSpan(ctx, &sp); err != nil {
 		return nil, err
@@ -101,22 +95,19 @@ func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates [
 // the way a choice is (from the next segment boundary, counters continuing),
 // with SourceGeo. When there is none the default stands and is marked so.
 func (s *Service) settlePending(ctx context.Context, pending Span, candidates []Scope, now time.Time) ([]Span, error) {
-	for _, c := range candidates {
-		eff, _, err := s.resolveScope(ctx, c)
+	for {
+		_, i, err := s.firstLocal(ctx, candidates)
 		if err != nil {
-			if errors.Is(err, ErrNoContent) {
-				continue
-			}
 			return nil, err
 		}
-		if eff == (Scope{}) {
-			continue
+		if i < 0 {
+			break
 		}
-		spans, err := s.choose(ctx, pending.Household, c, SourceGeo, now)
-		if errors.Is(err, ErrUnknownArea) {
-			continue
+		spans, err := s.choose(ctx, pending.Household, candidates[i], SourceGeo, now)
+		if !errors.Is(err, ErrUnknownArea) {
+			return spans, err
 		}
-		return spans, err
+		candidates = candidates[i+1:]
 	}
 	pending.Source = SourceDefault
 	if err := s.store.ReplaceSpan(ctx, &pending); err != nil {
@@ -124,6 +115,24 @@ func (s *Service) settlePending(ctx context.Context, pending Span, candidates []
 	}
 	s.forgetHousehold(pending.Household)
 	return s.Household(ctx, pending.Household)
+}
+
+// firstLocal finds the first candidate that resolves to a channel more
+// specific than national: what it resolves to and its index, or -1.
+func (s *Service) firstLocal(ctx context.Context, candidates []Scope) (eff Scope, i int, err error) {
+	for i, c := range candidates {
+		eff, _, err := s.resolveScope(ctx, c)
+		if err != nil {
+			if errors.Is(err, ErrNoContent) {
+				continue
+			}
+			return Scope{}, -1, err
+		}
+		if eff != (Scope{}) {
+			return eff, i, nil
+		}
+	}
+	return Scope{}, -1, nil
 }
 
 // Cities lists the areas with enough content for a channel of their own.

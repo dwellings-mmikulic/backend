@@ -25,18 +25,11 @@ type Location struct {
 // Lookup locates IPs.
 type Lookup interface {
 	// Locate returns the location of ip and whether anything useful was
-	// found (a US ZIP, city or state).
-	Locate(ip net.IP) (Location, bool)
-}
-
-// StatusLookup is a Lookup that can tell "nothing is known about this
-// address" from "the question could not be asked". A caller that stores a
-// default for an address must not store the second as if it were the first.
-type StatusLookup interface {
-	Lookup
-	// LocateStatus is Locate plus answered: false when the lookup failed,
-	// timed out or was not made because the request budget is spent.
-	LocateStatus(ip net.IP) (loc Location, ok, answered bool)
+	// found (a US ZIP, city or state). answered is false when the question
+	// could not be asked: the lookup failed, timed out or was not made
+	// because the request budget is spent. A caller that stores a default
+	// for an address must not store that as if nothing were known about it.
+	Locate(ip net.IP) (loc Location, ok, answered bool)
 }
 
 // DefaultMaxPerMinute is the request budget for the keyless tier, kept under
@@ -109,12 +102,7 @@ func NewFreeIPAPI(base string, log *slog.Logger) *FreeIPAPI {
 
 // SetMaxPerMinute sets the request budget; 0 removes it (a paid server
 // without a rate limit). Call before use.
-func (c *FreeIPAPI) SetMaxPerMinute(n int) {
-	if n < 0 {
-		n = 0
-	}
-	c.perMinute = n
-}
+func (c *FreeIPAPI) SetMaxPerMinute(n int) { c.perMinute = n }
 
 // spendLocked takes one request from the budget, or reports that none is
 // left. c.mu must be held.
@@ -145,16 +133,12 @@ func (c *FreeIPAPI) spendLocked() bool {
 // misses without a request: the API has nothing to say about them. Only US
 // results are reported; the channels are US-only, so a foreign viewer gets
 // the national default.
-func (c *FreeIPAPI) Locate(ip net.IP) (Location, bool) {
-	loc, ok, _ := c.LocateStatus(ip)
-	return loc, ok
-}
-
-// LocateStatus implements StatusLookup. An address the API has nothing to
-// say about (private, loopback) is answered. A lookup that is not made
-// because the budget is spent is not answered and is not remembered, so the
-// next request for that address asks again once there is budget.
-func (c *FreeIPAPI) LocateStatus(ip net.IP) (Location, bool, bool) {
+//
+// An address the API has nothing to say about is answered. A lookup that is
+// not made because the budget is spent is not answered and is not
+// remembered, so the next request for that address asks again once there is
+// budget.
+func (c *FreeIPAPI) Locate(ip net.IP) (Location, bool, bool) {
 	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
 		return Location{}, false, true
 	}

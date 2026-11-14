@@ -752,7 +752,7 @@ func TestLoad_ViewerLimitsAndTrust(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Viewer.FreeIPAPIMaxPerMinute != 45 || cfg.Viewer.IPParamTrustedCIDRs != "" || cfg.Viewer.MaxPendingPerAddress != 200 || len(cfg.Feed.AllowedOrigins) != 0 {
+	if cfg.Viewer.FreeIPAPIMaxPerMinute != 45 || len(cfg.Viewer.IPParamTrusted) != 0 || cfg.Viewer.MaxPendingPerAddress != 200 || len(cfg.Feed.AllowedOrigins) != 0 {
 		t.Errorf("defaults: %+v, origins %v", cfg.Viewer, cfg.Feed.AllowedOrigins)
 	}
 	t.Setenv("FREEIPAPI_MAX_PER_MINUTE", "0")
@@ -761,8 +761,21 @@ func TestLoad_ViewerLimitsAndTrust(t *testing.T) {
 	if cfg, err = Load(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Viewer.FreeIPAPIMaxPerMinute != 0 || cfg.Viewer.IPParamTrustedCIDRs == "" || len(cfg.Feed.AllowedOrigins) != 2 {
+	if cfg.Viewer.FreeIPAPIMaxPerMinute != 0 || len(cfg.Feed.AllowedOrigins) != 2 {
 		t.Errorf("set: %+v, origins %v", cfg.Viewer, cfg.Feed.AllowedOrigins)
+	}
+	// A bare address is the network of that one address.
+	var nets []string
+	for _, n := range cfg.Viewer.IPParamTrusted {
+		nets = append(nets, n.String())
+	}
+	if got := strings.Join(nets, " "); got != "34.1.1.0/24 198.51.100.9/32 2001:db8::/32" {
+		t.Errorf("trusted networks = %s", got)
+	}
+	for _, bad := range []string{"nope", "34.1.1.0/33", "34.1.1"} {
+		if _, err := parseCIDRs(bad); err == nil {
+			t.Errorf("parseCIDRs(%q) accepted", bad)
+		}
 	}
 	for key, bad := range map[string]string{
 		"VIEWER_IP_PARAM_TRUSTED_CIDRS":  "34.1.1.0/24,not-a-network",

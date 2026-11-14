@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dwellingtw/backend/internal/geo"
 	"github.com/dwellingtw/backend/internal/viewer"
 )
 
@@ -27,10 +29,15 @@ func (feedTestAudience) Stats(context.Context, string, string, time.Time) (viewe
 }
 
 func feedMux(store Store, now time.Time) (*Service, *http.ServeMux) {
+	return feedMuxGeo(store, now, nil)
+}
+
+// feedMuxGeo is feedMux with a location lookup.
+func feedMuxGeo(store Store, now time.Time, g geo.Lookup) (*Service, *http.ServeMux) {
 	svc := testService(store, now)
 	h := NewHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	h.EnableViewers(ViewerOptions{Hasher: platformHasher(), Audience: feedTestAudience{}, PublicBaseURL: "https://api.example.test"})
-	h.EnableFeeds(FeedOptions{MobileBaseURL: "https://tv.example.test", QRShowSeconds: 60, QREverySeconds: 300})
+	h.EnableViewers(ViewerOptions{Hasher: platformHasher("salt"), Audience: feedTestAudience{}, Geo: g, PublicBaseURL: "https://api.example.test"})
+	h.EnableFeeds(FeedOptions{MobileBaseURL: pageOrigin, QRShowSeconds: 60, QREverySeconds: 300})
 	mux := http.NewServeMux()
 	h.Register(mux)
 	return svc, mux
@@ -43,13 +50,10 @@ const platformAddr = "198.51.100.1"
 // pageOrigin is the origin of the mobile page (feedMux's MobileBaseURL).
 const pageOrigin = "https://tv.example.test"
 
-func platformHasher() *viewer.Hasher {
-	nets, err := viewer.ParseCIDRs(platformAddr)
-	if err != nil {
-		panic(err)
-	}
-	h := viewer.NewHasher("salt", false)
-	h.TrustIPParamFrom(nets)
+// platformHasher is a Hasher that believes ip= from platformAddr.
+func platformHasher(salt string) *viewer.Hasher {
+	h := viewer.NewHasher(salt, false)
+	h.TrustIPParamFrom([]*net.IPNet{{IP: net.ParseIP(platformAddr), Mask: net.CIDRMask(32, 32)}})
 	return h
 }
 
@@ -441,13 +445,13 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 }
 
 func TestFeed_ExtraAllowedOrigins(t *testing.T) {
-	o := FeedOptions{MobileBaseURL: "https://www.dwellings.tv", AllowedOrigins: []string{"https://app.example/"}}
+	origins := (&FeedOptions{MobileBaseURL: "https://www.dwellings.tv", AllowedOrigins: []string{"https://app.example/"}}).pageOrigins()
 	for origin, want := range map[string]bool{
 		"https://dwellings.tv": true, "https://www.dwellings.tv": true, "https://app.example": true,
 		"https://dwellings.tv.evil.io": false, "http://dwellings.tv": false, "": false, "*": false,
 	} {
-		if got := o.allowsOrigin(origin); got != want {
-			t.Errorf("allowsOrigin(%q) = %v, want %v", origin, got, want)
+		if got := origins[origin]; got != want {
+			t.Errorf("origin %q allowed = %v, want %v", origin, got, want)
 		}
 	}
 }

@@ -43,9 +43,9 @@ func NewHasher(salt string, rotateDaily bool) *Hasher {
 // every viewer is the address the request came from.
 func (h *Hasher) TrustIPParamFrom(nets []*net.IPNet) { h.trusted = nets }
 
-// TrustsIPParam reports whether r comes from an address whose ip= is
+// trustsIPParam reports whether r comes from an address whose ip= is
 // believed.
-func (h *Hasher) TrustsIPParam(r *http.Request) bool {
+func (h *Hasher) trustsIPParam(r *http.Request) bool {
 	if len(h.trusted) == 0 {
 		return false
 	}
@@ -97,13 +97,13 @@ func SID(q url.Values) string {
 	return s
 }
 
-// ParseQueryIP is the ip query parameter in canonical form when it is a
+// parseQueryIP is the ip query parameter in canonical form when it is a
 // public IP address, else "". It only reads the value: whether to believe it
 // is Hasher.QueryIP's decision. An unfilled macro is not an address, and a
 // private address is ignored: Roku fills its macro with the device's LAN
 // address (10.0.0.90), which thousands of homes share and which would hide
 // the public address the request really came from.
-func ParseQueryIP(q url.Values) string {
+func parseQueryIP(q url.Values) string {
 	return PublicIP(q.Get("ip"))
 }
 
@@ -113,10 +113,10 @@ func ParseQueryIP(q url.Values) string {
 // TrustIPParamFrom. From anyone else it would let a client pass for any
 // home it can name.
 func (h *Hasher) QueryIP(r *http.Request) string {
-	if !h.TrustsIPParam(r) {
+	if !h.trustsIPParam(r) {
 		return ""
 	}
-	return ParseQueryIP(r.URL.Query())
+	return parseQueryIP(r.URL.Query())
 }
 
 // PublicIP is s as a canonical public address, or "" when s is not an
@@ -145,31 +145,6 @@ func (h *Hasher) RequestIP(r *http.Request) string {
 		return ip
 	}
 	return ClientIP(r)
-}
-
-// ParseCIDRs reads a comma- or space-separated list of networks. A bare
-// address is the network of that one address.
-func ParseCIDRs(s string) ([]*net.IPNet, error) {
-	var out []*net.IPNet
-	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if !strings.Contains(f, "/") {
-			ip := net.ParseIP(f)
-			if ip == nil {
-				return nil, fmt.Errorf("viewer: %q is not an address or network", f)
-			}
-			bits := 128
-			if ip.To4() != nil {
-				bits = 32
-			}
-			f = fmt.Sprintf("%s/%d", ip, bits)
-		}
-		_, n, err := net.ParseCIDR(f)
-		if err != nil {
-			return nil, fmt.Errorf("viewer: %q is not an address or network", f)
-		}
-		out = append(out, n)
-	}
-	return out, nil
 }
 
 // IDAt is ID with explicit inputs. sid wins over ip when non-empty; the two
@@ -216,21 +191,25 @@ func ParseID(s string) (ID, error) {
 // maxUserAgentLen caps the stored user agent.
 const maxUserAgentLen = 256
 
+// LimitKey is what the recorder limits r's heartbeat rows by: the address it
+// came from, or "" (no limit) for a platform whose ip= is believed, since
+// its servers speak for many homes.
+func (h *Hasher) LimitKey(r *http.Request) string {
+	if h.trustsIPParam(r) {
+		return ""
+	}
+	return ClientIP(r)
+}
+
 // NewClient is the raw client behind r: RequestIP and the User-Agent,
 // trimmed to maxUserAgentLen and made safe for a PostgreSQL text column.
-// From is left empty for a platform whose ip= is believed: its servers
-// speak for many homes.
 func (h *Hasher) NewClient(r *http.Request) Client {
 	ua := strings.TrimSpace(r.UserAgent())
 	if len(ua) > maxUserAgentLen {
 		ua = ua[:maxUserAgentLen]
 	}
 	ua = strings.ToValidUTF8(strings.ReplaceAll(ua, "\x00", ""), "")
-	c := Client{IP: h.RequestIP(r), UserAgent: ua}
-	if !h.TrustsIPParam(r) {
-		c.From = ClientIP(r)
-	}
-	return c
+	return Client{IP: h.RequestIP(r), UserAgent: ua}
 }
 
 // ClientIP is the address the request came from as seen by the edge:

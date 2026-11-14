@@ -46,10 +46,10 @@ func TestRecorder_DedupesPerMinuteAndFlushes(t *testing.T) {
 	rec := NewRecorder(st, Options{}, nil)
 	t0 := time.Date(2026, 8, 26, 12, 0, 5, 0, time.UTC)
 	id := ID{1}
-	rec.Record(id, "us", t0, Client{})
-	rec.Record(id, "us", t0.Add(20*time.Second), Client{}) // same minute → one row
-	rec.Record(id, "us", t0.Add(70*time.Second), Client{}) // next minute
-	rec.Record(ID{2}, "state:tx", t0, Client{})
+	rec.Record(id, "us", t0, Client{}, "")
+	rec.Record(id, "us", t0.Add(20*time.Second), Client{}, "") // same minute → one row
+	rec.Record(id, "us", t0.Add(70*time.Second), Client{}, "") // next minute
+	rec.Record(ID{2}, "state:tx", t0, Client{}, "")
 	if n := rec.Pending(); n != 3 {
 		t.Fatalf("pending = %d, want 3", n)
 	}
@@ -69,7 +69,7 @@ func TestRecorder_DedupesPerMinuteAndFlushes(t *testing.T) {
 func TestRecorder_FlushFailureKeepsPending(t *testing.T) {
 	st := &fakeStore{fail: errors.New("db down")}
 	rec := NewRecorder(st, Options{}, nil)
-	rec.Record(ID{1}, "us", time.Now(), Client{})
+	rec.Record(ID{1}, "us", time.Now(), Client{}, "")
 	if err := rec.Flush(context.Background()); err == nil {
 		t.Fatal("expected error")
 	}
@@ -87,37 +87,34 @@ func TestRecorder_FlushFailureKeepsPending(t *testing.T) {
 func TestRecorder_PendingCap(t *testing.T) {
 	rec := NewRecorder(&fakeStore{}, Options{MaxPending: 2}, nil)
 	now := time.Now()
-	rec.Record(ID{1}, "us", now, Client{})
-	rec.Record(ID{2}, "us", now, Client{})
-	rec.Record(ID{3}, "us", now, Client{}) // dropped, not grown without bound
+	rec.Record(ID{1}, "us", now, Client{}, "")
+	rec.Record(ID{2}, "us", now, Client{}, "")
+	rec.Record(ID{3}, "us", now, Client{}, "") // dropped, not grown without bound
 	if rec.Pending() != 2 {
 		t.Errorf("pending = %d, want 2", rec.Pending())
 	}
 }
 
 func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
-	store := &fakeStore{}
-	rec := NewRecorder(store, Options{MaxPending: 100, MaxPendingPerAddress: 5}, nil)
+	rec := NewRecorder(&fakeStore{}, Options{MaxPending: 100, MaxPendingPerAddress: 5}, nil)
 	now := time.Now()
-	flood := Client{IP: "198.51.100.9", From: "198.51.100.9"}
 	for i := range 1000 {
 		// A new viewer id, a new channel and a new claimed address each time.
-		c := flood
-		c.IP = fmt.Sprintf("203.0.%d.%d", i/250, i%250)
-		rec.Record(ID{byte(i), byte(i >> 8)}, fmt.Sprintf("zip:%05d", i), now, c)
+		c := Client{IP: fmt.Sprintf("203.0.%d.%d", i/250, i%250)}
+		rec.Record(ID{byte(i), byte(i >> 8)}, fmt.Sprintf("zip:%05d", i), now, c, "198.51.100.9")
 	}
 	if rec.Pending() != 5 {
 		t.Fatalf("one address holds %d rows, want its limit of 5", rec.Pending())
 	}
-	home := Client{IP: "203.0.113.5", From: "203.0.113.5"}
-	rec.Record(ID{0xAA}, "us", now, home)
-	rec.Record(ID{0xAA}, "us", now, home)
+	home := Client{IP: "203.0.113.5"}
+	rec.Record(ID{0xAA}, "us", now, home, "203.0.113.5")
+	rec.Record(ID{0xAA}, "us", now, home, "203.0.113.5")
 	if rec.Pending() != 6 {
-		t.Fatalf("pending = %d, want the other home's beat recorded", rec.Pending())
+		t.Fatalf("pending = %d, want the other home's beat recorded once", rec.Pending())
 	}
-	// A platform speaking for many homes (From empty) is not limited by address.
+	// A platform speaking for many homes (no limit key) is not limited.
 	for i := range 20 {
-		rec.Record(ID{0xBB, byte(i)}, "us", now, Client{IP: fmt.Sprintf("192.0.2.%d", i)})
+		rec.Record(ID{0xBB, byte(i)}, "us", now, Client{IP: fmt.Sprintf("192.0.2.%d", i)}, "")
 	}
 	if rec.Pending() != 26 {
 		t.Fatalf("pending = %d, want 26", rec.Pending())
@@ -125,31 +122,24 @@ func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 	if err := rec.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, hb := range store.beats {
-		if hb.Client.From != "" {
-			t.Fatalf("stored row carries From %q", hb.Client.From)
-		}
-	}
 	for i := range 10 {
-		rec.Record(ID{0xCC, byte(i)}, "us", now, flood)
+		rec.Record(ID{0xCC, byte(i)}, "us", now, Client{}, "198.51.100.9")
 	}
 	if rec.Pending() != 5 {
-		t.Errorf("after a flush pending = %d, want 5", rec.Pending())
+		t.Errorf("after a flush pending = %d, want the address to have its 5 back", rec.Pending())
 	}
 }
 
 func TestRecorder_FailedFlushKeepsTheAddressCount(t *testing.T) {
-	store := &fakeStore{fail: errors.New("down")}
-	rec := NewRecorder(store, Options{MaxPendingPerAddress: 3}, nil)
+	rec := NewRecorder(&fakeStore{fail: errors.New("down")}, Options{MaxPendingPerAddress: 3}, nil)
 	now := time.Now()
-	c := Client{From: "198.51.100.9"}
 	for i := range 5 {
-		rec.Record(ID{byte(i)}, "us", now, c)
+		rec.Record(ID{byte(i)}, "us", now, Client{}, "198.51.100.9")
 	}
 	if err := rec.Flush(context.Background()); err == nil {
 		t.Fatal("flush should fail")
 	}
-	rec.Record(ID{9}, "us", now, c)
+	rec.Record(ID{9}, "us", now, Client{}, "198.51.100.9")
 	if rec.Pending() != 3 {
 		t.Errorf("pending = %d, want 3: rows that were not written still count", rec.Pending())
 	}
@@ -161,7 +151,7 @@ func TestRecorder_RunFlushesAndPurges(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { rec.Run(ctx); close(done) }()
-	rec.Record(ID{1}, "us", time.Now(), Client{})
+	rec.Record(ID{1}, "us", time.Now(), Client{}, "")
 	time.Sleep(60 * time.Millisecond)
 	cancel()
 	<-done
@@ -181,7 +171,7 @@ func TestRecorder_KeepsClient(t *testing.T) {
 	st := &fakeStore{}
 	rec := NewRecorder(st, Options{}, nil)
 	c := Client{IP: "99.178.140.144", UserAgent: "Roku/DVP-15.3"}
-	rec.Record(ID{1}, "us", time.Now(), c)
+	rec.Record(ID{1}, "us", time.Now(), c, "")
 	if err := rec.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}

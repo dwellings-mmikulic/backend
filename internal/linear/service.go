@@ -82,6 +82,10 @@ type Service struct {
 	// about every viewer, and most never scanned the QR.
 	households *ttlCache[viewer.ID, []Span]
 	anchors    *ttlCache[anchorKey, *Anchor]
+	// areas holds the keys of places checkArea has found to exist, so a
+	// viewer's polls and heartbeats cost one lookup per place per citiesTTL.
+	// A place that does not exist is asked about every time.
+	areas *ttlCache[string, struct{}]
 }
 
 const (
@@ -115,6 +119,7 @@ func New(store Store, opts Options, log *slog.Logger) *Service {
 	s := &Service{store: store, opts: opts.withDefaults(), now: time.Now, log: log, cache: map[string]cached{}}
 	s.households = newTTLCache[viewer.ID, []Span](householdMaxEntries, householdTTL, func() time.Time { return s.now() })
 	s.anchors = newTTLCache[anchorKey, *Anchor](householdMaxEntries, householdTTL, func() time.Time { return s.now() })
+	s.areas = newTTLCache[string, struct{}](cacheMaxEntries, citiesTTL, func() time.Time { return s.now() })
 	return s
 }
 
@@ -255,13 +260,18 @@ func (s *Service) checkArea(ctx context.Context, sc Scope) error {
 	if !sc.knownState() {
 		return fmt.Errorf("%w: %s", ErrUnknownArea, sc.Key())
 	}
+	key := sc.Key()
+	if _, ok := s.areas.get(key); ok {
+		return nil
+	}
 	ok, err := s.store.AreaExists(ctx, sc)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrUnknownArea, sc.Key())
+		return fmt.Errorf("%w: %s", ErrUnknownArea, key)
 	}
+	s.areas.put(key, struct{}{})
 	return nil
 }
 

@@ -3,8 +3,6 @@ package linear
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -24,12 +22,7 @@ type recordingGeo struct {
 	asked []string
 }
 
-func (g *recordingGeo) Locate(ip net.IP) (geo.Location, bool) {
-	loc, ok, _ := g.LocateStatus(ip)
-	return loc, ok
-}
-
-func (g *recordingGeo) LocateStatus(ip net.IP) (geo.Location, bool, bool) {
+func (g *recordingGeo) Locate(ip net.IP) (geo.Location, bool, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.asked = append(g.asked, ip.String())
@@ -41,8 +34,7 @@ func (g *recordingGeo) LocateStatus(ip net.IP) (geo.Location, bool, bool) {
 
 func trustedOpts(aud *fakeAudience, g geo.Lookup) ViewerOptions {
 	o := baseOpts(aud, g)
-	nets, _ := viewer.ParseCIDRs(platformAddr)
-	o.Hasher.TrustIPParamFrom(nets)
+	o.Hasher = platformHasher("s")
 	return o
 }
 
@@ -91,14 +83,14 @@ func TestBeat_RecordsTheConnectingAddressAndOnlyRealPlaces(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 	b := tr.beats[0]
-	if b.Client.IP != stranger || b.Client.From != stranger || b.Viewer != viewer.NewHasher("s", false).IDAt("", stranger, t0) {
+	if b.Client.IP != stranger || tr.from[0] != stranger || b.Viewer != viewer.NewHasher("s", false).IDAt("", stranger, t0) {
 		t.Errorf("a stranger's beat was recorded under the address it claimed: %+v", b)
 	}
 	// From a platform the claimed address counts, and the platform's own
 	// address is not what rows are limited by.
 	serveViewers(t, m, o, "/channels/beat?ip=203.0.113.44", platformAddr)
-	if b := tr.beats[1]; b.Client.IP != "203.0.113.44" || b.Client.From != "" {
-		t.Errorf("platform beat = %+v", b)
+	if b := tr.beats[1]; b.Client.IP != "203.0.113.44" || tr.from[1] != "" {
+		t.Errorf("platform beat = %+v, limited by %q", b, tr.from[1])
 	}
 	if rec := serveViewers(t, m, o, "/channels/beat?zip=00000", stranger); rec.Code != http.StatusNotFound || len(tr.beats) != 2 {
 		t.Errorf("beat for an unknown ZIP: status %d, %d beats", rec.Code, len(tr.beats))
@@ -190,14 +182,9 @@ func TestFeed_HomeThatMetALookupOutageGetsItsAreaLater(t *testing.T) {
 	m := newMemStore()
 	addClips(m, katy, 1, 40)
 	g := &recordingGeo{loc: geo.Location{Zip: "77494"}, down: true}
-	svc := testService(m, t0)
+	svc, mux := feedMuxGeo(m, t0, g)
 	now := t0
 	svc.now = func() time.Time { return now }
-	h := NewHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	h.EnableViewers(ViewerOptions{Hasher: platformHasher(), Audience: feedTestAudience{}, Geo: g, PublicBaseURL: "https://api.example.test"})
-	h.EnableFeeds(FeedOptions{MobileBaseURL: pageOrigin, QRShowSeconds: 60, QREverySeconds: 300})
-	mux := http.NewServeMux()
-	h.Register(mux)
 
 	me := func() (scope, source string) {
 		var f struct{ Scope, Source string }

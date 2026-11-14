@@ -20,9 +20,6 @@ type Client struct {
 	IP        string // public client address; "" is not stored
 	UserAgent string
 	Platform  string // partner feed it came through (/channels/<platform>/…); "" = our own
-	// From is the address the request came from, which Record limits rows
-	// by. It is not stored. "" is not limited.
-	From string
 }
 
 // ClientSeen is one client address seen on a channel.
@@ -111,13 +108,11 @@ func NewRecorder(store Store, opts Options, log *slog.Logger) *Recorder {
 }
 
 // Record notes that id polled channel at t from c. Repeats within the same
-// minute collapse into one row. A beat is dropped when its connecting
-// address (c.From) already holds MaxPendingPerAddress rows, or when the
-// whole buffer is full (the store is unreachable for a long time), rather
-// than growing memory.
-func (r *Recorder) Record(id ID, channel string, t time.Time, c Client) {
-	from := c.From
-	c.From = ""
+// minute collapse into one row. from is the address the request came from
+// ("" = not limited): a beat is dropped when that address already holds
+// MaxPendingPerAddress rows, or when the whole buffer is full (the store is
+// unreachable for a long time), rather than growing memory.
+func (r *Recorder) Record(id ID, channel string, t time.Time, c Client, from string) {
 	hb := Heartbeat{Viewer: id, Channel: channel, Minute: t.UTC().Truncate(time.Minute), Client: c}
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -21,7 +21,7 @@ type Audience interface {
 
 // Tracker receives a heartbeat per live-playlist request (viewer.Recorder).
 type Tracker interface {
-	Record(id viewer.ID, channel string, t time.Time, c viewer.Client)
+	Record(id viewer.ID, channel string, t time.Time, c viewer.Client, from string)
 }
 
 // ClientLog lists raw client addresses for /admin/viewers (viewer.Store).
@@ -61,7 +61,7 @@ func (h *Handler) track(r *http.Request, sc Scope, now time.Time) {
 	}
 	c := h.viewers.Hasher.NewClient(r)
 	c.Platform = r.PathValue("platform") // checked by platformOnly; "" on our own routes
-	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, c)
+	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, c, h.viewers.Hasher.LimitKey(r))
 }
 
 // resolveResponse is the body of /channels/resolve.
@@ -120,7 +120,7 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if o.Geo != nil {
-		if loc, ok := o.Geo.Locate(net.ParseIP(o.Hasher.RequestIP(r))); ok {
+		if loc, ok, _ := o.Geo.Locate(net.ParseIP(o.Hasher.RequestIP(r))); ok {
 			// A candidate that fell all the way back to national is not a
 			// geo answer; a less specific candidate (the city when the ZIP
 			// is unknown) may still be.

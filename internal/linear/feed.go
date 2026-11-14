@@ -26,31 +26,30 @@ type FeedOptions struct {
 	// AllowedOrigins are further page origins (scheme://host) that may read
 	// a home's feed from a browser, besides MobileBaseURL's.
 	AllowedOrigins []string
+
+	origins map[string]bool // set by EnableFeeds
 }
 
 // EnableFeeds turns on the personal feeds. Call before Register.
-func (h *Handler) EnableFeeds(o FeedOptions) { h.feeds = &o }
+func (h *Handler) EnableFeeds(o FeedOptions) {
+	o.origins = o.pageOrigins()
+	h.feeds = &o
+}
 
-// allowsOrigin reports whether a page on origin may read the feed routes
-// that speak for the connecting home: the mobile page's own origin, with
-// and without "www.", and the ones listed in AllowedOrigins.
-func (o *FeedOptions) allowsOrigin(origin string) bool {
-	origin = strings.TrimRight(origin, "/")
-	if origin == "" {
-		return false
-	}
+// pageOrigins are the origins whose pages may read the feed routes that
+// speak for the connecting home: the mobile page's own, with and without
+// "www.", and the ones listed in AllowedOrigins.
+func (o *FeedOptions) pageOrigins() map[string]bool {
+	out := map[string]bool{}
 	if u, err := url.Parse(o.MobileBaseURL); err == nil && u.Host != "" {
 		host := strings.TrimPrefix(u.Host, "www.")
-		if origin == u.Scheme+"://"+host || origin == u.Scheme+"://www."+host {
-			return true
-		}
+		out[u.Scheme+"://"+host] = true
+		out[u.Scheme+"://www."+host] = true
 	}
 	for _, a := range o.AllowedOrigins {
-		if origin == strings.TrimRight(a, "/") {
-			return true
-		}
+		out[strings.TrimRight(a, "/")] = true
 	}
-	return false
+	return out
 }
 
 // feedCORS wraps the feed routes that speak for the connecting home or
@@ -62,7 +61,7 @@ func (o *FeedOptions) allowsOrigin(origin string) bool {
 func (h *Handler) feedCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		allowed := h.feeds.allowsOrigin(origin)
+		allowed := h.feeds.origins[origin]
 		sameOrigin := origin == "" || strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://") == r.Host
 		cw := &feedCORSWriter{ResponseWriter: w}
 		if allowed {
@@ -151,15 +150,9 @@ func (h *Handler) ensure(r *http.Request, id viewer.ID) ([]Span, error) {
 	var cands []Scope
 	located := true
 	if g := h.viewers.Geo; g != nil {
-		ip := net.ParseIP(viewer.ClientIP(r))
 		var loc geo.Location
 		var ok bool
-		if sl, hasStatus := g.(geo.StatusLookup); hasStatus {
-			loc, ok, located = sl.LocateStatus(ip)
-		} else {
-			loc, ok = g.Locate(ip)
-		}
-		if ok {
+		if loc, ok, located = g.Locate(net.ParseIP(viewer.ClientIP(r))); ok {
 			cands = geoCandidates(loc)
 		}
 	}

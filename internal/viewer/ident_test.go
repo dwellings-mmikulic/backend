@@ -1,6 +1,7 @@
 package viewer
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -81,7 +82,7 @@ func TestHasher_SaltAndRotation(t *testing.T) {
 }
 
 func TestHasher_IPParam(t *testing.T) {
-	h := trusting(t, "198.51.100.1")
+	h := trusting(t, "198.51.100.1/32")
 	req := func(target, realIP string) ID {
 		r := httptest.NewRequest("GET", target, nil)
 		r.Header.Set("X-Real-IP", realIP)
@@ -123,7 +124,7 @@ func TestSID(t *testing.T) {
 	}
 }
 
-func TestParseQueryIP(t *testing.T) {
+func Test_parseQueryIP(t *testing.T) {
 	for in, want := range map[string]string{
 		"203.0.113.5":      "203.0.113.5",
 		" 2001:DB8::1 ":    "2001:db8::1",
@@ -142,8 +143,8 @@ func TestParseQueryIP(t *testing.T) {
 		"fd00::1":     "",
 		"::1":         "",
 	} {
-		if got := ParseQueryIP(url.Values{"ip": {in}}); got != want {
-			t.Errorf("ParseQueryIP(%q) = %q, want %q", in, got, want)
+		if got := parseQueryIP(url.Values{"ip": {in}}); got != want {
+			t.Errorf("parseQueryIP(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -160,11 +161,15 @@ func TestHasher_PrivateIPParamFallsBackToClientIP(t *testing.T) {
 }
 
 // trusting is a Hasher that believes ip= from the given networks.
-func trusting(t *testing.T, cidrs string) *Hasher {
+func trusting(t *testing.T, cidrs ...string) *Hasher {
 	t.Helper()
-	nets, err := ParseCIDRs(cidrs)
-	if err != nil {
-		t.Fatal(err)
+	var nets []*net.IPNet
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nets = append(nets, n)
 	}
 	h := NewHasher("salt", false)
 	h.TrustIPParamFrom(nets)
@@ -180,7 +185,7 @@ func TestHasher_IPParamIsBelievedOnlyFromTrustedAddresses(t *testing.T) {
 	home := "203.0.113.44"
 	for name, h := range map[string]*Hasher{
 		"no trusted addresses": NewHasher("salt", false),
-		"another network":      trusting(t, "34.1.1.0/24, 2001:db8::/32"),
+		"another network":      trusting(t, "34.1.1.0/24", "2001:db8::/32"),
 	} {
 		r := req("198.51.100.9", "?ip="+home)
 		if got := h.QueryIP(r); got != "" {
@@ -192,11 +197,11 @@ func TestHasher_IPParamIsBelievedOnlyFromTrustedAddresses(t *testing.T) {
 		if h.ID(r) == h.ID(req(home, "")) {
 			t.Errorf("%s: a stranger naming a home in ip= got that home's viewer id", name)
 		}
-		if c := h.NewClient(r); c.IP != "198.51.100.9" || c.From != "198.51.100.9" {
-			t.Errorf("%s: client = %+v", name, c)
+		if c := h.NewClient(r); c.IP != "198.51.100.9" || h.LimitKey(r) != "198.51.100.9" {
+			t.Errorf("%s: client = %+v, limit key %q", name, c, h.LimitKey(r))
 		}
 	}
-	h := trusting(t, "34.1.1.0/24 198.51.100.9")
+	h := trusting(t, "34.1.1.0/24", "198.51.100.9/32")
 	for _, from := range []string{"34.1.1.200", "198.51.100.9"} {
 		r := req(from, "?ip="+home)
 		if h.QueryIP(r) != home || h.RequestIP(r) != home || h.ID(r) != h.ID(req(home, "")) {
@@ -209,23 +214,8 @@ func TestHasher_IPParamIsBelievedOnlyFromTrustedAddresses(t *testing.T) {
 	if h.QueryIP(req("34.1.1.200", "?ip=10.0.0.90")) != "" {
 		t.Error("a private ip= is ignored even from a trusted address")
 	}
-	if h.TrustsIPParam(req("not-an-address", "")) {
+	if h.trustsIPParam(req("not-an-address", "")) {
 		t.Error("an unparsable connecting address is not trusted")
-	}
-}
-
-func TestParseCIDRs(t *testing.T) {
-	nets, err := ParseCIDRs(" 34.1.1.0/24,198.51.100.9  2001:db8::1 ")
-	if err != nil || len(nets) != 3 || nets[1].String() != "198.51.100.9/32" || nets[2].String() != "2001:db8::1/128" {
-		t.Fatalf("nets = %v, err = %v", nets, err)
-	}
-	if nets, err := ParseCIDRs(""); err != nil || len(nets) != 0 {
-		t.Errorf("empty list: %v, %v", nets, err)
-	}
-	for _, bad := range []string{"nope", "34.1.1.0/33", "34.1.1"} {
-		if _, err := ParseCIDRs(bad); err == nil {
-			t.Errorf("ParseCIDRs(%q) accepted", bad)
-		}
 	}
 }
 
@@ -234,14 +224,14 @@ func TestNewClient(t *testing.T) {
 	r.Header.Set("X-Real-IP", "99.178.140.144")
 	r.Header.Set("User-Agent", "Roku/DVP-15.3 (15.3.4.2402-CU)")
 	h := trusting(t, "34.1.1.0/24")
-	if c := h.NewClient(r); c.IP != "99.178.140.144" || c.UserAgent != "Roku/DVP-15.3 (15.3.4.2402-CU)" || c.From != "99.178.140.144" {
+	if c := h.NewClient(r); c.IP != "99.178.140.144" || c.UserAgent != "Roku/DVP-15.3 (15.3.4.2402-CU)" || h.LimitKey(r) != "99.178.140.144" {
 		t.Errorf("client = %+v", c)
 	}
 	r = httptest.NewRequest("GET", "/channels/live.m3u8?ip=198.51.100.7", nil)
 	r.Header.Set("X-Real-IP", "34.1.1.1")
 	r.Header.Set("User-Agent", strings.Repeat("é", 200)+"\x00")
 	c := h.NewClient(r)
-	if c.IP != "198.51.100.7" || c.From != "" {
+	if c.IP != "198.51.100.7" || h.LimitKey(r) != "" {
 		t.Errorf("a public ip parameter from a trusted address names the client, and that address is not limited: %+v", c)
 	}
 	if len(c.UserAgent) > maxUserAgentLen || !utf8.ValidString(c.UserAgent) || strings.Contains(c.UserAgent, "\x00") {
