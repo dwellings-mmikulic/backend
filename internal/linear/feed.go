@@ -102,7 +102,9 @@ func (h *Handler) feedMaster(w http.ResponseWriter, r *http.Request) {
 	}
 	noStore(w)
 	w.Header().Set("Content-Type", playlistContentType)
-	writeMaster(w, "live.m3u8?hh="+id.String())
+	v := url.Values{"hh": {id.String()}}
+	carryMusic(v, r.URL.Query())
+	writeMaster(w, "live.m3u8?"+v.Encode())
 }
 
 func (h *Handler) feedLive(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +114,7 @@ func (h *Handler) feedLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.svc.now()
-	body, airing, err := h.svc.PersonalPlaylist(r.Context(), id, now)
+	body, airing, err := h.svc.PersonalPlaylist(h.withMusic(r).Context(), id, now)
 	if err != nil {
 		h.failFeed(w, err)
 		return

@@ -187,7 +187,7 @@ func (s *Service) PersonalPlaylist(ctx context.Context, h viewer.ID, now time.Ti
 		return nil, Span{}, ErrNoContent
 	}
 	var buf bytes.Buffer
-	writePlaylist(&buf, liveWindow.trim(segs))
+	renderPlaylist(ctx, &buf, liveWindow.trim(segs))
 	return buf.Bytes(), airing, nil
 }
 

@@ -184,6 +184,16 @@ type LinearConfig struct {
 	// docs/superpowers/specs/2026-10-17-ad-breaks-design.md); 0 turns breaks
 	// off for versions built from then on.
 	AdBreakIntervalMinutes int
+	// MusicFile is an ADTS AAC file that plays as one continuous loop in
+	// place of the sound of every listing on the channels. Empty means the
+	// channels keep each listing's own sound.
+	MusicFile string
+	// MusicDefault is whether playlists carry the music when the request
+	// does not say. Off, only a request with music=1 gets it.
+	MusicDefault bool
+	// MusicPlatforms are platform paths (/channels/<platform>/…) that carry
+	// the music whatever MusicDefault is.
+	MusicPlatforms []string
 }
 
 // ViewerConfig controls pseudonymous viewer tracking on the linear channels
@@ -378,6 +388,9 @@ func Load() (*Config, error) {
 			GuideDays:              getenvInt("LINEAR_EPG_GUIDE_DAYS", 7),
 			BumperIntervalMinutes:  getenvInt("LINEAR_BUMPER_INTERVAL_MINUTES", 5),
 			AdBreakIntervalMinutes: getenvInt("LINEAR_AD_BREAK_INTERVAL_MINUTES", 10),
+			MusicFile:              os.Getenv("LINEAR_MUSIC_FILE"),
+			MusicDefault:           getenvBool("LINEAR_MUSIC_DEFAULT", false),
+			MusicPlatforms:         strings.FieldsFunc(os.Getenv("LINEAR_MUSIC_PLATFORMS"), func(r rune) bool { return r == ',' || r == ' ' }),
 		},
 		Viewer: ViewerConfig{
 			Enabled:       getenvBool("VIEWER_TRACKING_ENABLED", true),

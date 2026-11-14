@@ -25,6 +25,7 @@ import (
 	"github.com/dwellingtw/backend/internal/hls"
 	"github.com/dwellingtw/backend/internal/linear"
 	"github.com/dwellingtw/backend/internal/locationiq"
+	"github.com/dwellingtw/backend/internal/music"
 	"github.com/dwellingtw/backend/internal/photopurge"
 	"github.com/dwellingtw/backend/internal/property"
 	"github.com/dwellingtw/backend/internal/propertymap"
@@ -226,6 +227,14 @@ func startAPI(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, repo 
 		}, log)
 		h := linear.NewHandler(svc, log)
 		h.SetAds(cfg.Ads.PrerollURL, cfg.Ads.MidrollURL)
+		if cfg.Linear.MusicFile != "" {
+			if loop, err := music.Open(cfg.Linear.MusicFile); err != nil {
+				log.Error("music loop not loaded", "file", cfg.Linear.MusicFile, "error", err)
+			} else {
+				h.EnableMusic(linear.MusicOptions{Loop: loop, Default: cfg.Linear.MusicDefault, Platforms: cfg.Linear.MusicPlatforms, CDNBaseURL: cfg.BunnyCDNBaseURL})
+				log.Info("channel music enabled", "file", cfg.Linear.MusicFile, "frames", loop.Frames(), "sample_rate", loop.SampleRate(), "default", cfg.Linear.MusicDefault, "platforms", cfg.Linear.MusicPlatforms)
+			}
+		}
 		if cfg.Viewer.Enabled {
 			h.EnableViewers(viewerOptions(ctx, cfg, pool, log))
 			h.EnableFeeds(linear.FeedOptions{

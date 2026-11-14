@@ -8,6 +8,10 @@ services:
       - .env
     ports:
       - "127.0.0.1:8080:8080"   # localhost only; nginx proxies public :80
+    # The channel music loop (LINEAR_MUSIC_FILE=/music/<file>.aac). The
+    # directory may be empty: without the variable there is no channel music.
+    volumes:
+      - /opt/dwellings/music:/music:ro
     restart: unless-stopped
     # With ROLE=all this box renders too: on SIGTERM it kills its ffmpeg
     # children and hands its claims back. The 10 s default would SIGKILL it
