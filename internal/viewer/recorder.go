@@ -107,13 +107,14 @@ func NewRecorder(store Store, opts Options, log *slog.Logger) *Recorder {
 	return &Recorder{store: store, opts: opts.withDefaults(), log: log, pending: map[Heartbeat]string{}, perAddr: map[string]int{}}
 }
 
-// Record notes that id polled channel at t from c. Repeats within the same
-// minute collapse into one row. from is the address the request came from
-// ("" = not limited): a beat is dropped when that address already holds
-// MaxPendingPerAddress rows, or when the whole buffer is full (the store is
-// unreachable for a long time), rather than growing memory.
-func (r *Recorder) Record(id ID, channel string, t time.Time, c Client, from string) {
-	hb := Heartbeat{Viewer: id, Channel: channel, Minute: t.UTC().Truncate(time.Minute), Client: c}
+// Record notes that id polled channel at the given time from client.
+// Repeats within the same minute collapse into one row. from is the address
+// the request came from ("" = not limited): a beat is dropped when that
+// address already holds MaxPendingPerAddress rows, or when the whole buffer
+// is full (the store is unreachable for a long time), rather than growing
+// memory.
+func (r *Recorder) Record(id ID, channel string, at time.Time, client Client, from string) {
+	hb := Heartbeat{Viewer: id, Channel: channel, Minute: at.UTC().Truncate(time.Minute), Client: client}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.pending[hb]; ok {

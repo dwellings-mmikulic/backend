@@ -53,8 +53,8 @@ func (h *Hasher) trustsIPParam(r *http.Request) bool {
 	if ip == nil {
 		return false
 	}
-	for _, n := range h.trusted {
-		if n.Contains(ip) {
+	for _, network := range h.trusted {
+		if network.Contains(ip) {
 			return true
 		}
 	}
@@ -103,8 +103,8 @@ func SID(q url.Values) string {
 // private address is ignored: Roku fills its macro with the device's LAN
 // address (10.0.0.90), which thousands of homes share and which would hide
 // the public address the request really came from.
-func parseQueryIP(q url.Values) string {
-	return PublicIP(q.Get("ip"))
+func parseQueryIP(query url.Values) string {
+	return PublicIP(query.Get("ip"))
 }
 
 // QueryIP is the viewer address a platform passed in ip= (e.g.

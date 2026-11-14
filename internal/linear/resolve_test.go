@@ -41,8 +41,8 @@ type fakeTracker struct {
 	from  []string // the limit key of each beat
 }
 
-func (t *fakeTracker) Record(id viewer.ID, ch string, at time.Time, c viewer.Client, from string) {
-	t.beats = append(t.beats, viewer.Heartbeat{Viewer: id, Channel: ch, Minute: at, Client: c})
+func (t *fakeTracker) Record(id viewer.ID, ch string, at time.Time, client viewer.Client, from string) {
+	t.beats = append(t.beats, viewer.Heartbeat{Viewer: id, Channel: ch, Minute: at, Client: client})
 	t.from = append(t.from, from)
 }
 

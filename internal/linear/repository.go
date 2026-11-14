@@ -198,7 +198,7 @@ ON CONFLICT (channel_key, version) DO NOTHING`
 }
 
 // PurgeVersions implements Store.
-func (r *Repository) PurgeVersions(ctx context.Context, t time.Time, limit int) (int64, error) {
+func (r *Repository) PurgeVersions(ctx context.Context, before time.Time, limit int) (int64, error) {
 	const q = `
 DELETE FROM channel_lineups
  WHERE (channel_key, version) IN (
@@ -207,7 +207,7 @@ DELETE FROM channel_lineups
         WHERE c.ends_at < $1
           AND c.version < (SELECT max(version) FROM channel_lineups WHERE channel_key = c.channel_key)
         LIMIT $2)`
-	tag, err := r.pool.Exec(ctx, q, t, limit)
+	tag, err := r.pool.Exec(ctx, q, before, limit)
 	if err != nil {
 		return 0, fmt.Errorf("purge lineups: %w", err)
 	}

@@ -21,7 +21,7 @@ type Audience interface {
 
 // Tracker receives a heartbeat per live-playlist request (viewer.Recorder).
 type Tracker interface {
-	Record(id viewer.ID, channel string, t time.Time, c viewer.Client, from string)
+	Record(id viewer.ID, channel string, at time.Time, client viewer.Client, from string)
 }
 
 // ClientLog lists raw client addresses for /admin/viewers (viewer.Store).
@@ -59,9 +59,9 @@ func (h *Handler) track(r *http.Request, sc Scope, now time.Time) {
 	if h.viewers == nil || h.viewers.Tracker == nil {
 		return
 	}
-	c := h.viewers.Hasher.NewClient(r)
-	c.Platform = r.PathValue("platform") // checked by platformOnly; "" on our own routes
-	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, c, h.viewers.Hasher.LimitKey(r))
+	client := h.viewers.Hasher.NewClient(r)
+	client.Platform = r.PathValue("platform") // checked by platformOnly; "" on our own routes
+	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, client, h.viewers.Hasher.LimitKey(r))
 }
 
 // resolveResponse is the body of /channels/resolve.

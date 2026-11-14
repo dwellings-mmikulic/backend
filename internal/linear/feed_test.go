@@ -33,10 +33,10 @@ func feedMux(store Store, now time.Time) (*Service, *http.ServeMux) {
 }
 
 // feedMuxGeo is feedMux with a location lookup.
-func feedMuxGeo(store Store, now time.Time, g geo.Lookup) (*Service, *http.ServeMux) {
+func feedMuxGeo(store Store, now time.Time, lookup geo.Lookup) (*Service, *http.ServeMux) {
 	svc := testService(store, now)
 	h := NewHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	h.EnableViewers(ViewerOptions{Hasher: platformHasher("salt"), Audience: feedTestAudience{}, Geo: g, PublicBaseURL: "https://api.example.test"})
+	h.EnableViewers(ViewerOptions{Hasher: platformHasher("salt"), Audience: feedTestAudience{}, Geo: lookup, PublicBaseURL: "https://api.example.test"})
 	h.EnableFeeds(FeedOptions{MobileBaseURL: pageOrigin, QRShowSeconds: 60, QREverySeconds: 300})
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -52,9 +52,9 @@ const pageOrigin = "https://tv.example.test"
 
 // platformHasher is a Hasher that believes ip= from platformAddr.
 func platformHasher(salt string) *viewer.Hasher {
-	h := viewer.NewHasher(salt, false)
-	h.TrustIPParamFrom([]*net.IPNet{{IP: net.ParseIP(platformAddr), Mask: net.CIDRMask(32, 32)}})
-	return h
+	hasher := viewer.NewHasher(salt, false)
+	hasher.TrustIPParamFrom([]*net.IPNet{{IP: net.ParseIP(platformAddr), Mask: net.CIDRMask(32, 32)}})
+	return hasher
 }
 
 // do sends a request with no Origin header, as the TV app does.
@@ -382,10 +382,10 @@ func TestFeed_EPGDescriptionsCarryTheCustomizeURL(t *testing.T) {
 // id is all it takes to change that TV's feed. Only the mobile page may read
 // it from a browser, and only it may post a choice.
 func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
-	m := newMemStore()
-	addClips(m, katy, 1, 40)
-	addClips(m, austin, 101, 40)
-	_, mux := feedMux(m, t0)
+	memory := newMemStore()
+	addClips(memory, katy, 1, 40)
+	addClips(memory, austin, 101, 40)
+	_, mux := feedMux(memory, t0)
 	home := "203.0.113.5"
 	id := hhRe.FindStringSubmatch(do(mux, "GET", "/feed/master.m3u8", home, "").Body.String())[1]
 
@@ -422,9 +422,9 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 	if rec.Code != http.StatusForbidden || rec.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("POST from another origin: status %d, ACAO %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
 	}
-	var f struct{ Scope string }
-	_ = json.Unmarshal(do(mux, "GET", "/feed/"+id, home, "").Body.Bytes(), &f)
-	if f.Scope == "city:austin:tx" {
+	var feed struct{ Scope string }
+	_ = json.Unmarshal(do(mux, "GET", "/feed/"+id, home, "").Body.Bytes(), &feed)
+	if feed.Scope == "city:austin:tx" {
 		t.Fatal("the refused post changed the home's feed")
 	}
 	if rec := doFrom(mux, "POST", "/feed/"+id, home, pageOrigin, body); rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
@@ -465,10 +465,10 @@ func TestFeed_ExtraAllowedOrigins(t *testing.T) {
 // ip= names whose feed is served and whose views are recorded. From an
 // address that is not a platform's it must change nothing.
 func TestHandler_IPParamFromAStrangerIsIgnored(t *testing.T) {
-	m := newMemStore()
-	addClips(m, katy, 1, 40)
-	addClips(m, austin, 101, 40)
-	svc, mux := feedMux(m, t0)
+	memory := newMemStore()
+	addClips(memory, katy, 1, 40)
+	addClips(memory, austin, 101, 40)
+	svc, mux := feedMux(memory, t0)
 	home, stranger := "203.0.113.7", "198.51.100.200"
 	if rec := do(mux, "GET", "/feed/me", home, ""); rec.Code != 200 {
 		t.Fatalf("/feed/me: %d", rec.Code)
@@ -483,8 +483,8 @@ func TestHandler_IPParamFromAStrangerIsIgnored(t *testing.T) {
 	if rec.Code != 200 || rec.Body.String() != plain.Body.String() {
 		t.Fatalf("a stranger's ip= changed the playlist:\n%s\n---\n%s", rec.Body.String(), plain.Body.String())
 	}
-	if a, _ := m.Anchor(context.Background(), id, "zip:78701"); a != nil {
-		t.Fatalf("a stranger's ip= created an anchor for the home: %+v", a)
+	if anchor, _ := memory.Anchor(context.Background(), id, "zip:78701"); anchor != nil {
+		t.Fatalf("a stranger's ip= created an anchor for the home: %+v", anchor)
 	}
 	if body := do(mux, "GET", "/channels/master.m3u8?zip=78701&sid=tv-1&ip="+home, stranger, "").Body.String(); !strings.HasSuffix(body, "\nlive.m3u8?sid=tv-1&zip=78701\n") {
 		t.Errorf("master carried a stranger's ip=:\n%s", body)

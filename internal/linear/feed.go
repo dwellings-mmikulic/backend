@@ -46,8 +46,8 @@ func (o *FeedOptions) pageOrigins() map[string]bool {
 		out[scheme+"://"+host] = true
 		out[scheme+"://www."+host] = true
 	}
-	for _, a := range o.AllowedOrigins {
-		if scheme, host := originParts(a); host != "" {
+	for _, allowed := range o.AllowedOrigins {
+		if scheme, host := originParts(allowed); host != "" {
 			out[scheme+"://"+host] = true
 		}
 	}
@@ -58,20 +58,20 @@ func (o *FeedOptions) pageOrigins() map[string]bool {
 // in an Origin header: lowercase, without the scheme's default port. host
 // is "" when raw is not an http(s) URL.
 func originParts(raw string) (scheme, host string) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Hostname() == "" {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Hostname() == "" {
 		return "", ""
 	}
-	scheme = strings.ToLower(u.Scheme)
+	scheme = strings.ToLower(parsed.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return "", ""
 	}
-	host = strings.ToLower(u.Hostname())
+	host = strings.ToLower(parsed.Hostname())
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]" // an IPv6 literal
 	}
-	if p := u.Port(); p != "" && !(scheme == "https" && p == "443") && !(scheme == "http" && p == "80") {
-		host += ":" + p
+	if port := parsed.Port(); port != "" && !(scheme == "https" && port == "443") && !(scheme == "http" && port == "80") {
+		host += ":" + port
 	}
 	return scheme, host
 }
@@ -107,31 +107,31 @@ type feedCORSWriter struct {
 	done   bool
 }
 
-func (c *feedCORSWriter) fix() {
-	if c.done {
+func (writer *feedCORSWriter) fix() {
+	if writer.done {
 		return
 	}
-	c.done = true
-	hd := c.Header()
+	writer.done = true
+	hd := writer.Header()
 	hd.Del("Access-Control-Allow-Origin")
 	hd.Add("Vary", "Origin")
-	if c.origin != "" {
-		hd.Set("Access-Control-Allow-Origin", c.origin)
+	if writer.origin != "" {
+		hd.Set("Access-Control-Allow-Origin", writer.origin)
 	}
 }
 
 // Unwrap lets http.ResponseController and http.MaxBytesReader reach the
 // server's own writer.
-func (c *feedCORSWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+func (writer *feedCORSWriter) Unwrap() http.ResponseWriter { return writer.ResponseWriter }
 
-func (c *feedCORSWriter) WriteHeader(status int) {
-	c.fix()
-	c.ResponseWriter.WriteHeader(status)
+func (writer *feedCORSWriter) WriteHeader(status int) {
+	writer.fix()
+	writer.ResponseWriter.WriteHeader(status)
 }
 
-func (c *feedCORSWriter) Write(b []byte) (int, error) {
-	c.fix()
-	return c.ResponseWriter.Write(b)
+func (writer *feedCORSWriter) Write(body []byte) (int, error) {
+	writer.fix()
+	return writer.ResponseWriter.Write(body)
 }
 
 // mobilePageHost is MobileBaseURL as a viewer would type it: no scheme, no
@@ -186,10 +186,10 @@ func (h *Handler) ensure(r *http.Request, id viewer.ID) ([]Span, error) {
 	}
 	var cands []Scope
 	located := true
-	if g := h.viewers.Geo; g != nil {
+	if lookup := h.viewers.Geo; lookup != nil {
 		var loc geo.Location
 		var ok bool
-		if loc, ok, located = g.Locate(net.ParseIP(viewer.ClientIP(r))); ok {
+		if loc, ok, located = lookup.Locate(net.ParseIP(viewer.ClientIP(r))); ok {
 			cands = geoCandidates(loc)
 		}
 	}

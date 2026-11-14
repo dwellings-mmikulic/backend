@@ -102,7 +102,7 @@ func NewFreeIPAPI(base string, log *slog.Logger) *FreeIPAPI {
 
 // SetMaxPerMinute sets the request budget; 0 removes it (a paid server
 // without a rate limit). Call before use.
-func (c *FreeIPAPI) SetMaxPerMinute(n int) { c.perMinute = n }
+func (c *FreeIPAPI) SetMaxPerMinute(limit int) { c.perMinute = limit }
 
 // spendLocked takes one request from the budget, or reports that none is
 // left. c.mu must be held.
@@ -113,10 +113,10 @@ func (c *FreeIPAPI) spendLocked() bool {
 	now := c.now()
 	keep := c.sent[:0]
 	recent := 0
-	for _, t := range c.sent {
-		if now.Sub(t) < time.Minute {
-			keep = append(keep, t)
-			if now.Sub(t) < 10*time.Second {
+	for _, sentAt := range c.sent {
+		if now.Sub(sentAt) < time.Minute {
+			keep = append(keep, sentAt)
+			if now.Sub(sentAt) < 10*time.Second {
 				recent++
 			}
 		}
@@ -145,9 +145,9 @@ func (c *FreeIPAPI) Locate(ip net.IP) (Location, bool, bool) {
 	key := ip.String()
 	for {
 		c.mu.Lock()
-		if e, ok := c.entries[key]; ok && c.now().Before(e.expires) {
+		if cached, ok := c.entries[key]; ok && c.now().Before(cached.expires) {
 			c.mu.Unlock()
-			return e.loc, e.ok, e.answered
+			return cached.loc, cached.ok, cached.answered
 		}
 		if wait, ok := c.inflight[key]; ok {
 			c.mu.Unlock()
@@ -163,20 +163,20 @@ func (c *FreeIPAPI) Locate(ip net.IP) (Location, bool, bool) {
 		c.mu.Unlock()
 
 		loc, ok, err := c.fetch(key)
-		e := entry{loc: loc, ok: ok, answered: true, expires: c.now().Add(hitTTL)}
+		cached := entry{loc: loc, ok: ok, answered: true, expires: c.now().Add(hitTTL)}
 		if err != nil {
 			c.log.Warn("ip lookup failed", "error", err)
-			e = entry{expires: c.now().Add(failureTTL)}
+			cached = entry{expires: c.now().Add(failureTTL)}
 		}
 		c.mu.Lock()
 		if len(c.entries) >= maxEntries {
 			c.entries = map[string]entry{}
 		}
-		c.entries[key] = e
+		c.entries[key] = cached
 		delete(c.inflight, key)
 		c.mu.Unlock()
 		close(done)
-		return e.loc, e.ok, e.answered
+		return cached.loc, cached.ok, cached.answered
 	}
 }
 

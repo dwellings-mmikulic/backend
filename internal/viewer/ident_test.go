@@ -82,11 +82,11 @@ func TestHasher_SaltAndRotation(t *testing.T) {
 }
 
 func TestHasher_IPParam(t *testing.T) {
-	h := trusting(t, "198.51.100.1/32")
+	hasher := trusting(t, "198.51.100.1/32")
 	req := func(target, realIP string) ID {
 		r := httptest.NewRequest("GET", target, nil)
 		r.Header.Set("X-Real-IP", realIP)
-		return h.ID(r)
+		return hasher.ID(r)
 	}
 	// A platform macro such as ip={RokuIP} names the viewer when the request
 	// itself comes from a server of that platform.
@@ -164,71 +164,71 @@ func TestHasher_PrivateIPParamFallsBackToClientIP(t *testing.T) {
 func trusting(t *testing.T, cidrs ...string) *Hasher {
 	t.Helper()
 	var nets []*net.IPNet
-	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(cidr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		nets = append(nets, n)
+		nets = append(nets, network)
 	}
-	h := NewHasher("salt", false)
-	h.TrustIPParamFrom(nets)
-	return h
+	hasher := NewHasher("salt", false)
+	hasher.TrustIPParamFrom(nets)
+	return hasher
 }
 
 func TestHasher_IPParamIsBelievedOnlyFromTrustedAddresses(t *testing.T) {
 	req := func(realIP, query string) *http.Request {
-		r := httptest.NewRequest("GET", "/channels/live.m3u8"+query, nil)
-		r.Header.Set("X-Real-IP", realIP)
-		return r
+		request := httptest.NewRequest("GET", "/channels/live.m3u8"+query, nil)
+		request.Header.Set("X-Real-IP", realIP)
+		return request
 	}
 	home := "203.0.113.44"
-	for name, h := range map[string]*Hasher{
+	for name, hasher := range map[string]*Hasher{
 		"no trusted addresses": NewHasher("salt", false),
 		"another network":      trusting(t, "34.1.1.0/24", "2001:db8::/32"),
 	} {
-		r := req("198.51.100.9", "?ip="+home)
-		if got := h.QueryIP(r); got != "" {
+		request := req("198.51.100.9", "?ip="+home)
+		if got := hasher.QueryIP(request); got != "" {
 			t.Errorf("%s: QueryIP = %q, want it ignored", name, got)
 		}
-		if got := h.RequestIP(r); got != "198.51.100.9" {
+		if got := hasher.RequestIP(request); got != "198.51.100.9" {
 			t.Errorf("%s: RequestIP = %q, want the connecting address", name, got)
 		}
-		if h.ID(r) == h.ID(req(home, "")) {
+		if hasher.ID(request) == hasher.ID(req(home, "")) {
 			t.Errorf("%s: a stranger naming a home in ip= got that home's viewer id", name)
 		}
-		if c := h.NewClient(r); c.IP != "198.51.100.9" || h.LimitKey(r) != "198.51.100.9" {
-			t.Errorf("%s: client = %+v, limit key %q", name, c, h.LimitKey(r))
+		if client := hasher.NewClient(request); client.IP != "198.51.100.9" || hasher.LimitKey(request) != "198.51.100.9" {
+			t.Errorf("%s: client = %+v, limit key %q", name, client, hasher.LimitKey(request))
 		}
 	}
-	h := trusting(t, "34.1.1.0/24", "198.51.100.9/32")
+	trusted := trusting(t, "34.1.1.0/24", "198.51.100.9/32")
 	for _, from := range []string{"34.1.1.200", "198.51.100.9"} {
-		r := req(from, "?ip="+home)
-		if h.QueryIP(r) != home || h.RequestIP(r) != home || h.ID(r) != h.ID(req(home, "")) {
+		request := req(from, "?ip="+home)
+		if trusted.QueryIP(request) != home || trusted.RequestIP(request) != home || trusted.ID(request) != trusted.ID(req(home, "")) {
 			t.Errorf("ip= from trusted %s was not believed", from)
 		}
 	}
-	if h.QueryIP(req("198.51.100.10", "?ip="+home)) != "" {
+	if trusted.QueryIP(req("198.51.100.10", "?ip="+home)) != "" {
 		t.Error("a bare address in the list must trust only that address")
 	}
-	if h.QueryIP(req("34.1.1.200", "?ip=10.0.0.90")) != "" {
+	if trusted.QueryIP(req("34.1.1.200", "?ip=10.0.0.90")) != "" {
 		t.Error("a private ip= is ignored even from a trusted address")
 	}
-	if h.trustsIPParam(req("not-an-address", "")) {
+	if trusted.trustsIPParam(req("not-an-address", "")) {
 		t.Error("an unparsable connecting address is not trusted")
 	}
 }
 
 func TestHasher_LimitKeyCountsIPv6ByItsNetwork(t *testing.T) {
-	h := NewHasher("salt", false)
+	hasher := NewHasher("salt", false)
 	key := func(realIP string) string {
-		r := httptest.NewRequest("GET", "/channels/beat", nil)
-		r.Header.Set("X-Real-IP", realIP)
-		return h.LimitKey(r)
+		request := httptest.NewRequest("GET", "/channels/beat", nil)
+		request.Header.Set("X-Real-IP", realIP)
+		return hasher.LimitKey(request)
 	}
 	// Every address of one customer's /64 is one key, another /64 is another.
-	if a, b := key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff:ffff:ffff:ffff"); a != b || a != "2001:db8:1:2::/64" {
-		t.Errorf("same /64: %q and %q", a, b)
+	if first, second := key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff:ffff:ffff:ffff"); first != second || first != "2001:db8:1:2::/64" {
+		t.Errorf("same /64: %q and %q", first, second)
 	}
 	if key("2001:db8:1:3::1") == key("2001:db8:1:2::1") {
 		t.Error("different /64s share a key")
@@ -246,21 +246,21 @@ func TestHasher_LimitKeyCountsIPv6ByItsNetwork(t *testing.T) {
 }
 
 func TestNewClient(t *testing.T) {
-	r := httptest.NewRequest("GET", "/channels/live.m3u8?ip=10.0.0.90", nil)
-	r.Header.Set("X-Real-IP", "99.178.140.144")
-	r.Header.Set("User-Agent", "Roku/DVP-15.3 (15.3.4.2402-CU)")
-	h := trusting(t, "34.1.1.0/24")
-	if c := h.NewClient(r); c.IP != "99.178.140.144" || c.UserAgent != "Roku/DVP-15.3 (15.3.4.2402-CU)" || h.LimitKey(r) != "99.178.140.144" {
-		t.Errorf("client = %+v", c)
+	request := httptest.NewRequest("GET", "/channels/live.m3u8?ip=10.0.0.90", nil)
+	request.Header.Set("X-Real-IP", "99.178.140.144")
+	request.Header.Set("User-Agent", "Roku/DVP-15.3 (15.3.4.2402-CU)")
+	hasher := trusting(t, "34.1.1.0/24")
+	if client := hasher.NewClient(request); client.IP != "99.178.140.144" || client.UserAgent != "Roku/DVP-15.3 (15.3.4.2402-CU)" || hasher.LimitKey(request) != "99.178.140.144" {
+		t.Errorf("client = %+v", client)
 	}
-	r = httptest.NewRequest("GET", "/channels/live.m3u8?ip=198.51.100.7", nil)
-	r.Header.Set("X-Real-IP", "34.1.1.1")
-	r.Header.Set("User-Agent", strings.Repeat("é", 200)+"\x00")
-	c := h.NewClient(r)
-	if c.IP != "198.51.100.7" || h.LimitKey(r) != "" {
-		t.Errorf("a public ip parameter from a trusted address names the client, and that address is not limited: %+v", c)
+	request = httptest.NewRequest("GET", "/channels/live.m3u8?ip=198.51.100.7", nil)
+	request.Header.Set("X-Real-IP", "34.1.1.1")
+	request.Header.Set("User-Agent", strings.Repeat("é", 200)+"\x00")
+	client := hasher.NewClient(request)
+	if client.IP != "198.51.100.7" || hasher.LimitKey(request) != "" {
+		t.Errorf("a public ip parameter from a trusted address names the client, and that address is not limited: %+v", client)
 	}
-	if len(c.UserAgent) > maxUserAgentLen || !utf8.ValidString(c.UserAgent) || strings.Contains(c.UserAgent, "\x00") {
-		t.Errorf("user agent not sanitised: len %d", len(c.UserAgent))
+	if len(client.UserAgent) > maxUserAgentLen || !utf8.ValidString(client.UserAgent) || strings.Contains(client.UserAgent, "\x00") {
+		t.Errorf("user agent not sanitised: len %d", len(client.UserAgent))
 	}
 }

@@ -98,10 +98,10 @@ func TestRecorder_PendingCap(t *testing.T) {
 func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 	rec := NewRecorder(&fakeStore{}, Options{MaxPending: 100, MaxPendingPerAddress: 5}, nil)
 	now := time.Now()
-	for i := range 1000 {
+	for index := range 1000 {
 		// A new viewer id, a new channel and a new claimed address each time.
-		c := Client{IP: fmt.Sprintf("203.0.%d.%d", i/250, i%250)}
-		rec.Record(ID{byte(i), byte(i >> 8)}, fmt.Sprintf("zip:%05d", i), now, c, "198.51.100.9")
+		client := Client{IP: fmt.Sprintf("203.0.%d.%d", index/250, index%250)}
+		rec.Record(ID{byte(index), byte(index >> 8)}, fmt.Sprintf("zip:%05d", index), now, client, "198.51.100.9")
 	}
 	if rec.Pending() != 5 {
 		t.Fatalf("one address holds %d rows, want its limit of 5", rec.Pending())
@@ -113,8 +113,8 @@ func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 		t.Fatalf("pending = %d, want the other home's beat recorded once", rec.Pending())
 	}
 	// A platform speaking for many homes (no limit key) is not limited.
-	for i := range 20 {
-		rec.Record(ID{0xBB, byte(i)}, "us", now, Client{IP: fmt.Sprintf("192.0.2.%d", i)}, "")
+	for index := range 20 {
+		rec.Record(ID{0xBB, byte(index)}, "us", now, Client{IP: fmt.Sprintf("192.0.2.%d", index)}, "")
 	}
 	if rec.Pending() != 26 {
 		t.Fatalf("pending = %d, want 26", rec.Pending())
@@ -122,8 +122,8 @@ func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 	if err := rec.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for i := range 10 {
-		rec.Record(ID{0xCC, byte(i)}, "us", now, Client{}, "198.51.100.9")
+	for index := range 10 {
+		rec.Record(ID{0xCC, byte(index)}, "us", now, Client{}, "198.51.100.9")
 	}
 	if rec.Pending() != 5 {
 		t.Errorf("after a flush pending = %d, want the address to have its 5 back", rec.Pending())
@@ -133,8 +133,8 @@ func TestRecorder_OneAddressCannotCrowdOutTheOthers(t *testing.T) {
 func TestRecorder_FailedFlushKeepsTheAddressCount(t *testing.T) {
 	rec := NewRecorder(&fakeStore{fail: errors.New("down")}, Options{MaxPendingPerAddress: 3}, nil)
 	now := time.Now()
-	for i := range 5 {
-		rec.Record(ID{byte(i)}, "us", now, Client{}, "198.51.100.9")
+	for index := range 5 {
+		rec.Record(ID{byte(index)}, "us", now, Client{}, "198.51.100.9")
 	}
 	if err := rec.Flush(context.Background()); err == nil {
 		t.Fatal("flush should fail")

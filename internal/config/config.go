@@ -501,9 +501,9 @@ func Load() (*Config, error) {
 	if c.Viewer.FreeIPAPIMaxPerMinute < 0 || c.Viewer.MaxPendingPerAddress < 1 {
 		return nil, fmt.Errorf("FREEIPAPI_MAX_PER_MINUTE (%d) must be >= 0 and VIEWER_MAX_PENDING_PER_ADDRESS (%d) >= 1", c.Viewer.FreeIPAPIMaxPerMinute, c.Viewer.MaxPendingPerAddress)
 	}
-	for _, o := range c.Feed.AllowedOrigins {
-		if u, err := url.Parse(o); err != nil || !isHTTPURL(o) || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-			return nil, fmt.Errorf("FEED_ALLOWED_ORIGINS: %q must be an origin such as https://example.com", o)
+	for _, origin := range c.Feed.AllowedOrigins {
+		if parsed, err := url.Parse(origin); err != nil || !isHTTPURL(origin) || strings.Trim(parsed.Path, "/") != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return nil, fmt.Errorf("FEED_ALLOWED_ORIGINS: %q must be an origin such as https://example.com", origin)
 		}
 	}
 	if !isHTTPURL(c.Feed.MobileBaseURL) {
@@ -555,28 +555,28 @@ func getenvBool(key string, def bool) bool {
 
 // parseCIDRs reads a list of networks. A bare address is the network of
 // that one address.
-func parseCIDRs(s string) ([]*net.IPNet, error) {
+func parseCIDRs(list string) ([]*net.IPNet, error) {
 	var out []*net.IPNet
-	for _, f := range splitList(s) {
-		if ip := net.ParseIP(f); ip != nil {
+	for _, entry := range splitList(list) {
+		if ip := net.ParseIP(entry); ip != nil {
 			bits := 8 * net.IPv6len
 			if ip.To4() != nil {
 				bits = 8 * net.IPv4len
 			}
-			f = fmt.Sprintf("%s/%d", ip, bits)
+			entry = fmt.Sprintf("%s/%d", ip, bits)
 		}
-		_, n, err := net.ParseCIDR(f)
+		_, network, err := net.ParseCIDR(entry)
 		if err != nil {
-			return nil, fmt.Errorf("%q is not an address or network", f)
+			return nil, fmt.Errorf("%q is not an address or network", entry)
 		}
-		out = append(out, n)
+		out = append(out, network)
 	}
 	return out, nil
 }
 
 // splitList reads a comma- or space-separated list.
-func splitList(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' })
+func splitList(list string) []string {
+	return strings.FieldsFunc(list, func(char rune) bool { return char == ',' || char == ' ' })
 }
 
 func getenvInt(key string, def int) int {

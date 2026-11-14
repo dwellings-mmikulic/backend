@@ -73,12 +73,12 @@ func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates [
 	if !located {
 		sp.Source = SourcePending
 	}
-	eff, i, err := s.firstLocal(ctx, candidates)
+	eff, index, err := s.firstLocal(ctx, candidates)
 	if err != nil {
 		return nil, err
 	}
-	if i >= 0 {
-		sp.Scope, sp.Requested, sp.Source = eff.Key(), candidates[i].Key(), SourceGeo
+	if index >= 0 {
+		sp.Scope, sp.Requested, sp.Source = eff.Key(), candidates[index].Key(), SourceGeo
 	}
 	if _, err := s.store.InsertSpan(ctx, &sp); err != nil {
 		return nil, err
@@ -102,18 +102,18 @@ func isPending(spans []Span) bool {
 // with SourceGeo. When there is none the default stands and is marked so.
 func (s *Service) settlePending(ctx context.Context, pending Span, candidates []Scope, now time.Time) ([]Span, error) {
 	for {
-		_, i, err := s.firstLocal(ctx, candidates)
+		_, index, err := s.firstLocal(ctx, candidates)
 		if err != nil {
 			return nil, err
 		}
-		if i < 0 {
+		if index < 0 {
 			break
 		}
-		spans, err := s.choose(ctx, pending.Household, candidates[i], SourceGeo, now)
+		spans, err := s.choose(ctx, pending.Household, candidates[index], SourceGeo, now)
 		if !errors.Is(err, ErrUnknownArea) {
 			return spans, err
 		}
-		candidates = candidates[i+1:]
+		candidates = candidates[index+1:]
 	}
 	pending.Source = SourceDefault
 	if err := s.store.ReplaceSpan(ctx, &pending); err != nil {
@@ -125,9 +125,9 @@ func (s *Service) settlePending(ctx context.Context, pending Span, candidates []
 
 // firstLocal finds the first candidate that resolves to a channel more
 // specific than national: what it resolves to and its index, or -1.
-func (s *Service) firstLocal(ctx context.Context, candidates []Scope) (eff Scope, i int, err error) {
-	for i, c := range candidates {
-		eff, _, err := s.resolveScope(ctx, c)
+func (s *Service) firstLocal(ctx context.Context, candidates []Scope) (eff Scope, index int, err error) {
+	for index, candidate := range candidates {
+		eff, _, err := s.resolveScope(ctx, candidate)
 		if err != nil {
 			if errors.Is(err, ErrNoContent) {
 				continue
@@ -135,7 +135,7 @@ func (s *Service) firstLocal(ctx context.Context, candidates []Scope) (eff Scope
 			return Scope{}, -1, err
 		}
 		if eff != (Scope{}) {
-			return eff, i, nil
+			return eff, index, nil
 		}
 	}
 	return Scope{}, -1, nil
@@ -409,7 +409,7 @@ func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now 
 
 // choose is Choose with the new span's source given: SourceChoice for the
 // viewer's pick, SourceGeo when a pending default is settled.
-func (s *Service) choose(ctx context.Context, h viewer.ID, requested Scope, source string, now time.Time) ([]Span, error) {
+func (s *Service) choose(ctx context.Context, household viewer.ID, requested Scope, source string, now time.Time) ([]Span, error) {
 	if err := s.checkArea(ctx, requested); err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func (s *Service) choose(ctx context.Context, h viewer.ID, requested Scope, sour
 	if err != nil {
 		return nil, err
 	}
-	spans, err := s.Household(ctx, h)
+	spans, err := s.Household(ctx, household)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +449,7 @@ func (s *Service) choose(ctx context.Context, h viewer.ID, requested Scope, sour
 			return nil, err
 		}
 		if len(again) > 0 {
-			return s.choose(ctx, h, requested, source, s.now())
+			return s.choose(ctx, household, requested, source, s.now())
 		}
 		err = s.store.ReplaceSpan(ctx, sp)
 	} else {
@@ -459,6 +459,6 @@ func (s *Service) choose(ctx context.Context, h viewer.ID, requested Scope, sour
 		return nil, err
 	}
 	s.log.Info("household feed switched", "span", sp.N, "scope", sp.Scope, "requested", sp.Requested, "starts_at", sp.StartsAt)
-	s.forgetHousehold(h)
-	return s.Household(ctx, h)
+	s.forgetHousehold(household)
+	return s.Household(ctx, household)
 }

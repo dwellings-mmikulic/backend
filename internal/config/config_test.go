@@ -766,8 +766,8 @@ func TestLoad_ViewerLimitsAndTrust(t *testing.T) {
 	}
 	// A bare address is the network of that one address.
 	var nets []string
-	for _, n := range cfg.Viewer.IPParamTrusted {
-		nets = append(nets, n.String())
+	for _, network := range cfg.Viewer.IPParamTrusted {
+		nets = append(nets, network.String())
 	}
 	if got := strings.Join(nets, " "); got != "34.1.1.0/24 198.51.100.9/32 2001:db8::/32" {
 		t.Errorf("trusted networks = %s", got)

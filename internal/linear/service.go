@@ -241,20 +241,20 @@ const (
 // versions under that key, so without this the table grows with every place
 // anyone has ever named.
 func (s *Service) RunMaintenance(ctx context.Context) {
-	t := time.NewTicker(maintenanceInterval)
-	defer t.Stop()
+	ticker := time.NewTicker(maintenanceInterval)
+	defer ticker.Stop()
 	for {
-		if n, err := s.purgeVersions(ctx); err != nil {
+		if purged, err := s.purgeVersions(ctx); err != nil {
 			if ctx.Err() == nil {
-				s.log.Warn("lineup purge failed", "error", err, "rows", n)
+				s.log.Warn("lineup purge failed", "error", err, "rows", purged)
 			}
-		} else if n > 0 {
-			s.log.Info("ended lineup versions purged", "rows", n)
+		} else if purged > 0 {
+			s.log.Info("ended lineup versions purged", "rows", purged)
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-ticker.C:
 		}
 	}
 }
@@ -265,9 +265,9 @@ func (s *Service) purgeVersions(ctx context.Context) (int64, error) {
 	before := s.now().Add(-versionRetention)
 	var total int64
 	for {
-		n, err := s.store.PurgeVersions(ctx, before, purgeBatch)
-		total += n
-		if err != nil || n < purgeBatch {
+		purged, err := s.store.PurgeVersions(ctx, before, purgeBatch)
+		total += purged
+		if err != nil || purged < purgeBatch {
 			return total, err
 		}
 		select {

@@ -101,15 +101,15 @@ func (h *Handler) master(w http.ResponseWriter, r *http.Request) {
 // that is tracked, and a player given only a master URL (a third-party app)
 // would otherwise drop them. So is music=, which turns the channel music on
 // or off for one player.
-func mediaURI(sc Scope, q url.Values, ip string) string {
+func mediaURI(sc Scope, query url.Values, ip string) string {
 	v := scopeValues(sc)
-	if sid := viewer.SID(q); sid != "" {
+	if sid := viewer.SID(query); sid != "" {
 		v.Set("sid", sid)
 	}
 	if ip != "" {
 		v.Set("ip", ip)
 	}
-	carryMusic(v, q)
+	carryMusic(v, query)
 	return "live.m3u8" + encodeQuery(v)
 }
 
