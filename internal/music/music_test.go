@@ -191,6 +191,42 @@ func TestRemux_NextClipCarriesOnInTheLoop(t *testing.T) {
 	}
 }
 
+func TestRemux_WorksAtTheLimits(t *testing.T) {
+	l := openLoop(t, 1000)
+	for name, a := range map[string][2]int64{
+		"the year 2046":              {2_400_000_000_000, 0},
+		"latest start, deep in clip": {MaxStartMS, MaxElapsedMS},
+	} {
+		video := musictest.Segment(clipPTS+a[1]*90, 60, true)
+		out, err := l.Remux(video, a[0], 2000, int(a[1]))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		frames, _, _ := split(t, out)
+		if want := int(l.frameAt(a[0]+2000) - l.frameAt(a[0])); len(frames) != want {
+			t.Fatalf("%s: %d audio frames, want %d", name, len(frames), want)
+		}
+		// The first frame starts within one frame before the first picture.
+		if d := clipPTS + a[1]*90 - frames[0].pts; d < 0 || d > 2090 {
+			t.Errorf("%s: first frame is %d ticks before the first picture", name, d)
+		}
+		for k := 1; k < len(frames); k++ {
+			if d := frames[k].pts - frames[k-1].pts; d != 2089 && d != 2090 {
+				t.Fatalf("%s: timestamp step %d at frame %d", name, d, k)
+			}
+		}
+	}
+}
+
+func TestFrameTicks_MatchesThePlainProductWhereItFits(t *testing.T) {
+	l := openLoop(t, 10)
+	for _, i := range []int64{0, 1, 44099, 44100, 44101, 77_000_000_000, 100_000_000_000} {
+		if got, want := l.frameTicks(i), i*samplesPerFrame*90000/musictest.SampleRate; got != want {
+			t.Errorf("frameTicks(%d) = %d, want %d", i, got, want)
+		}
+	}
+}
+
 func TestRemux_RefusesWhatItCannotSwap(t *testing.T) {
 	l := openLoop(t, 100)
 	good := musictest.Segment(clipPTS, 30, true)
@@ -208,7 +244,10 @@ func TestRemux_RefusesWhatItCannotSwap(t *testing.T) {
 	}
 	for name, a := range map[string][3]int64{
 		"no duration":          {1000, 0, 0},
-		"duration over limit":  {1000, maxSegmentMS + 1, 0},
+		"duration over limit":  {1000, MaxSegmentMS + 1, 0},
+		"elapsed over limit":   {200_000_000_000_000, 1000, 200_000_000_000_000},
+		"start over limit":     {MaxStartMS + 1, 1000, 0},
+		"start overflows":      {9_000_000_000_000_000_000, 1000, 0},
 		"negative elapsed":     {1000, 1000, -1},
 		"elapsed before epoch": {1000, 1000, 2000},
 	} {

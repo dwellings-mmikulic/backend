@@ -221,10 +221,33 @@ func TestMusic_SegmentRoute(t *testing.T) {
 			t.Errorf("status %d, body changed: %v", rec.Code, !bytes.Equal(rec.Body.Bytes(), silent))
 		}
 	})
-	t.Run("serves the segment as it is when the timing is nonsense", func(t *testing.T) {
-		rec := get(mux, "/channels/m/5-2000-9000/hls/v1/1/x/seg-000.ts")
-		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), good) {
-			t.Errorf("status %d, body changed: %v", rec.Code, !bytes.Equal(rec.Body.Bytes(), good))
+	t.Run("refuses timings out of range before fetching anything", func(t *testing.T) {
+		asked = nil
+		for name, spec := range map[string]string{
+			"offset over one hour":           "1787659200000-2000-3600001",
+			"huge offset":                    "200000000000000-2000-200000000000000",
+			"airing time overflows":          "9000000000000000000-2000-0",
+			"offset before the epoch":        "5-2000-9000",
+			"no duration":                    "1787659200000-0-0",
+			"duration over one minute":       "1787659200000-60001-0",
+			"negative offset":                "1787659200000-2000--5",
+			"aired 11 minutes ago":           "1787658540000-2000-0",
+			"airs 11 minutes from the clock": "1787659860000-2000-0",
+		} {
+			if rec := get(mux, "/channels/m/"+spec+"/hls/v1/1/x/seg-000.ts"); rec.Code != http.StatusNotFound {
+				t.Errorf("%s: status %d, want 404", name, rec.Code)
+			}
+		}
+		if len(asked) != 0 {
+			t.Errorf("the CDN was asked for %v", asked)
+		}
+		for name, spec := range map[string]string{
+			"aired 9 minutes ago":  "1787658660000-2000-0",
+			"one hour into a clip": "1787659200000-2000-3600000",
+		} {
+			if rec := get(mux, "/channels/m/"+spec+"/hls/v1/1/x/seg-000.ts"); rec.Code != http.StatusOK {
+				t.Errorf("%s: status %d, want 200", name, rec.Code)
+			}
 		}
 	})
 	t.Run("passes a missing segment on as 404 and a CDN failure as 502", func(t *testing.T) {
@@ -238,13 +261,13 @@ func TestMusic_SegmentRoute(t *testing.T) {
 	t.Run("fetches nothing but HLS segments", func(t *testing.T) {
 		asked = nil
 		for _, path := range []string{
-			"/channels/m/1-2000-0/videos/1.mp4",
-			"/channels/m/1-2000-0/hls/v1/1/x/index.m3u8",
-			"/channels/m/1-2000-0/hls/v1/1/%2e%2e/seg-000.ts",
-			"/channels/m/1-2000-0/hls/v1/1/x/seg-000.ts%3Fa=b",
-			"/channels/m/1-2000/hls/v1/1/x/seg-000.ts",
+			"/channels/m/1787659200000-2000-0/videos/1.mp4",
+			"/channels/m/1787659200000-2000-0/hls/v1/1/x/index.m3u8",
+			"/channels/m/1787659200000-2000-0/hls/v1/1/%2e%2e/seg-000.ts",
+			"/channels/m/1787659200000-2000-0/hls/v1/1/x/seg-000.ts%3Fa=b",
+			"/channels/m/1787659200000-2000/hls/v1/1/x/seg-000.ts",
 			"/channels/m/a-b-c/hls/v1/1/x/seg-000.ts",
-			"/channels/m/1-2000-0/",
+			"/channels/m/1787659200000-2000-0/",
 		} {
 			if rec := get(mux, path); rec.Code != http.StatusNotFound {
 				t.Errorf("%s: status %d, want 404", path, rec.Code)

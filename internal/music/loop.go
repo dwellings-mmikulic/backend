@@ -93,7 +93,11 @@ func (l *Loop) frameAt(ms int64) int64 {
 // frameTicks is when frame i (not wrapped) starts, in 90 kHz ticks of wall
 // clock. It is computed from the index, so it never drifts.
 func (l *Loop) frameTicks(i int64) int64 {
-	return i * samplesPerFrame * 90000 / int64(l.sampleRate)
+	// i × 1024 × 90000 / rate, with the whole seconds taken out first: the
+	// plain product leaves int64 for wall-clock times after the year 2043.
+	const ticksPerFrame = samplesPerFrame * 90000
+	sr := int64(l.sampleRate)
+	return i/sr*ticksPerFrame + i%sr*ticksPerFrame/sr
 }
 
 // frameSize is the byte length of frame i, wrapping around the loop's end.
