@@ -271,9 +271,10 @@ player given only the master URL is still identified. Viewers are recorded once 
 channel in `viewer_heartbeats`, batched every 30 s and purged after
 `VIEWER_RETENTION_DAYS`. One connecting address can hold at most
 `VIEWER_MAX_PENDING_PER_ADDRESS` (`200`) rows between two flushes, so a
-client inventing viewers cannot crowd the others out of the buffer; a
-platform whose `ip=` is believed is not limited this way. `/channels/beat`
-answers 404 for a place that does not exist, like the playlists.
+client inventing viewers cannot crowd the others out of the buffer; an IPv6
+address counts as its /64, and a platform whose `ip=` is believed is not
+limited this way. `/channels/beat` answers 404 for a place that does not
+exist, like the playlists.
 
 The raw public client address and user agent behind the heartbeats are kept
 in `viewer_clients` (one row per ip, user agent and channel, with first and
@@ -480,12 +481,18 @@ limit, for a paid server), `VIEWER_IP_PARAM_TRUSTED_CIDRS` (empty),
 `www.`) whose scripts may read a home's feed (`/feed/me`, `/feed/<id>`):
 those answers name the caller's origin when it is allowed and none
 otherwise, and a `POST /feed/<id>` from a page on another origin is refused.
+This includes `/feed/master.m3u8`, which carries the home's feed id: a
+partner's web player that loads it from a browser must be listed.
 
 A home whose location lookup could not be made when it first connected (an
 outage, or the lookup budget spent) is served national and stored as
 `pending`; the first later request for which the lookup answers moves it to
 its area, or settles it on national. Lineup versions that ended more than
-two days ago are deleted hourly, except each channel's newest.
+two days ago are deleted hourly in batches, except each channel's newest.
+
+nginx caches an answer to a URL carrying `ip=` per caller (the
+`$dwellings_ip_param_caller` map in `deploy/nginx-dwellings.conf`), because
+that answer depends on whether the caller's `ip=` is believed.
 
 `AD_PREROLL_URL` and `AD_MIDROLL_URL` (both empty) are the VAST ad tags from
 the ad server. The backend never calls them: `/api/v1/properties`,

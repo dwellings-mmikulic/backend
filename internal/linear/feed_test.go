@@ -445,9 +445,15 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 }
 
 func TestFeed_ExtraAllowedOrigins(t *testing.T) {
-	origins := (&FeedOptions{MobileBaseURL: "https://www.dwellings.tv", AllowedOrigins: []string{"https://app.example/"}}).pageOrigins()
+	// Entries are compared in the form a browser sends: lowercase, without
+	// the default port, whatever way they were typed.
+	origins := (&FeedOptions{MobileBaseURL: "https://WWW.Dwellings.TV:443/", AllowedOrigins: []string{
+		"https://app.example/", "HTTPS://Caps.Example", "https://port.example:443", "http://dev.example:8080", "ftp://no.example", "not a url",
+	}}).pageOrigins()
 	for origin, want := range map[string]bool{
 		"https://dwellings.tv": true, "https://www.dwellings.tv": true, "https://app.example": true,
+		"https://caps.example": true, "https://port.example": true, "http://dev.example:8080": true,
+		"http://dev.example": false, "ftp://no.example": false, "https://port.example:443": false,
 		"https://dwellings.tv.evil.io": false, "http://dwellings.tv": false, "": false, "*": false,
 	} {
 		if got := origins[origin]; got != want {

@@ -219,6 +219,32 @@ func TestHasher_IPParamIsBelievedOnlyFromTrustedAddresses(t *testing.T) {
 	}
 }
 
+func TestHasher_LimitKeyCountsIPv6ByItsNetwork(t *testing.T) {
+	h := NewHasher("salt", false)
+	key := func(realIP string) string {
+		r := httptest.NewRequest("GET", "/channels/beat", nil)
+		r.Header.Set("X-Real-IP", realIP)
+		return h.LimitKey(r)
+	}
+	// Every address of one customer's /64 is one key, another /64 is another.
+	if a, b := key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff:ffff:ffff:ffff"); a != b || a != "2001:db8:1:2::/64" {
+		t.Errorf("same /64: %q and %q", a, b)
+	}
+	if key("2001:db8:1:3::1") == key("2001:db8:1:2::1") {
+		t.Error("different /64s share a key")
+	}
+	// IPv4, also when written as an IPv6-mapped address, is the address.
+	if got := key("203.0.113.5"); got != "203.0.113.5" {
+		t.Errorf("IPv4 key = %q", got)
+	}
+	if got := key("::ffff:203.0.113.5"); got != "::ffff:203.0.113.5" {
+		t.Errorf("mapped IPv4 key = %q", got)
+	}
+	if got := key("not-an-address"); got != "not-an-address" {
+		t.Errorf("unparsable key = %q", got)
+	}
+}
+
 func TestNewClient(t *testing.T) {
 	r := httptest.NewRequest("GET", "/channels/live.m3u8?ip=10.0.0.90", nil)
 	r.Header.Set("X-Real-IP", "99.178.140.144")

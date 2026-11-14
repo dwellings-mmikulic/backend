@@ -193,12 +193,17 @@ const maxUserAgentLen = 256
 
 // LimitKey is what the recorder limits r's heartbeat rows by: the address it
 // came from, or "" (no limit) for a platform whose ip= is believed, since
-// its servers speak for many homes.
+// its servers speak for many homes. An IPv6 address counts as its /64: one
+// customer holds a whole /64 and could otherwise use a new address per row.
 func (h *Hasher) LimitKey(r *http.Request) string {
 	if h.trustsIPParam(r) {
 		return ""
 	}
-	return ClientIP(r)
+	from := ClientIP(r)
+	if ip := net.ParseIP(from); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	return from
 }
 
 // NewClient is the raw client behind r: RequestIP and the User-Agent,

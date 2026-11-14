@@ -225,7 +225,7 @@ func (m *memStore) InsertVersion(_ context.Context, v *Version) (bool, error) {
 	return true, nil
 }
 
-func (m *memStore) PurgeVersions(_ context.Context, t time.Time) (int64, error) {
+func (m *memStore) PurgeVersions(_ context.Context, t time.Time, limit int) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var n int64
@@ -236,7 +236,7 @@ func (m *memStore) PurgeVersions(_ context.Context, t time.Time) (int64, error) 
 		}
 		keep := vs[:0]
 		for _, v := range vs {
-			if v.EndsAt.Before(t) && v.Version < newest {
+			if v.EndsAt.Before(t) && v.Version < newest && n < int64(limit) {
 				n++
 				continue
 			}

@@ -3,8 +3,10 @@ package linear
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -236,7 +238,7 @@ func TestPurgeVersions_KeepsWhatTheChannelsNeed(t *testing.T) {
 		return len(vs)
 	}
 	before := count(katy.Key())
-	n, err := m.PurgeVersions(ctx, now.Add(-versionRetention))
+	n, err := s.purgeVersions(ctx)
 	if err != nil || n == 0 {
 		t.Fatalf("purged %d, %v", n, err)
 	}
@@ -292,5 +294,118 @@ func TestRunMaintenance_PurgesAndStops(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunMaintenance did not stop")
+	}
+}
+
+// A settled home is not looked up again: the answer would be thrown away
+// and the lookup budget is for homes not yet placed.
+func TestFeed_KnownHomeCostsNoLookup(t *testing.T) {
+	m := newMemStore()
+	addClips(m, katy, 1, 40)
+	g := &recordingGeo{loc: geo.Location{Zip: "77494"}}
+	_, mux := feedMuxGeo(m, t0, g)
+	home := "203.0.113.5"
+	for _, path := range []string{"/feed/me", "/feed/me", "/feed/master.m3u8", "/feed/qr.png", "/channels/cineplex/live.m3u8"} {
+		if rec := do(mux, "GET", path, home, ""); rec.Code != 200 {
+			t.Fatalf("%s: status %d", path, rec.Code)
+		}
+	}
+	if len(g.asked) != 1 {
+		t.Fatalf("lookups = %v, want one, at first contact", g.asked)
+	}
+	// A pending home is asked about again until the lookup answers.
+	g.down = true
+	other := "203.0.113.6"
+	do(mux, "GET", "/feed/me", other, "")
+	do(mux, "GET", "/feed/me", other, "")
+	if len(g.asked) != 3 {
+		t.Fatalf("lookups = %v, want the pending home asked about on each request", g.asked)
+	}
+}
+
+// failingAreas is a Store whose area check cannot reach the database.
+type failingAreas struct{ Store }
+
+func (failingAreas) AreaExists(context.Context, Scope) (bool, error) {
+	return false, errors.New("database is away")
+}
+
+func TestBeat_IsKeptWhenTheAreaCheckCannotRun(t *testing.T) {
+	tr := &fakeTracker{}
+	o := trustedOpts(&fakeAudience{}, nil)
+	o.Tracker = tr
+	rec := serveViewers(t, failingAreas{newMemStore()}, o, "/channels/beat?zip=77494&sid=tv-1", "203.0.113.5")
+	if rec.Code != http.StatusNoContent || len(tr.beats) != 1 || tr.beats[0].Channel != "zip:77494" {
+		t.Fatalf("status %d, beats %+v", rec.Code, tr.beats)
+	}
+}
+
+type countingAreas struct {
+	Store
+	calls int
+}
+
+func (c *countingAreas) AreaExists(ctx context.Context, sc Scope) (bool, error) {
+	c.calls++
+	return c.Store.AreaExists(ctx, sc)
+}
+
+func TestCheckArea_RemembersBothAnswers(t *testing.T) {
+	ctx := context.Background()
+	m := newMemStore()
+	addClips(m, katy, 1, 5)
+	store := &countingAreas{Store: m}
+	now := t0
+	s := testService(store, now)
+	s.now = func() time.Time { return now }
+	unknown := Scope{Zip: "00001"}
+	for range 3 {
+		if err := s.checkArea(ctx, katy); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.checkArea(ctx, unknown); !errors.Is(err, ErrUnknownArea) {
+			t.Fatalf("unknown ZIP: %v", err)
+		}
+	}
+	if store.calls != 2 {
+		t.Fatalf("store asked %d times, want once per place", store.calls)
+	}
+	// A place that starts to exist is found within a minute.
+	m.addZip("00001")
+	now = t0.Add(unknownAreaTTL + time.Second)
+	if err := s.checkArea(ctx, unknown); err != nil {
+		t.Fatalf("a ZIP that now exists is still refused: %v", err)
+	}
+}
+
+func TestPurgeVersions_GoesThroughABacklogInBatches(t *testing.T) {
+	m := newMemStore()
+	for n := 1; n <= 2*purgeBatch+10; n++ {
+		start := t0.Add(-1000*time.Hour + time.Duration(n)*time.Minute)
+		v := Version{Key: "us", Version: n, Scope: "us", StartsAt: start, EndsAt: start.Add(time.Minute)}
+		if _, err := m.InsertVersion(context.Background(), &v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := testService(m, t0)
+	n, err := s.purgeVersions(context.Background())
+	if err != nil || n != int64(2*purgeBatch+9) {
+		t.Fatalf("purged %d, %v; want everything but the newest", n, err)
+	}
+	if vs, _ := m.ListVersions(context.Background(), "us"); len(vs) != 1 || vs[0].Version != 2*purgeBatch+10 {
+		t.Fatalf("left %d versions", len(vs))
+	}
+}
+
+func TestFeedCORSWriter_LetsTheServerWriterBeReached(t *testing.T) {
+	rec := httptest.NewRecorder()
+	var w http.ResponseWriter = &feedCORSWriter{ResponseWriter: rec}
+	u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+	if !ok || u.Unwrap() != http.ResponseWriter(rec) {
+		t.Fatal("feedCORSWriter must unwrap to the writer it wraps")
+	}
+	// The controller reaches Flush through it.
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		t.Errorf("Flush through the wrapper: %v", err)
 	}
 }

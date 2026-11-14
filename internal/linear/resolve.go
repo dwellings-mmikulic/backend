@@ -225,7 +225,10 @@ func (h *Handler) beat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.svc.checkArea(r.Context(), sc); err != nil {
+	// Only a place known not to exist is refused. When the check itself
+	// fails (the database is away) the beat is kept: the recorder buffers
+	// beats through exactly such an outage.
+	if err := h.svc.checkArea(r.Context(), sc); errors.Is(err, ErrUnknownArea) {
 		h.fail(w, sc, err)
 		return
 	}

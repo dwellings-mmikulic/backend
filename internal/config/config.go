@@ -502,7 +502,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("FREEIPAPI_MAX_PER_MINUTE (%d) must be >= 0 and VIEWER_MAX_PENDING_PER_ADDRESS (%d) >= 1", c.Viewer.FreeIPAPIMaxPerMinute, c.Viewer.MaxPendingPerAddress)
 	}
 	for _, o := range c.Feed.AllowedOrigins {
-		if u, err := url.Parse(o); err != nil || !isHTTPURL(o) || strings.Trim(u.Path, "/") != "" {
+		if u, err := url.Parse(o); err != nil || !isHTTPURL(o) || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 			return nil, fmt.Errorf("FEED_ALLOWED_ORIGINS: %q must be an origin such as https://example.com", o)
 		}
 	}

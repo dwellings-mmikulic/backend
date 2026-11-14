@@ -41,15 +41,39 @@ func (h *Handler) EnableFeeds(o FeedOptions) {
 // "www.", and the ones listed in AllowedOrigins.
 func (o *FeedOptions) pageOrigins() map[string]bool {
 	out := map[string]bool{}
-	if u, err := url.Parse(o.MobileBaseURL); err == nil && u.Host != "" {
-		host := strings.TrimPrefix(u.Host, "www.")
-		out[u.Scheme+"://"+host] = true
-		out[u.Scheme+"://www."+host] = true
+	if scheme, host := originParts(o.MobileBaseURL); host != "" {
+		host = strings.TrimPrefix(host, "www.")
+		out[scheme+"://"+host] = true
+		out[scheme+"://www."+host] = true
 	}
 	for _, a := range o.AllowedOrigins {
-		out[strings.TrimRight(a, "/")] = true
+		if scheme, host := originParts(a); host != "" {
+			out[scheme+"://"+host] = true
+		}
 	}
 	return out
+}
+
+// originParts is the scheme and host of raw the way a browser writes them
+// in an Origin header: lowercase, without the scheme's default port. host
+// is "" when raw is not an http(s) URL.
+func originParts(raw string) (scheme, host string) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return "", ""
+	}
+	scheme = strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", ""
+	}
+	host = strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]" // an IPv6 literal
+	}
+	if p := u.Port(); p != "" && !(scheme == "https" && p == "443") && !(scheme == "http" && p == "80") {
+		host += ":" + p
+	}
+	return scheme, host
 }
 
 // feedCORS wraps the feed routes that speak for the connecting home or
@@ -95,6 +119,10 @@ func (c *feedCORSWriter) fix() {
 		hd.Set("Access-Control-Allow-Origin", c.origin)
 	}
 }
+
+// Unwrap lets http.ResponseController and http.MaxBytesReader reach the
+// server's own writer.
+func (c *feedCORSWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
 
 func (c *feedCORSWriter) WriteHeader(status int) {
 	c.fix()
@@ -147,6 +175,15 @@ func (h *Handler) household(r *http.Request) viewer.ID {
 // made (an outage, the request budget spent) is passed on as such, so the
 // national default it leaves is not stored as final.
 func (h *Handler) ensure(r *http.Request, id viewer.ID) ([]Span, error) {
+	// A home that is already settled needs no lookup: the answer would be
+	// thrown away, and the lookup budget is for homes not yet placed.
+	spans, err := h.svc.Household(r.Context(), id)
+	if err == nil && !isPending(spans) {
+		return spans, nil
+	}
+	if err != nil && !errors.Is(err, ErrUnknownHousehold) {
+		return nil, err
+	}
 	var cands []Scope
 	located := true
 	if g := h.viewers.Geo; g != nil {

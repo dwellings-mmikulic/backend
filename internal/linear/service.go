@@ -84,8 +84,10 @@ type Service struct {
 	anchors    *ttlCache[anchorKey, *Anchor]
 	// areas holds the keys of places checkArea has found to exist, so a
 	// viewer's polls and heartbeats cost one lookup per place per citiesTTL.
-	// A place that does not exist is asked about every time.
-	areas *ttlCache[string, struct{}]
+	// noAreas holds the ones found not to exist, for unknownAreaTTL: short,
+	// because a place starts to exist when its first listing arrives.
+	areas   *ttlCache[string, struct{}]
+	noAreas *ttlCache[string, struct{}]
 }
 
 const (
@@ -120,6 +122,7 @@ func New(store Store, opts Options, log *slog.Logger) *Service {
 	s.households = newTTLCache[viewer.ID, []Span](householdMaxEntries, householdTTL, func() time.Time { return s.now() })
 	s.anchors = newTTLCache[anchorKey, *Anchor](householdMaxEntries, householdTTL, func() time.Time { return s.now() })
 	s.areas = newTTLCache[string, struct{}](cacheMaxEntries, citiesTTL, func() time.Time { return s.now() })
+	s.noAreas = newTTLCache[string, struct{}](cacheMaxEntries, unknownAreaTTL, func() time.Time { return s.now() })
 	return s
 }
 
@@ -225,6 +228,12 @@ const (
 	// two days leaves room to look into a report about what aired.
 	versionRetention    = 48 * time.Hour
 	maintenanceInterval = time.Hour
+	// purgeBatch is how many versions one purge statement deletes, so a
+	// backlog goes in short transactions with purgePause between them.
+	purgeBatch = 500
+	purgePause = 200 * time.Millisecond
+	// unknownAreaTTL is how long a place found not to exist is remembered.
+	unknownAreaTTL = time.Minute
 )
 
 // RunMaintenance deletes ended lineup versions on an interval until ctx is
@@ -235,9 +244,9 @@ func (s *Service) RunMaintenance(ctx context.Context) {
 	t := time.NewTicker(maintenanceInterval)
 	defer t.Stop()
 	for {
-		if n, err := s.store.PurgeVersions(ctx, s.now().Add(-versionRetention)); err != nil {
+		if n, err := s.purgeVersions(ctx); err != nil {
 			if ctx.Err() == nil {
-				s.log.Warn("lineup purge failed", "error", err)
+				s.log.Warn("lineup purge failed", "error", err, "rows", n)
 			}
 		} else if n > 0 {
 			s.log.Info("ended lineup versions purged", "rows", n)
@@ -246,6 +255,25 @@ func (s *Service) RunMaintenance(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// purgeVersions deletes the versions past versionRetention in batches and
+// returns how many went.
+func (s *Service) purgeVersions(ctx context.Context) (int64, error) {
+	before := s.now().Add(-versionRetention)
+	var total int64
+	for {
+		n, err := s.store.PurgeVersions(ctx, before, purgeBatch)
+		total += n
+		if err != nil || n < purgeBatch {
+			return total, err
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(purgePause):
 		}
 	}
 }
@@ -264,11 +292,15 @@ func (s *Service) checkArea(ctx context.Context, sc Scope) error {
 	if _, ok := s.areas.get(key); ok {
 		return nil
 	}
+	if _, ok := s.noAreas.get(key); ok {
+		return fmt.Errorf("%w: %s", ErrUnknownArea, key)
+	}
 	ok, err := s.store.AreaExists(ctx, sc)
 	if err != nil {
 		return err
 	}
 	if !ok {
+		s.noAreas.put(key, struct{}{})
 		return fmt.Errorf("%w: %s", ErrUnknownArea, key)
 	}
 	s.areas.put(key, struct{}{})

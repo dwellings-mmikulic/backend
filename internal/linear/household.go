@@ -56,7 +56,7 @@ func (s *Service) forgetHousehold(h viewer.ID) {
 func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates []Scope, located bool, now time.Time) ([]Span, error) {
 	spans, err := s.Household(ctx, h)
 	if err == nil {
-		if located && len(spans) == 1 && spans[0].Source == SourcePending {
+		if located && isPending(spans) {
 			settled, err := s.settlePending(ctx, spans[0], candidates, now)
 			if err == nil {
 				return settled, nil
@@ -87,6 +87,12 @@ func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates [
 	// row is the one every later request will see.
 	s.forgetHousehold(h)
 	return s.Household(ctx, h)
+}
+
+// isPending reports whether a household's only span is a national default
+// stored while its location could not be looked up.
+func isPending(spans []Span) bool {
+	return len(spans) == 1 && spans[0].Source == SourcePending
 }
 
 // settlePending gives a household whose only span is a pending national

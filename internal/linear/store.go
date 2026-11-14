@@ -162,9 +162,9 @@ type Store interface {
 	// InsertVersion stores v unless (key, version) already exists; ok reports
 	// whether v was stored.
 	InsertVersion(ctx context.Context, v *Version) (ok bool, err error)
-	// PurgeVersions deletes the versions that ended before t, except each
-	// channel's newest: the chain continues from it.
-	PurgeVersions(ctx context.Context, t time.Time) (int64, error)
+	// PurgeVersions deletes up to limit of the versions that ended before
+	// t, except each channel's newest: the chain continues from it.
+	PurgeVersions(ctx context.Context, t time.Time, limit int) (int64, error)
 	// ClipsByID returns the segment layout of each id: a positive id is a
 	// video_hls row, a negative one the bumper bumperID(id), marked Break
 	// when it is a slate. Entries are keyed by the id as given.

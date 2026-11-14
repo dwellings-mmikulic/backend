@@ -792,6 +792,20 @@ func TestLoad_ViewerLimitsAndTrust(t *testing.T) {
 	}
 }
 
+func TestLoad_AllowedOriginsCarryOnlySchemeAndHost(t *testing.T) {
+	minimalEnv(t)
+	for _, bad := range []string{"https://app.example?x=1", "https://app.example#top", "https://user@app.example", "app.example"} {
+		t.Setenv("FEED_ALLOWED_ORIGINS", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FEED_ALLOWED_ORIGINS") {
+			t.Errorf("%q: Load() error = %v, want one naming FEED_ALLOWED_ORIGINS", bad, err)
+		}
+	}
+	t.Setenv("FEED_ALLOWED_ORIGINS", "https://App.Example:443/")
+	if _, err := Load(); err != nil {
+		t.Errorf("an origin typed with capitals and the default port must load: %v", err)
+	}
+}
+
 func TestLoad_AdBreakIntervalDefaultsToTenMinutes(t *testing.T) {
 	minimalEnv(t)
 	t.Setenv("LINEAR_AD_BREAK_INTERVAL_MINUTES", "")

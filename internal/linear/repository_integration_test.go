@@ -424,16 +424,20 @@ func TestRepository_PurgeVersions_Integration(t *testing.T) {
 	}
 	add(idle, 1, base)
 
-	// Before version 3 ends: versions 1 and 2 of the busy channel go.
-	n, err := r.PurgeVersions(ctx, base.Add(13*time.Hour))
-	if err != nil || n != 2 {
-		t.Fatalf("first purge deleted %d, %v; want 2", n, err)
+	// Before version 3 ends: versions 1 and 2 of the busy channel go, one
+	// statement at a time when the limit is 1.
+	n, err := r.PurgeVersions(ctx, base.Add(13*time.Hour), 1)
+	if err != nil || n != 1 {
+		t.Fatalf("first purge with limit 1 deleted %d, %v; want 1", n, err)
+	}
+	if n, err = r.PurgeVersions(ctx, base.Add(13*time.Hour), 100); err != nil || n != 1 {
+		t.Fatalf("the rest of the first purge deleted %d, %v; want 1", n, err)
 	}
 	left, err := r.LatestVersions(ctx, busy, 10)
 	if err != nil || len(left) != 2 || left[0].Version != 4 || left[1].Version != 3 {
 		t.Fatalf("busy channel after the first purge: %v, %v", versionNumbers(left), err)
 	}
-	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0)); err != nil || n != 1 {
+	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0), 100); err != nil || n != 1 {
 		t.Fatalf("second purge deleted %d, %v; want 1", n, err)
 	}
 	for key, want := range map[string]int{busy: 4, idle: 1} {
@@ -442,7 +446,7 @@ func TestRepository_PurgeVersions_Integration(t *testing.T) {
 			t.Errorf("%s after the second purge: %v, %v; want only version %d", key, versionNumbers(left), err, want)
 		}
 	}
-	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0)); err != nil || n != 0 {
+	if n, err = r.PurgeVersions(ctx, base.AddDate(1, 0, 0), 100); err != nil || n != 0 {
 		t.Errorf("repeat purge deleted %d, %v", n, err)
 	}
 }
