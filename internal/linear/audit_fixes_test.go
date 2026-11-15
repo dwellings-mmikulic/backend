@@ -191,7 +191,7 @@ func TestFeed_HomeThatMetALookupOutageGetsItsAreaLater(t *testing.T) {
 	me := func() (scope, source string) {
 		var feed struct{ Scope, Source string }
 		rec := do(mux, "GET", "/feed/me", "203.0.113.5", "")
-		if rec.Code != 200 {
+		if rec.Code != http.StatusOK {
 			t.Fatalf("/feed/me: %d %s", rec.Code, rec.Body.String())
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &feed); err != nil {
@@ -306,7 +306,7 @@ func TestFeed_KnownHomeCostsNoLookup(t *testing.T) {
 	_, mux := feedMuxGeo(memory, t0, lookup)
 	home := "203.0.113.5"
 	for _, path := range []string{"/feed/me", "/feed/me", "/feed/master.m3u8", "/feed/qr.png", "/channels/cineplex/live.m3u8"} {
-		if rec := do(mux, "GET", path, home, ""); rec.Code != 200 {
+		if rec := do(mux, "GET", path, home, ""); rec.Code != http.StatusOK {
 			t.Fatalf("%s: status %d", path, rec.Code)
 		}
 	}

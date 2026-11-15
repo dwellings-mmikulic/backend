@@ -176,7 +176,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeJSONCache(w http.ResponseWriter, status int, v any, cacheControl string) {
-	if status < 400 {
+	if status < http.StatusBadRequest {
 		w.Header().Set("Cache-Control", cacheControl)
 	} else {
 		w.Header().Set("Cache-Control", "no-store")

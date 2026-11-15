@@ -88,7 +88,7 @@ func TestFeed_MasterIsPerHouseholdAndUncached(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	_, mux := feedMux(m, t0)
 	rec := do(mux, "GET", "/feed/master.m3u8", "203.0.113.5", "")
-	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Content-Type") != playlistContentType {
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Content-Type") != playlistContentType {
 		t.Fatalf("status %d headers %v body %s", rec.Code, rec.Header(), rec.Body)
 	}
 	a := hhRe.FindStringSubmatch(rec.Body.String())
@@ -108,13 +108,13 @@ func TestFeed_Live(t *testing.T) {
 	_, mux := feedMux(m, t0)
 	id := hhRe.FindStringSubmatch(do(mux, "GET", "/feed/master.m3u8", "203.0.113.5", "").Body.String())[1]
 	rec := do(mux, "GET", "/feed/live.m3u8?hh="+id, "203.0.113.5", "")
-	if rec.Code != 200 || !strings.HasPrefix(rec.Body.String(), "#EXTM3U\n") || rec.Header().Get("Cache-Control") != "public, max-age=2" {
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Body.String(), "#EXTM3U\n") || rec.Header().Get("Cache-Control") != "public, max-age=2" {
 		t.Errorf("status %d cc %q body %s", rec.Code, rec.Header().Get("Cache-Control"), rec.Body)
 	}
-	if rec := do(mux, "GET", "/feed/live.m3u8?hh="+strings.Repeat("0", 32), "203.0.113.5", ""); rec.Code != 404 {
+	if rec := do(mux, "GET", "/feed/live.m3u8?hh="+strings.Repeat("0", 32), "203.0.113.5", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown household: status %d body %s", rec.Code, rec.Body)
 	}
-	if rec := do(mux, "GET", "/feed/live.m3u8?hh=nope", "203.0.113.5", ""); rec.Code != 400 {
+	if rec := do(mux, "GET", "/feed/live.m3u8?hh=nope", "203.0.113.5", ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("malformed hh: status %d", rec.Code)
 	}
 }
@@ -124,14 +124,14 @@ func TestFeed_QR(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	_, mux := feedMux(m, t0)
 	rec := do(mux, "GET", "/feed/qr.png", "203.0.113.5", "")
-	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/png" || rec.Header().Get("Cache-Control") != "no-store" {
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("status %d headers %v", rec.Code, rec.Header())
 	}
 	img, err := png.Decode(bytes.NewReader(rec.Body.Bytes()))
 	if err != nil || img.Bounds().Dx() != 400 {
 		t.Errorf("decode: %v, width %d", err, img.Bounds().Dx())
 	}
-	if rec := do(mux, "GET", "/feed/qr.png?size=50", "203.0.113.5", ""); rec.Code != 400 {
+	if rec := do(mux, "GET", "/feed/qr.png?size=50", "203.0.113.5", ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("size 50: status %d", rec.Code)
 	}
 	// The QR's household must be the same one the master playlist uses.
@@ -153,7 +153,7 @@ func TestFeed_GetAndChoose(t *testing.T) {
 		ID, Scope, Name, Requested, Source, Live string
 	}
 	rec := doFrom(mux, "GET", "/feed/me", "203.0.113.5", pageOrigin, "")
-	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
 		t.Fatalf("status %d headers %v", rec.Code, rec.Header())
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &me)
@@ -161,41 +161,41 @@ func TestFeed_GetAndChoose(t *testing.T) {
 		t.Fatalf("me = %+v", me)
 	}
 	rec = do(mux, "GET", "/feed/"+me.ID, "198.51.100.1", "") // any IP may read by id
-	if rec.Code != 200 {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("get by id: %d", rec.Code)
 	}
 
 	rec = do(mux, "POST", "/feed/"+me.ID, "203.0.113.5", `{"zip":"78701"}`)
 	var after struct{ Scope, Requested, Source string }
 	_ = json.Unmarshal(rec.Body.Bytes(), &after)
-	if rec.Code != 200 || after.Scope != "zip:78701" || after.Source != SourceChoice {
+	if rec.Code != http.StatusOK || after.Scope != "zip:78701" || after.Source != SourceChoice {
 		t.Fatalf("choose: %d %s", rec.Code, rec.Body)
 	}
 	rec = do(mux, "POST", "/feed/"+me.ID, "203.0.113.5", `{"zip":"77777"}`)
 	_ = json.Unmarshal(rec.Body.Bytes(), &after)
-	if rec.Code != 200 || after.Scope != "us" || after.Requested != "zip:77777" {
+	if rec.Code != http.StatusOK || after.Scope != "us" || after.Requested != "zip:77777" {
 		t.Errorf("thin zip must fall back and keep requested: %d %s", rec.Code, rec.Body)
 	}
 	for body, want := range map[string]int{
-		`{"zip":"12345"}`: 404, // unknown area
-		`{"zip":"1234"}`:  400,
-		`{"city":"Katy"}`: 400, // city without state
-		`not json`:        400,
-		`{"zip":"` + strings.Repeat("7", 2000) + `"}`: 400, // over 1 KB
-		`{}`: 200, // national: a valid choice
+		`{"zip":"12345"}`: http.StatusNotFound, // unknown area
+		`{"zip":"1234"}`:  http.StatusBadRequest,
+		`{"city":"Katy"}`: http.StatusBadRequest, // city without state
+		`not json`:        http.StatusBadRequest,
+		`{"zip":"` + strings.Repeat("7", 2000) + `"}`: http.StatusBadRequest, // over 1 KB
+		`{}`: http.StatusOK, // national: a valid choice
 	} {
 		if rec := do(mux, "POST", "/feed/"+me.ID, "203.0.113.5", body); rec.Code != want {
 			t.Errorf("POST %.40s: status %d, want %d (%s)", body, rec.Code, want, rec.Body)
 		}
 	}
-	if rec := do(mux, "POST", "/feed/"+strings.Repeat("0", 32), "203.0.113.5", `{"zip":"78701"}`); rec.Code != 404 {
+	if rec := do(mux, "POST", "/feed/"+strings.Repeat("0", 32), "203.0.113.5", `{"zip":"78701"}`); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown household: %d", rec.Code)
 	}
-	if rec := do(mux, "GET", "/feed/zz", "203.0.113.5", ""); rec.Code != 400 {
+	if rec := do(mux, "GET", "/feed/zz", "203.0.113.5", ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("malformed id: %d", rec.Code)
 	}
 	rec = do(mux, "OPTIONS", "/feed/"+me.ID, "203.0.113.5", "")
-	if rec.Code != 204 || !strings.Contains(rec.Header().Get("Access-Control-Allow-Methods"), "POST") || rec.Header().Get("Access-Control-Allow-Headers") != "Content-Type" {
+	if rec.Code != http.StatusNoContent || !strings.Contains(rec.Header().Get("Access-Control-Allow-Methods"), "POST") || rec.Header().Get("Access-Control-Allow-Headers") != "Content-Type" {
 		t.Errorf("preflight: %d %v", rec.Code, rec.Header())
 	}
 }
@@ -212,10 +212,10 @@ func TestFeed_ErrorsCarryCORS(t *testing.T) {
 		method, path, body string
 		want               int
 	}{
-		{"GET", "/feed/live.m3u8?hh=" + strings.Repeat("0", 32), "", 404},
-		{"GET", "/feed/" + strings.Repeat("0", 32), "", 404},
-		{"POST", "/feed/" + id, `{"zip":"12345"}`, 404},
-		{"POST", "/feed/" + id, `{"zip":"1234"}`, 400},
+		{"GET", "/feed/live.m3u8?hh=" + strings.Repeat("0", 32), "", http.StatusNotFound},
+		{"GET", "/feed/" + strings.Repeat("0", 32), "", http.StatusNotFound},
+		{"POST", "/feed/" + id, `{"zip":"12345"}`, http.StatusNotFound},
+		{"POST", "/feed/" + id, `{"zip":"1234"}`, http.StatusBadRequest},
 	} {
 		rec := doFrom(mux, c.method, c.path, "203.0.113.5", pageOrigin, c.body)
 		// The personal playlist is public to whoever holds its id, like the
@@ -236,7 +236,7 @@ func TestFeed_ChoiceBodyTooLargeNamesTheProblem(t *testing.T) {
 	_, mux := feedMux(m, t0)
 	id := hhRe.FindStringSubmatch(do(mux, "GET", "/feed/master.m3u8", "203.0.113.5", "").Body.String())[1]
 	rec := do(mux, "POST", "/feed/"+id, "203.0.113.5", `{"zip":"`+strings.Repeat("7", 2000)+`"}`)
-	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "1 KB") {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "1 KB") {
 		t.Errorf("status %d body %s", rec.Code, rec.Body)
 	}
 }
@@ -269,7 +269,7 @@ func TestFeed_Areas(t *testing.T) {
 		City, State, Name string
 		Clips             int
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &areas); err != nil || rec.Code != 200 {
+	if err := json.Unmarshal(rec.Body.Bytes(), &areas); err != nil || rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	if len(areas) != 1 || areas[0].Name != "Katy, TX" || areas[0].Clips != 40 || areas[0].City != "katy" {
@@ -293,7 +293,7 @@ func TestFeed_ResolveAdvertisesFeedAndQR(t *testing.T) {
 			EverySeconds int `json:"every_seconds"`
 		}
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || rec.Code != 200 {
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	if res.Feed != "https://api.example.test/feed/master.m3u8" || res.QR.URL != "https://api.example.test/feed/qr.png" || res.QR.ShowSeconds != 60 || res.QR.EverySeconds != 300 {
@@ -303,7 +303,7 @@ func TestFeed_ResolveAdvertisesFeedAndQR(t *testing.T) {
 
 func TestFeed_NotMountedWithoutEnableFeeds(t *testing.T) {
 	rec := serve(t, newMemStore(), t0, "/feed/master.m3u8")
-	if rec.Code != 404 {
+	if rec.Code != http.StatusNotFound {
 		t.Errorf("status %d", rec.Code)
 	}
 }
@@ -313,7 +313,7 @@ func TestFeed_TVPage(t *testing.T) {
 	for _, p := range []string{"/tv/", "/tv/" + strings.Repeat("a", 32)} {
 		rec := do(mux, "GET", p, "203.0.113.5", "")
 		body := rec.Body.String()
-		if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+		if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
 			t.Errorf("%s: %d %q", p, rec.Code, rec.Header().Get("Content-Type"))
 		}
 		if !strings.Contains(body, `"https://api.example.test"`) || strings.Contains(body, "__API_BASE__") {
@@ -358,7 +358,7 @@ func TestFeed_EPGDescriptionsCarryTheCustomizeURL(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	_, mux := feedMux(m, t0)
 	rec := do(mux, "GET", "/channels/epg.json?zip=77494", "203.0.113.5", "")
-	if rec.Code != 200 {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	var e EPG
@@ -400,7 +400,7 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 			"":                                "",
 		} {
 			rec := doFrom(mux, "GET", path, home, origin, "")
-			if rec.Code != 200 {
+			if rec.Code != http.StatusOK {
 				t.Fatalf("GET %s from %q: status %d", path, origin, rec.Code)
 			}
 			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != want {
@@ -427,16 +427,16 @@ func TestFeed_OnlyTheMobilePageReadsAHomesFeedFromABrowser(t *testing.T) {
 	if feed.Scope == "city:austin:tx" {
 		t.Fatal("the refused post changed the home's feed")
 	}
-	if rec := doFrom(mux, "POST", "/feed/"+id, home, pageOrigin, body); rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
+	if rec := doFrom(mux, "POST", "/feed/"+id, home, pageOrigin, body); rec.Code != http.StatusOK || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin {
 		t.Errorf("POST from the page: status %d, ACAO %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
 	}
-	if rec := do(mux, "POST", "/feed/"+id, home, `{"zip":"77494"}`); rec.Code != 200 {
+	if rec := do(mux, "POST", "/feed/"+id, home, `{"zip":"77494"}`); rec.Code != http.StatusOK {
 		t.Errorf("POST without Origin: status %d", rec.Code)
 	}
-	if rec := doFrom(mux, "POST", "/feed/"+id, home, "http://example.com", body); rec.Code != 200 {
+	if rec := doFrom(mux, "POST", "/feed/"+id, home, "http://example.com", body); rec.Code != http.StatusOK {
 		t.Errorf("same-origin POST (httptest host is example.com): status %d", rec.Code)
 	}
-	if rec := doFrom(mux, "OPTIONS", "/feed/"+id, home, pageOrigin, ""); rec.Code != 204 || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin || rec.Header().Get("Access-Control-Allow-Methods") == "" {
+	if rec := doFrom(mux, "OPTIONS", "/feed/"+id, home, pageOrigin, ""); rec.Code != http.StatusNoContent || rec.Header().Get("Access-Control-Allow-Origin") != pageOrigin || rec.Header().Get("Access-Control-Allow-Methods") == "" {
 		t.Errorf("preflight from the page: %d %v", rec.Code, rec.Header())
 	}
 	if rec := doFrom(mux, "OPTIONS", "/feed/"+id, home, "https://evil.example", ""); rec.Header().Get("Access-Control-Allow-Origin") != "" {
@@ -470,7 +470,7 @@ func TestHandler_IPParamFromAStrangerIsIgnored(t *testing.T) {
 	addClips(memory, austin, 101, 40)
 	svc, mux := feedMux(memory, t0)
 	home, stranger := "203.0.113.7", "198.51.100.200"
-	if rec := do(mux, "GET", "/feed/me", home, ""); rec.Code != 200 {
+	if rec := do(mux, "GET", "/feed/me", home, ""); rec.Code != http.StatusOK {
 		t.Fatalf("/feed/me: %d", rec.Code)
 	}
 	id := viewer.NewHasher("salt", false).Household(home)
@@ -480,7 +480,7 @@ func TestHandler_IPParamFromAStrangerIsIgnored(t *testing.T) {
 	svc.now = func() time.Time { return t0.Add(5 * time.Minute) }
 	rec := do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+home, stranger, "")
 	plain := do(mux, "GET", "/channels/live.m3u8?zip=78701", stranger, "")
-	if rec.Code != 200 || rec.Body.String() != plain.Body.String() {
+	if rec.Code != http.StatusOK || rec.Body.String() != plain.Body.String() {
 		t.Fatalf("a stranger's ip= changed the playlist:\n%s\n---\n%s", rec.Body.String(), plain.Body.String())
 	}
 	if anchor, _ := memory.Anchor(context.Background(), id, "zip:78701"); anchor != nil {
@@ -505,20 +505,20 @@ func TestHandler_LiveWithIPFollowsTheHousehold(t *testing.T) {
 	svc.now = func() time.Time { return t0.Add(time.Minute) }
 	rec := do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "198.51.100.1", "")
 	plain := do(mux, "GET", "/channels/live.m3u8?zip=78701", "198.51.100.1", "")
-	if rec.Code != 200 || rec.Body.String() != plain.Body.String() {
+	if rec.Code != http.StatusOK || rec.Body.String() != plain.Body.String() {
 		t.Fatalf("status %d; ip= changed the channel before any household existed:\n%s\n---\n%s", rec.Code, rec.Body.String(), plain.Body.String())
 	}
 	if a, _ := m.Anchor(context.Background(), viewer.NewHasher("salt", false).Household(ip), "zip:78701"); a != nil {
 		t.Fatalf("anchor created for a household that does not exist: %+v", a)
 	}
 	// The phone (same public IP) opens the page: household created on katy.
-	if rec := do(mux, "GET", "/feed/me", ip, ""); rec.Code != 200 {
+	if rec := do(mux, "GET", "/feed/me", ip, ""); rec.Code != http.StatusOK {
 		t.Fatalf("/feed/me: %d %s", rec.Code, rec.Body.String())
 	}
 	// The platform's next poll anchors the household to the channel…
 	svc.now = func() time.Time { return t0.Add(2 * time.Minute) }
 	rec = do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "198.51.100.1", "")
-	if rec.Code != 200 {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != playlistContentType {
@@ -527,7 +527,7 @@ func TestHandler_LiveWithIPFollowsTheHousehold(t *testing.T) {
 	// …and three minutes later the channel route with ip= lists katy only.
 	svc.now = func() time.Time { return t0.Add(5 * time.Minute) }
 	rec = do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "198.51.100.1", "")
-	if rec.Code != 200 {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	for _, u := range parsePlaylist(t, rec.Body.Bytes()).urls {
@@ -549,14 +549,14 @@ func TestHandler_LiveIgnoresNonPublicIP(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	addClips(m, austin, 101, 40)
 	svc, mux := feedMux(m, t0)
-	if rec := do(mux, "GET", "/feed/me", "203.0.113.7", ""); rec.Code != 200 {
+	if rec := do(mux, "GET", "/feed/me", "203.0.113.7", ""); rec.Code != http.StatusOK {
 		t.Fatal(rec.Body.String())
 	}
 	svc.now = func() time.Time { return t0.Add(4 * time.Minute) }
 	plain := do(mux, "GET", "/channels/live.m3u8?zip=78701", "198.51.100.1", "").Body.String()
 	for _, ip := range []string{"10.0.0.5", "100.64.1.1", "127.0.0.1", "not-an-ip", ""} {
 		rec := do(mux, "GET", "/channels/live.m3u8?zip=78701&ip="+ip, "203.0.113.7", "")
-		if rec.Code != 200 || rec.Body.String() != plain {
+		if rec.Code != http.StatusOK || rec.Body.String() != plain {
 			t.Errorf("ip=%q: status %d, body differs from the plain channel", ip, rec.Code)
 		}
 	}
@@ -566,7 +566,7 @@ func TestHandler_LiveWithIPWithoutFeedsIsTheChannel(t *testing.T) {
 	m := newMemStore()
 	addClips(m, austin, 101, 40)
 	rec := serve(t, m, t0, "/channels/live.m3u8?zip=78701&ip=203.0.113.7")
-	if rec.Code != 200 {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 }

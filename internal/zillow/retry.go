@@ -80,7 +80,7 @@ func IsTransient(err error) bool {
 	}
 	var se *StatusError
 	if errors.As(err, &se) {
-		return se.Code == http.StatusTooManyRequests || se.Code >= 500
+		return se.Code == http.StatusTooManyRequests || se.Code >= http.StatusInternalServerError
 	}
 	// Everything http.Client.Do returns is a *url.Error: DNS, refused and
 	// reset connections, TLS failures, the per-request timeout. So is a URL
