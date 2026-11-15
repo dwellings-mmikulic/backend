@@ -534,6 +534,7 @@ http(s) URL fails startup.
 
 ```bash
 make build   # compile to bin/server
-make test    # run tests
+make test    # run every test, none skipped (starts a throwaway Postgres; needs docker)
+make test-quick  # go test ./... only; the database tests are skipped
 make vet     # go vet
 ```

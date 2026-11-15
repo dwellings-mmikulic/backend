@@ -1,9 +1,14 @@
-.PHONY: build test vet run up down logs tidy swagger
+.PHONY: build test test-quick vet run up down logs tidy swagger
 
 build:
 	go build -o bin/server ./cmd/server
 
+# Every test, none skipped: starts a throwaway Postgres, needs docker.
 test:
+	./scripts/test-all.sh
+
+# Only the tests that need nothing but Go; the database tests are skipped.
+test-quick:
 	go test ./...
 
 vet:
