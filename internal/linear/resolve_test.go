@@ -32,12 +32,18 @@ func (f *fakeAudience) Stats(_ context.Context, _, platform string, _ time.Time)
 
 type fakeGeo struct{ loc geo.Location }
 
-func (g fakeGeo) Locate(net.IP) (geo.Location, bool) { return g.loc, g.loc != geo.Location{} }
+func (g fakeGeo) Locate(net.IP) (geo.Location, bool, bool) {
+	return g.loc, g.loc != geo.Location{}, true
+}
 
-type fakeTracker struct{ beats []viewer.Heartbeat }
+type fakeTracker struct {
+	beats []viewer.Heartbeat
+	from  []string // the limit key of each beat
+}
 
-func (t *fakeTracker) Record(id viewer.ID, ch string, at time.Time, c viewer.Client) {
-	t.beats = append(t.beats, viewer.Heartbeat{Viewer: id, Channel: ch, Minute: at, Client: c})
+func (t *fakeTracker) Record(id viewer.ID, ch string, at time.Time, client viewer.Client, from string) {
+	t.beats = append(t.beats, viewer.Heartbeat{Viewer: id, Channel: ch, Minute: at, Client: client})
+	t.from = append(t.from, from)
 }
 
 func serveViewers(t *testing.T, store Store, o ViewerOptions, path, ip string) *httptest.ResponseRecorder {

@@ -54,6 +54,10 @@ const (
 	SourceChoice  = "choice"  // the viewer picked it on the mobile page
 	SourceGeo     = "geo"     // the IP's location
 	SourceDefault = "default" // national, nothing better known
+	// SourcePending is national because the home's location could not be
+	// looked up when it first connected. It is settled, to SourceGeo or
+	// SourceDefault, the first time the lookup answers.
+	SourcePending = "pending"
 )
 
 // City is an area the mobile page can offer.
@@ -158,6 +162,10 @@ type Store interface {
 	// InsertVersion stores v unless (key, version) already exists; ok reports
 	// whether v was stored.
 	InsertVersion(ctx context.Context, v *Version) (ok bool, err error)
+	// PurgeVersions deletes up to limit of the versions that ended before
+	// the given time, except each channel's newest: the chain continues
+	// from it.
+	PurgeVersions(ctx context.Context, before time.Time, limit int) (int64, error)
 	// ClipsByID returns the segment layout of each id: a positive id is a
 	// video_hls row, a negative one the bumper bumperID(id), marked Break
 	// when it is a slate. Entries are keyed by the id as given.

@@ -179,7 +179,7 @@ func (h *Handler) musicSegment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "video/mp2t")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(musicSegmentTTL.Seconds())))
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	_, _ = w.Write(body)
 }
 

@@ -62,9 +62,11 @@ func TestHandler_Master(t *testing.T) {
 	}
 	// Viewer parameters ride along to the media playlist, which is the
 	// request that is tracked; invalid ones (an unfilled macro) are dropped.
+	// An ip= is carried only when it is believed (see
+	// TestHandler_IPParamFromAStrangerIsIgnored); here nobody is trusted.
 	rec = serve(t, newMemStore(), t0, "/channels/master.m3u8?state=TX&ip=203.0.113.5&sid=roku-1")
-	if !strings.Contains(rec.Body.String(), "\nlive.m3u8?ip=203.0.113.5&sid=roku-1&state=tx\n") {
-		t.Errorf("master must carry sid and ip:\n%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "\nlive.m3u8?sid=roku-1&state=tx\n") {
+		t.Errorf("master must carry the sid and drop an ip= it does not believe:\n%s", rec.Body.String())
 	}
 	rec = serve(t, newMemStore(), t0, "/channels/master.m3u8?ip=%7BRokuIP%7D&sid=%3Cx%3E")
 	if !strings.Contains(rec.Body.String(), "\nlive.m3u8\n") {

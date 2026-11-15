@@ -86,7 +86,7 @@ func TestAnchoredPlaylist_SwitchesWithMonotonicCounters(t *testing.T) {
 	s := testService(m, t0)
 	hh := viewer.ID{1}
 	// The phone opened the page at t0: household defaulted to katy.
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	// The platform has been playing the austin channel for a while.
@@ -151,7 +151,7 @@ func TestAnchoredPlaylist_PendingSpanAtSwitch(t *testing.T) {
 	addClips(m, austin, 101, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	// The platform carries katy (no austin clips), so an austin segment on the
@@ -178,7 +178,7 @@ func TestAnchoredPlaylist_ReusesTheStoredAnchor(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	ch := Scope{Zip: "77494"}

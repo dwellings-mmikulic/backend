@@ -48,27 +48,37 @@ func (s *Service) forgetHousehold(h viewer.ID) {
 // see geoCandidates) that resolves to something more specific than
 // national, else national. Span 0 has zero offsets: a fresh feed's counters
 // are its channel's own.
-func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates []Scope, now time.Time) ([]Span, error) {
+//
+// located says whether the home's location lookup answered. When it did
+// not, there are no candidates and national is all that can be served, but
+// that is not a fact about the home: the span is stored as SourcePending,
+// and the first later call with located true settles it (settlePending).
+func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates []Scope, located bool, now time.Time) ([]Span, error) {
 	spans, err := s.Household(ctx, h)
 	if err == nil {
+		if located && isPending(spans) {
+			settled, err := s.settlePending(ctx, spans[0], candidates, now)
+			if err == nil {
+				return settled, nil
+			}
+			// The home keeps playing national. The next request tries again.
+			s.log.Warn("pending household not settled", "error", err)
+		}
 		return spans, nil
 	}
 	if !errors.Is(err, ErrUnknownHousehold) {
 		return nil, err
 	}
 	sp := Span{Household: h, N: 0, Scope: Scope{}.Key(), Source: SourceDefault, StartsAt: now, CreatedAt: now}
-	for _, c := range candidates {
-		eff, _, err := s.resolveScope(ctx, c)
-		if err != nil {
-			if errors.Is(err, ErrNoContent) {
-				continue
-			}
-			return nil, err
-		}
-		if eff != (Scope{}) {
-			sp.Scope, sp.Requested, sp.Source = eff.Key(), c.Key(), SourceGeo
-			break
-		}
+	if !located {
+		sp.Source = SourcePending
+	}
+	eff, index, err := s.firstLocal(ctx, candidates)
+	if err != nil {
+		return nil, err
+	}
+	if index != noCandidate {
+		sp.Scope, sp.Requested, sp.Source = eff.Key(), candidates[index].Key(), SourceGeo
 	}
 	if _, err := s.store.InsertSpan(ctx, &sp); err != nil {
 		return nil, err
@@ -77,6 +87,61 @@ func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates [
 	// row is the one every later request will see.
 	s.forgetHousehold(h)
 	return s.Household(ctx, h)
+}
+
+// isPending reports whether a household's only span is a national default
+// stored while its location could not be looked up.
+func isPending(spans []Span) bool {
+	return len(spans) == 1 && spans[0].Source == SourcePending
+}
+
+// settlePending gives a household whose only span is a pending national
+// default the channel its location calls for, now that the lookup has
+// answered: the first candidate more specific than national is switched to
+// the way a choice is (from the next segment boundary, counters continuing),
+// with SourceGeo. When there is none the default stands and is marked so.
+func (s *Service) settlePending(ctx context.Context, pending Span, candidates []Scope, now time.Time) ([]Span, error) {
+	for {
+		_, index, err := s.firstLocal(ctx, candidates)
+		if err != nil {
+			return nil, err
+		}
+		if index == noCandidate {
+			break
+		}
+		spans, err := s.choose(ctx, pending.Household, candidates[index], SourceGeo, now)
+		if !errors.Is(err, ErrUnknownArea) {
+			return spans, err
+		}
+		candidates = candidates[index+1:]
+	}
+	pending.Source = SourceDefault
+	if err := s.store.ReplaceSpan(ctx, &pending); err != nil {
+		return nil, err
+	}
+	s.forgetHousehold(pending.Household)
+	return s.Household(ctx, pending.Household)
+}
+
+// noCandidate is the index firstLocal returns when no candidate is local.
+const noCandidate = -1
+
+// firstLocal finds the first candidate that resolves to a channel more
+// specific than national: what it resolves to and its index, or noCandidate.
+func (s *Service) firstLocal(ctx context.Context, candidates []Scope) (eff Scope, index int, err error) {
+	for index, candidate := range candidates {
+		eff, _, err := s.resolveScope(ctx, candidate)
+		if err != nil {
+			if errors.Is(err, ErrNoContent) {
+				continue
+			}
+			return Scope{}, noCandidate, err
+		}
+		if eff != (Scope{}) {
+			return eff, index, nil
+		}
+	}
+	return Scope{}, noCandidate, nil
 }
 
 // Cities lists the areas with enough content for a channel of their own.
@@ -342,6 +407,12 @@ func (s *Service) replacement(ctx context.Context, latest Span, eff, requested S
 // choice made before the previous one aired a single segment replaces it
 // rather than chaining after it: there is nothing of it to splice after.
 func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now time.Time) ([]Span, error) {
+	return s.choose(ctx, h, requested, SourceChoice, now)
+}
+
+// choose is Choose with the new span's source given: SourceChoice for the
+// viewer's pick, SourceGeo when a pending default is settled.
+func (s *Service) choose(ctx context.Context, household viewer.ID, requested Scope, source string, now time.Time) ([]Span, error) {
 	if err := s.checkArea(ctx, requested); err != nil {
 		return nil, err
 	}
@@ -349,7 +420,7 @@ func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now 
 	if err != nil {
 		return nil, err
 	}
-	spans, err := s.Household(ctx, h)
+	spans, err := s.Household(ctx, household)
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +442,7 @@ func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now 
 	if err != nil {
 		return nil, err
 	}
+	sp.Source = source
 	if replace {
 		// Re-check right before writing: a poll may have listed the pending
 		// span's first segment while this request resolved scopes, and that
@@ -380,7 +452,7 @@ func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now 
 			return nil, err
 		}
 		if len(again) > 0 {
-			return s.Choose(ctx, h, requested, s.now())
+			return s.choose(ctx, household, requested, source, s.now())
 		}
 		err = s.store.ReplaceSpan(ctx, sp)
 	} else {
@@ -390,6 +462,6 @@ func (s *Service) Choose(ctx context.Context, h viewer.ID, requested Scope, now 
 		return nil, err
 	}
 	s.log.Info("household feed switched", "span", sp.N, "scope", sp.Scope, "requested", sp.Requested, "starts_at", sp.StartsAt)
-	s.forgetHousehold(h)
-	return s.Household(ctx, h)
+	s.forgetHousehold(household)
+	return s.Household(ctx, household)
 }

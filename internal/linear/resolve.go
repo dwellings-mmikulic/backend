@@ -21,7 +21,7 @@ type Audience interface {
 
 // Tracker receives a heartbeat per live-playlist request (viewer.Recorder).
 type Tracker interface {
-	Record(id viewer.ID, channel string, t time.Time, c viewer.Client)
+	Record(id viewer.ID, channel string, at time.Time, client viewer.Client, from string)
 }
 
 // ClientLog lists raw client addresses for /admin/viewers (viewer.Store).
@@ -59,9 +59,9 @@ func (h *Handler) track(r *http.Request, sc Scope, now time.Time) {
 	if h.viewers == nil || h.viewers.Tracker == nil {
 		return
 	}
-	c := viewer.NewClient(r)
-	c.Platform = r.PathValue("platform") // checked by platformOnly; "" on our own routes
-	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, c)
+	client := h.viewers.Hasher.NewClient(r)
+	client.Platform = r.PathValue("platform") // checked by platformOnly; "" on our own routes
+	h.viewers.Tracker.Record(h.viewers.Hasher.ID(r), sc.Key(), now, client, h.viewers.Hasher.LimitKey(r))
 }
 
 // resolveResponse is the body of /channels/resolve.
@@ -120,7 +120,7 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if o.Geo != nil {
-		if loc, ok := o.Geo.Locate(net.ParseIP(viewer.RequestIP(r))); ok {
+		if loc, ok, _ := o.Geo.Locate(net.ParseIP(o.Hasher.RequestIP(r))); ok {
 			// A candidate that fell all the way back to national is not a
 			// geo answer; a less specific candidate (the city when the ZIP
 			// is unknown) may still be.
@@ -168,7 +168,7 @@ func (h *Handler) writeResolve(w http.ResponseWriter, sc Scope, source string) {
 	q := scopeQuery(sc)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	res := resolveResponse{
 		Scope:  sc.Key(),
 		Name:   sc.Name(),
@@ -216,16 +216,25 @@ func scopeValues(sc Scope) url.Values {
 // beat is the viewer heartbeat for players that do not reach the origin on
 // every playlist poll (the playlists are cached at the edge). Apps call it
 // about once a minute while playing, with the same filters as the playlist
-// they are on and their device id as sid.
+// they are on and their device id as sid. Like a playlist, a beat for a
+// place that does not exist is refused: every accepted beat becomes a stored
+// row under its channel key.
 func (h *Handler) beat(w http.ResponseWriter, r *http.Request) {
 	sc, err := ParseScope(r.URL.Query())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Only a place known not to exist is refused. When the check itself
+	// fails (the database is away) the beat is kept: the recorder buffers
+	// beats through exactly such an outage.
+	if err := h.svc.checkArea(r.Context(), sc); errors.Is(err, ErrUnknownArea) {
+		h.fail(w, sc, err)
+		return
+	}
 	h.track(r, sc, h.svc.now())
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -244,7 +253,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=60")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	_ = json.NewEncoder(w).Encode(struct {
 		Scope string `json:"scope"`
 		viewer.Stats

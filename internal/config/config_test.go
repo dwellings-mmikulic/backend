@@ -743,6 +743,69 @@ func TestLoad_FeedValidation(t *testing.T) {
 	}
 }
 
+func TestLoad_ViewerLimitsAndTrust(t *testing.T) {
+	minimalEnv(t)
+	for _, key := range []string{"FREEIPAPI_MAX_PER_MINUTE", "VIEWER_IP_PARAM_TRUSTED_CIDRS", "VIEWER_MAX_PENDING_PER_ADDRESS", "FEED_ALLOWED_ORIGINS"} {
+		t.Setenv(key, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Viewer.FreeIPAPIMaxPerMinute != 45 || len(cfg.Viewer.IPParamTrusted) != 0 || cfg.Viewer.MaxPendingPerAddress != 200 || len(cfg.Feed.AllowedOrigins) != 0 {
+		t.Errorf("defaults: %+v, origins %v", cfg.Viewer, cfg.Feed.AllowedOrigins)
+	}
+	t.Setenv("FREEIPAPI_MAX_PER_MINUTE", "0")
+	t.Setenv("VIEWER_IP_PARAM_TRUSTED_CIDRS", "34.1.1.0/24, 198.51.100.9 2001:db8::/32")
+	t.Setenv("FEED_ALLOWED_ORIGINS", "https://app.example, https://b.example")
+	if cfg, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Viewer.FreeIPAPIMaxPerMinute != 0 || len(cfg.Feed.AllowedOrigins) != 2 {
+		t.Errorf("set: %+v, origins %v", cfg.Viewer, cfg.Feed.AllowedOrigins)
+	}
+	// A bare address is the network of that one address.
+	var nets []string
+	for _, network := range cfg.Viewer.IPParamTrusted {
+		nets = append(nets, network.String())
+	}
+	if got := strings.Join(nets, " "); got != "34.1.1.0/24 198.51.100.9/32 2001:db8::/32" {
+		t.Errorf("trusted networks = %s", got)
+	}
+	for _, bad := range []string{"nope", "34.1.1.0/33", "34.1.1"} {
+		if _, err := parseCIDRs(bad); err == nil {
+			t.Errorf("parseCIDRs(%q) accepted", bad)
+		}
+	}
+	for key, bad := range map[string]string{
+		"VIEWER_IP_PARAM_TRUSTED_CIDRS":  "34.1.1.0/24,not-a-network",
+		"FEED_ALLOWED_ORIGINS":           "https://app.example/path",
+		"VIEWER_MAX_PENDING_PER_ADDRESS": "0",
+		"FREEIPAPI_MAX_PER_MINUTE":       "-1",
+	} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+				t.Errorf("Load() error = %v, want one naming %s", err, key)
+			}
+		})
+	}
+}
+
+func TestLoad_AllowedOriginsCarryOnlySchemeAndHost(t *testing.T) {
+	minimalEnv(t)
+	for _, bad := range []string{"https://app.example?x=1", "https://app.example#top", "https://user@app.example", "app.example"} {
+		t.Setenv("FEED_ALLOWED_ORIGINS", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FEED_ALLOWED_ORIGINS") {
+			t.Errorf("%q: Load() error = %v, want one naming FEED_ALLOWED_ORIGINS", bad, err)
+		}
+	}
+	t.Setenv("FEED_ALLOWED_ORIGINS", "https://App.Example:443/")
+	if _, err := Load(); err != nil {
+		t.Errorf("an origin typed with capitals and the default port must load: %v", err)
+	}
+}
+
 func TestLoad_AdBreakIntervalDefaultsToTenMinutes(t *testing.T) {
 	minimalEnv(t)
 	t.Setenv("LINEAR_AD_BREAK_INTERVAL_MINUTES", "")

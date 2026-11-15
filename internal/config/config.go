@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"runtime"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/dwellingtw/backend/internal/geo"
 )
 
 // Config holds all runtime configuration, loaded from environment variables.
@@ -212,6 +215,17 @@ type ViewerConfig struct {
 	// or a paid server's ".../api"); empty disables the IP geo default in
 	// /channels/resolve and the personal feeds.
 	FreeIPAPIURL string
+	// FreeIPAPIMaxPerMinute is the most lookups sent to the Free IP API in a
+	// minute (and a sixth of it in any 10 s). The keyless tier allows 60 a
+	// minute. 0 means no limit, for a paid server.
+	FreeIPAPIMaxPerMinute int
+	// IPParamTrusted are the addresses and networks whose ip= query
+	// parameter is believed: the servers of a platform that fetches
+	// playlists for its viewers. Empty means ip= is ignored from everyone.
+	IPParamTrusted []*net.IPNet
+	// MaxPendingPerAddress is how many heartbeat rows one connecting address
+	// may hold between two flushes.
+	MaxPendingPerAddress int
 	// AdminKey protects GET /admin/viewers, the listing of raw client
 	// addresses. Empty leaves the route unmounted.
 	AdminKey string
@@ -236,6 +250,9 @@ type FeedConfig struct {
 	// QRShowSeconds / QREverySeconds are the cadence reported to the app.
 	QRShowSeconds  int
 	QREverySeconds int
+	// AllowedOrigins are page origins besides MobileBaseURL's that may read
+	// a home's feed from a browser.
+	AllowedOrigins []string
 }
 
 // SearchCriteria defines what properties the scheduler discovers each cycle.
@@ -390,7 +407,7 @@ func Load() (*Config, error) {
 			AdBreakIntervalMinutes: getenvInt("LINEAR_AD_BREAK_INTERVAL_MINUTES", 10),
 			MusicFile:              os.Getenv("LINEAR_MUSIC_FILE"),
 			MusicDefault:           getenvBool("LINEAR_MUSIC_DEFAULT", false),
-			MusicPlatforms:         strings.FieldsFunc(os.Getenv("LINEAR_MUSIC_PLATFORMS"), func(r rune) bool { return r == ',' || r == ' ' }),
+			MusicPlatforms:         splitList(os.Getenv("LINEAR_MUSIC_PLATFORMS")),
 		},
 		Viewer: ViewerConfig{
 			Enabled:       getenvBool("VIEWER_TRACKING_ENABLED", true),
@@ -399,6 +416,9 @@ func Load() (*Config, error) {
 			RetentionDays: getenvInt("VIEWER_RETENTION_DAYS", 30),
 			AdminKey:      strings.TrimSpace(getenv("VIEWER_ADMIN_KEY", "")),
 			FreeIPAPIURL:  strings.TrimSpace(getenv("FREEIPAPI_URL", "https://free.freeipapi.com/api/v1")),
+
+			FreeIPAPIMaxPerMinute: getenvInt(envFreeIPAPIMaxPerMinute, geo.DefaultMaxPerMinute),
+			MaxPendingPerAddress:  getenvInt(envMaxPendingPerAddress, defaultMaxPendingPerAddress),
 		},
 		Ads: AdsConfig{
 			PrerollURL: strings.TrimSpace(getenv("AD_PREROLL_URL", "")),
@@ -408,6 +428,7 @@ func Load() (*Config, error) {
 			MobileBaseURL:  strings.TrimRight(getenv("MOBILE_BASE_URL", "https://dwellings.tv"), "/"),
 			QRShowSeconds:  getenvInt("QR_SHOW_SECONDS", 60),
 			QREverySeconds: getenvInt("QR_EVERY_SECONDS", 300),
+			AllowedOrigins: splitList(os.Getenv(envFeedAllowedOrigins)),
 		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),
@@ -474,6 +495,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("%s must be an absolute http(s) URL, got %q", key, v)
 		}
 	}
+	if c.Viewer.IPParamTrusted, err = parseCIDRs(os.Getenv(envIPParamTrustedCIDRs)); err != nil {
+		return nil, fmt.Errorf("%s: %w", envIPParamTrustedCIDRs, err)
+	}
+	if c.Viewer.FreeIPAPIMaxPerMinute < 0 || c.Viewer.MaxPendingPerAddress < 1 {
+		return nil, fmt.Errorf("%s (%d) must be >= 0 and %s (%d) >= 1", envFreeIPAPIMaxPerMinute, c.Viewer.FreeIPAPIMaxPerMinute, envMaxPendingPerAddress, c.Viewer.MaxPendingPerAddress)
+	}
+	for _, origin := range c.Feed.AllowedOrigins {
+		if parsed, err := url.Parse(origin); err != nil || !isHTTPURL(origin) || strings.Trim(parsed.Path, "/") != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return nil, fmt.Errorf("%s: %q must be an origin such as https://example.com", envFeedAllowedOrigins, origin)
+		}
+	}
 	if !isHTTPURL(c.Feed.MobileBaseURL) {
 		return nil, fmt.Errorf("MOBILE_BASE_URL must be an absolute http(s) URL, got %q", c.Feed.MobileBaseURL)
 	}
@@ -519,6 +551,45 @@ func getenvBool(key string, def bool) bool {
 		return b
 	}
 	return def
+}
+
+const (
+	envIPParamTrustedCIDRs   = "VIEWER_IP_PARAM_TRUSTED_CIDRS"
+	envFreeIPAPIMaxPerMinute = "FREEIPAPI_MAX_PER_MINUTE"
+	envMaxPendingPerAddress  = "VIEWER_MAX_PENDING_PER_ADDRESS"
+	envFeedAllowedOrigins    = "FEED_ALLOWED_ORIGINS"
+
+	// defaultMaxPendingPerAddress is how many heartbeat rows one connecting
+	// address may hold between two flushes.
+	defaultMaxPendingPerAddress = 200
+
+	bitsPerByte = 8
+)
+
+// parseCIDRs reads a list of networks. A bare address is the network of
+// that one address.
+func parseCIDRs(list string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, entry := range splitList(list) {
+		if ip := net.ParseIP(entry); ip != nil {
+			bits := bitsPerByte * net.IPv6len
+			if ip.To4() != nil {
+				bits = bitsPerByte * net.IPv4len
+			}
+			entry = fmt.Sprintf("%s/%d", ip, bits)
+		}
+		_, network, err := net.ParseCIDR(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an address or network", entry)
+		}
+		out = append(out, network)
+	}
+	return out, nil
+}
+
+// splitList reads a comma- or space-separated list.
+func splitList(list string) []string {
+	return strings.FieldsFunc(list, func(char rune) bool { return char == ',' || char == ' ' })
 }
 
 func getenvInt(key string, def int) int {

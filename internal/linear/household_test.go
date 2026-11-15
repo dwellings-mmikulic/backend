@@ -19,7 +19,7 @@ func TestEnsureHousehold_CreatesSpan0FromFirstCandidateWithContent(t *testing.T)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
 
-	spans, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77777"}, {Zip: "77494"}}, t0)
+	spans, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77777"}, {Zip: "77494"}}, true, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestEnsureHousehold_CreatesSpan0FromFirstCandidateWithContent(t *testing.T)
 		spans[0].Source != SourceGeo || !spans[0].StartsAt.Equal(t0) || spans[0].SeqOffset != 0 || spans[0].ItemOffset != 0 {
 		t.Errorf("span 0 = %+v", spans)
 	}
-	again, err := s.EnsureHousehold(context.Background(), hh, nil, t0.Add(time.Hour))
+	again, err := s.EnsureHousehold(context.Background(), hh, nil, true, t0.Add(time.Hour))
 	if err != nil || len(again) != 1 || !again[0].StartsAt.Equal(t0) {
 		t.Errorf("second call must return the existing span: %+v, %v", again, err)
 	}
@@ -37,7 +37,7 @@ func TestEnsureHousehold_DefaultsToNational(t *testing.T) {
 	m := newMemStore()
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
-	spans, err := s.EnsureHousehold(context.Background(), viewer.ID{2}, []Scope{{State: "fl"}}, t0)
+	spans, err := s.EnsureHousehold(context.Background(), viewer.ID{2}, []Scope{{State: "fl"}}, true, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestPersonalPlaylist_MatchesChannelBeforeAnyChoice(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	now := t0.Add(90 * time.Second)
@@ -217,7 +217,7 @@ func TestChoose_SwitchesAtNextSegmentWithMonotonicCounters(t *testing.T) {
 	addClips(m, austin, 101, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	switchAt := t0.Add(61 * time.Second) // mid-segment (segments are 3 s from t0-1h)
@@ -259,7 +259,7 @@ func TestChoose_SameScopeIsANoop(t *testing.T) {
 	addClips(m, katy, 1, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	spans, err := s.Choose(context.Background(), hh, Scope{Zip: "77494"}, t0.Add(time.Minute))
@@ -274,7 +274,7 @@ func TestChoose_SecondSubmitBeforeAiringReplacesThePendingSpan(t *testing.T) {
 	addClips(m, austin, 101, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	first := t0.Add(61 * time.Second)
@@ -306,7 +306,7 @@ func TestChoose_ThinOrUnknownAreas(t *testing.T) {
 	m.addZip("77777") // exists, no listings → falls back to national
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	now := t0.Add(time.Minute)
@@ -338,7 +338,7 @@ func TestChoose_ReplaceRacesWithAPollThatListedTheFirstSegment(t *testing.T) {
 	addClips(m, austin, 101, 40)
 	s := testService(m, t0)
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	first := t0.Add(61 * time.Second) // S = t0+63s; austin's first segment is [t0+63s, t0+66s)
@@ -414,7 +414,7 @@ func TestChoose_InsideTheNewChannelsLastSegmentRollsToTheNextVersion(t *testing.
 	}
 	s := testService(m, t0.Add(-10*time.Minute))
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0.Add(-10*time.Minute)); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0.Add(-10*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	// Materialise austin's chain from t0-1h: version 19 covers
@@ -448,7 +448,7 @@ func TestPersonalPlaylist_CarriesTheChannelsBumper(t *testing.T) {
 	s := testService(m, t0)
 	s.opts.BumperInterval = 5 * time.Minute
 	hh := viewer.ID{1}
-	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, t0); err != nil {
+	if _, err := s.EnsureHousehold(context.Background(), hh, []Scope{{Zip: "77494"}}, true, t0); err != nil {
 		t.Fatal(err)
 	}
 	sawBumper := false
