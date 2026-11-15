@@ -36,19 +36,33 @@ func (h *Handler) EnableFeeds(o FeedOptions) {
 	h.feeds = &o
 }
 
+const (
+	schemeHTTP       = "http"
+	schemeHTTPS      = "https"
+	schemeSeparator  = "://"
+	defaultHTTPPort  = "80"
+	defaultHTTPSPort = "443"
+	wwwPrefix        = "www."
+
+	headerOrigin      = "Origin"
+	headerVary        = "Vary"
+	headerAllowOrigin = "Access-Control-Allow-Origin"
+	anyOrigin         = "*"
+)
+
 // pageOrigins are the origins whose pages may read the feed routes that
 // speak for the connecting home: the mobile page's own, with and without
 // "www.", and the ones listed in AllowedOrigins.
 func (o *FeedOptions) pageOrigins() map[string]bool {
 	out := map[string]bool{}
 	if scheme, host := originParts(o.MobileBaseURL); host != "" {
-		host = strings.TrimPrefix(host, "www.")
-		out[scheme+"://"+host] = true
-		out[scheme+"://www."+host] = true
+		host = strings.TrimPrefix(host, wwwPrefix)
+		out[scheme+schemeSeparator+host] = true
+		out[scheme+schemeSeparator+wwwPrefix+host] = true
 	}
 	for _, allowed := range o.AllowedOrigins {
 		if scheme, host := originParts(allowed); host != "" {
-			out[scheme+"://"+host] = true
+			out[scheme+schemeSeparator+host] = true
 		}
 	}
 	return out
@@ -63,14 +77,14 @@ func originParts(raw string) (scheme, host string) {
 		return "", ""
 	}
 	scheme = strings.ToLower(parsed.Scheme)
-	if scheme != "http" && scheme != "https" {
+	if scheme != schemeHTTP && scheme != schemeHTTPS {
 		return "", ""
 	}
 	host = strings.ToLower(parsed.Hostname())
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]" // an IPv6 literal
 	}
-	if port := parsed.Port(); port != "" && !(scheme == "https" && port == "443") && !(scheme == "http" && port == "80") {
+	if port := parsed.Port(); port != "" && !(scheme == schemeHTTPS && port == defaultHTTPSPort) && !(scheme == schemeHTTP && port == defaultHTTPPort) {
 		host += ":" + port
 	}
 	return scheme, host
@@ -84,9 +98,9 @@ func originParts(raw string) (scheme, host string) {
 // Requests without an Origin header (the TV app) are untouched.
 func (h *Handler) feedCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
+		origin := r.Header.Get(headerOrigin)
 		allowed := h.feeds.origins[origin]
-		sameOrigin := origin == "" || strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://") == r.Host
+		sameOrigin := origin == "" || withoutScheme(origin) == r.Host
 		cw := &feedCORSWriter{ResponseWriter: w}
 		if allowed {
 			cw.origin = origin
@@ -113,10 +127,10 @@ func (writer *feedCORSWriter) fix() {
 	}
 	writer.done = true
 	hd := writer.Header()
-	hd.Del("Access-Control-Allow-Origin")
-	hd.Add("Vary", "Origin")
+	hd.Del(headerAllowOrigin)
+	hd.Add(headerVary, headerOrigin)
 	if writer.origin != "" {
-		hd.Set("Access-Control-Allow-Origin", writer.origin)
+		hd.Set(headerAllowOrigin, writer.origin)
 	}
 }
 
@@ -137,9 +151,13 @@ func (writer *feedCORSWriter) Write(body []byte) (int, error) {
 // mobilePageHost is MobileBaseURL as a viewer would type it: no scheme, no
 // trailing slash ("dwellings.tv").
 func (o *FeedOptions) mobilePageHost() string {
-	host := strings.TrimSuffix(o.MobileBaseURL, "/")
-	host = strings.TrimPrefix(host, "https://")
-	return strings.TrimPrefix(host, "http://")
+	return withoutScheme(strings.TrimSuffix(o.MobileBaseURL, "/"))
+}
+
+// withoutScheme is raw with a leading "https://" or "http://" removed.
+func withoutScheme(raw string) string {
+	raw = strings.TrimPrefix(raw, schemeHTTPS+schemeSeparator)
+	return strings.TrimPrefix(raw, schemeHTTP+schemeSeparator)
 }
 
 func (h *Handler) registerFeeds(mux *http.ServeMux) {
@@ -387,7 +405,7 @@ func (h *Handler) feedAreas(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=600")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	_ = json.NewEncoder(w).Encode(out)
 }
 

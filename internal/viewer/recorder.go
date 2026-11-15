@@ -82,10 +82,14 @@ func (o Options) withDefaults() Options {
 		o.MaxPending = 100_000
 	}
 	if o.MaxPendingPerAddress <= 0 {
-		o.MaxPendingPerAddress = 200
+		o.MaxPendingPerAddress = defaultMaxPendingPerAddress
 	}
 	return o
 }
+
+// defaultMaxPendingPerAddress is the per-address heartbeat limit when the
+// options name none; the configuration uses the same default.
+const defaultMaxPendingPerAddress = 200
 
 // Recorder collects heartbeats in memory and writes them in batches. It is
 // safe for concurrent use.

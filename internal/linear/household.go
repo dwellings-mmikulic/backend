@@ -77,7 +77,7 @@ func (s *Service) EnsureHousehold(ctx context.Context, h viewer.ID, candidates [
 	if err != nil {
 		return nil, err
 	}
-	if index >= 0 {
+	if index != noCandidate {
 		sp.Scope, sp.Requested, sp.Source = eff.Key(), candidates[index].Key(), SourceGeo
 	}
 	if _, err := s.store.InsertSpan(ctx, &sp); err != nil {
@@ -106,7 +106,7 @@ func (s *Service) settlePending(ctx context.Context, pending Span, candidates []
 		if err != nil {
 			return nil, err
 		}
-		if index < 0 {
+		if index == noCandidate {
 			break
 		}
 		spans, err := s.choose(ctx, pending.Household, candidates[index], SourceGeo, now)
@@ -123,8 +123,11 @@ func (s *Service) settlePending(ctx context.Context, pending Span, candidates []
 	return s.Household(ctx, pending.Household)
 }
 
+// noCandidate is the index firstLocal returns when no candidate is local.
+const noCandidate = -1
+
 // firstLocal finds the first candidate that resolves to a channel more
-// specific than national: what it resolves to and its index, or -1.
+// specific than national: what it resolves to and its index, or noCandidate.
 func (s *Service) firstLocal(ctx context.Context, candidates []Scope) (eff Scope, index int, err error) {
 	for index, candidate := range candidates {
 		eff, _, err := s.resolveScope(ctx, candidate)
@@ -132,13 +135,13 @@ func (s *Service) firstLocal(ctx context.Context, candidates []Scope) (eff Scope
 			if errors.Is(err, ErrNoContent) {
 				continue
 			}
-			return Scope{}, -1, err
+			return Scope{}, noCandidate, err
 		}
 		if eff != (Scope{}) {
 			return eff, index, nil
 		}
 	}
-	return Scope{}, -1, nil
+	return Scope{}, noCandidate, nil
 }
 
 // Cities lists the areas with enough content for a channel of their own.

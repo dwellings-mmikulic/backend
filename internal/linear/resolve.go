@@ -168,7 +168,7 @@ func (h *Handler) writeResolve(w http.ResponseWriter, sc Scope, source string) {
 	q := scopeQuery(sc)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	res := resolveResponse{
 		Scope:  sc.Key(),
 		Name:   sc.Name(),
@@ -234,7 +234,7 @@ func (h *Handler) beat(w http.ResponseWriter, r *http.Request) {
 	}
 	h.track(r, sc, h.svc.now())
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -253,7 +253,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=60")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	_ = json.NewEncoder(w).Encode(struct {
 		Scope string `json:"scope"`
 		viewer.Stats

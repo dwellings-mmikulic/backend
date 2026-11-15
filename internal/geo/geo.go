@@ -37,6 +37,14 @@ type Lookup interface {
 // retry does not push the account over it.
 const DefaultMaxPerMinute = 45
 
+// A sixth of the minute's budget may be spent in any ten seconds, so a
+// burst cannot use the whole minute at once.
+const (
+	budgetWindow = time.Minute
+	burstWindow  = 10 * time.Second
+	burstShare   = int(budgetWindow / burstWindow)
+)
+
 // DefaultFreeIPAPIURL is the keyless tier: 10 requests per 10 s, 60 per
 // minute. A paid server is "https://<region>.freeipapi.com/api" with the
 // caller's address whitelisted.
@@ -114,15 +122,15 @@ func (c *FreeIPAPI) spendLocked() bool {
 	keep := c.sent[:0]
 	recent := 0
 	for _, sentAt := range c.sent {
-		if now.Sub(sentAt) < time.Minute {
+		if now.Sub(sentAt) < budgetWindow {
 			keep = append(keep, sentAt)
-			if now.Sub(sentAt) < 10*time.Second {
+			if now.Sub(sentAt) < burstWindow {
 				recent++
 			}
 		}
 	}
 	c.sent = keep
-	if len(c.sent) >= c.perMinute || recent >= max(1, c.perMinute/6) {
+	if len(c.sent) >= c.perMinute || recent >= max(1, c.perMinute/burstShare) {
 		return false
 	}
 	c.sent = append(c.sent, now)

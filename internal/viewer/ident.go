@@ -104,7 +104,7 @@ func SID(q url.Values) string {
 // address (10.0.0.90), which thousands of homes share and which would hide
 // the public address the request really came from.
 func parseQueryIP(query url.Values) string {
-	return PublicIP(query.Get("ip"))
+	return PublicIP(query.Get(ipParam))
 }
 
 // QueryIP is the viewer address a platform passed in ip= (e.g.
@@ -188,8 +188,17 @@ func ParseID(s string) (ID, error) {
 	return id, nil
 }
 
+// ipParam is the query parameter a platform names the viewer's address in.
+const ipParam = "ip"
+
 // maxUserAgentLen caps the stored user agent.
 const maxUserAgentLen = 256
+
+// One customer holds a whole IPv6 /64, so the heartbeat limit counts by it.
+const (
+	ipv6CustomerPrefixBits = 64
+	ipv6Bits               = 8 * net.IPv6len
+)
 
 // LimitKey is what the recorder limits r's heartbeat rows by: the address it
 // came from, or "" (no limit) for a platform whose ip= is believed, since
@@ -201,7 +210,8 @@ func (h *Hasher) LimitKey(r *http.Request) string {
 	}
 	from := ClientIP(r)
 	if ip := net.ParseIP(from); ip != nil && ip.To4() == nil {
-		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+		customerMask := net.CIDRMask(ipv6CustomerPrefixBits, ipv6Bits)
+		return (&net.IPNet{IP: ip.Mask(customerMask), Mask: customerMask}).String()
 	}
 	return from
 }

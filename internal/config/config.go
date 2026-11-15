@@ -417,8 +417,8 @@ func Load() (*Config, error) {
 			AdminKey:      strings.TrimSpace(getenv("VIEWER_ADMIN_KEY", "")),
 			FreeIPAPIURL:  strings.TrimSpace(getenv("FREEIPAPI_URL", "https://free.freeipapi.com/api/v1")),
 
-			FreeIPAPIMaxPerMinute: getenvInt("FREEIPAPI_MAX_PER_MINUTE", geo.DefaultMaxPerMinute),
-			MaxPendingPerAddress:  getenvInt("VIEWER_MAX_PENDING_PER_ADDRESS", 200),
+			FreeIPAPIMaxPerMinute: getenvInt(envFreeIPAPIMaxPerMinute, geo.DefaultMaxPerMinute),
+			MaxPendingPerAddress:  getenvInt(envMaxPendingPerAddress, defaultMaxPendingPerAddress),
 		},
 		Ads: AdsConfig{
 			PrerollURL: strings.TrimSpace(getenv("AD_PREROLL_URL", "")),
@@ -428,7 +428,7 @@ func Load() (*Config, error) {
 			MobileBaseURL:  strings.TrimRight(getenv("MOBILE_BASE_URL", "https://dwellings.tv"), "/"),
 			QRShowSeconds:  getenvInt("QR_SHOW_SECONDS", 60),
 			QREverySeconds: getenvInt("QR_EVERY_SECONDS", 300),
-			AllowedOrigins: splitList(os.Getenv("FEED_ALLOWED_ORIGINS")),
+			AllowedOrigins: splitList(os.Getenv(envFeedAllowedOrigins)),
 		},
 		PublicBaseURL: strings.TrimRight(getenv("PUBLIC_BASE_URL", ""), "/"),
 		HTTPPort:      getenv("HTTP_PORT", "8080"),
@@ -495,15 +495,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("%s must be an absolute http(s) URL, got %q", key, v)
 		}
 	}
-	if c.Viewer.IPParamTrusted, err = parseCIDRs(os.Getenv("VIEWER_IP_PARAM_TRUSTED_CIDRS")); err != nil {
-		return nil, fmt.Errorf("VIEWER_IP_PARAM_TRUSTED_CIDRS: %w", err)
+	if c.Viewer.IPParamTrusted, err = parseCIDRs(os.Getenv(envIPParamTrustedCIDRs)); err != nil {
+		return nil, fmt.Errorf("%s: %w", envIPParamTrustedCIDRs, err)
 	}
 	if c.Viewer.FreeIPAPIMaxPerMinute < 0 || c.Viewer.MaxPendingPerAddress < 1 {
-		return nil, fmt.Errorf("FREEIPAPI_MAX_PER_MINUTE (%d) must be >= 0 and VIEWER_MAX_PENDING_PER_ADDRESS (%d) >= 1", c.Viewer.FreeIPAPIMaxPerMinute, c.Viewer.MaxPendingPerAddress)
+		return nil, fmt.Errorf("%s (%d) must be >= 0 and %s (%d) >= 1", envFreeIPAPIMaxPerMinute, c.Viewer.FreeIPAPIMaxPerMinute, envMaxPendingPerAddress, c.Viewer.MaxPendingPerAddress)
 	}
 	for _, origin := range c.Feed.AllowedOrigins {
 		if parsed, err := url.Parse(origin); err != nil || !isHTTPURL(origin) || strings.Trim(parsed.Path, "/") != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
-			return nil, fmt.Errorf("FEED_ALLOWED_ORIGINS: %q must be an origin such as https://example.com", origin)
+			return nil, fmt.Errorf("%s: %q must be an origin such as https://example.com", envFeedAllowedOrigins, origin)
 		}
 	}
 	if !isHTTPURL(c.Feed.MobileBaseURL) {
@@ -553,15 +553,28 @@ func getenvBool(key string, def bool) bool {
 	return def
 }
 
+const (
+	envIPParamTrustedCIDRs   = "VIEWER_IP_PARAM_TRUSTED_CIDRS"
+	envFreeIPAPIMaxPerMinute = "FREEIPAPI_MAX_PER_MINUTE"
+	envMaxPendingPerAddress  = "VIEWER_MAX_PENDING_PER_ADDRESS"
+	envFeedAllowedOrigins    = "FEED_ALLOWED_ORIGINS"
+
+	// defaultMaxPendingPerAddress is how many heartbeat rows one connecting
+	// address may hold between two flushes.
+	defaultMaxPendingPerAddress = 200
+
+	bitsPerByte = 8
+)
+
 // parseCIDRs reads a list of networks. A bare address is the network of
 // that one address.
 func parseCIDRs(list string) ([]*net.IPNet, error) {
 	var out []*net.IPNet
 	for _, entry := range splitList(list) {
 		if ip := net.ParseIP(entry); ip != nil {
-			bits := 8 * net.IPv6len
+			bits := bitsPerByte * net.IPv6len
 			if ip.To4() != nil {
-				bits = 8 * net.IPv4len
+				bits = bitsPerByte * net.IPv4len
 			}
 			entry = fmt.Sprintf("%s/%d", ip, bits)
 		}

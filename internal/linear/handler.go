@@ -191,7 +191,7 @@ func (h *Handler) epg(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	_ = json.NewEncoder(w).Encode(e)
 }
 
@@ -212,7 +212,7 @@ func (h *Handler) epgXML(w http.ResponseWriter, r *http.Request) {
 	until := now.Add(time.Duration(h.svc.opts.GuideDays) * 24 * time.Hour)
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	_, _ = w.Write(renderXMLTV(e, now, until))
 }
 
@@ -245,7 +245,7 @@ func (h *Handler) fail(w http.ResponseWriter, sc Scope, err error) {
 func playlistHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", playlistContentType)
 	w.Header().Set("Cache-Control", "public, max-age=2")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 }
 
 // writeError answers status with {"error": msg}. The CORS header is set so a
@@ -254,7 +254,7 @@ func playlistHeaders(w http.ResponseWriter) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set(headerAllowOrigin, anyOrigin)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
